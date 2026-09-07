@@ -1,0 +1,17 @@
+# Maven build output
+**/target/
+
+# IDE metadata
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Runtime logs and local process files
+*.log
+poc/*.pid
+poc/bolt-server.log
+
+# Local repository data
+z-graph-data/
