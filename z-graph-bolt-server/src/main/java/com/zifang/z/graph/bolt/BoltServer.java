@@ -78,6 +78,12 @@ public class BoltServer {
     }
 
     public int port() {
+        if (serverChannel == null) {
+            return port;
+        }
+        if (serverChannel.localAddress() instanceof InetSocketAddress addr) {
+            return addr.getPort();
+        }
         return port;
     }
 

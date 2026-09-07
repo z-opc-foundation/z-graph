@@ -24,9 +24,21 @@ import java.util.stream.Collectors;
 public class CypherEngine {
 
     private final GraphStore store;
+    /** 可选:绑定到版本仓库,使 CALL 过程可以查询 branches/commits/head 等元数据。 */
+    private final GraphVersionStore repository;
 
     public CypherEngine(GraphStore store) {
+        this(store, null);
+    }
+
+    public CypherEngine(GraphStore store, GraphVersionStore repository) {
         this.store = store;
+        this.repository = repository;
+    }
+
+    /** 当前 CypherEngine 是否能访问版本仓库元数据(CALL db.branches / commits / head)。 */
+    public boolean hasRepository() {
+        return repository != null;
     }
 
     /**
@@ -113,6 +125,9 @@ public class CypherEngine {
         }
         if (upper.startsWith("EXPLAIN")) {
             return executeExplain(trimmed);
+        }
+        if (upper.startsWith("CALL")) {
+            return executeCall(trimmed);
         }
         if (upper.startsWith("DESCRIBE") || upper.startsWith("DESC")) {
             return executeDescribe(trimmed);
@@ -604,21 +619,22 @@ public class CypherEngine {
     }
 
     /**
-     * 变长路径匹配：{@code (a)-[*min..max]->(b)} 或 {@code (a:Label)-[:TYPE*min..max]->(b:Label)}。
+     * 变长路径匹配：{@code (a)-[*min..max]->(b)} 或 {@code (a:Label {k:v})-[:TYPE*min..max]->(b:Label)}。
      * 当前实现对每个起始节点做 BFS，记录最短路径到达的可达终点。
      */
     private List<MatchBinding> expandVariableEdgePattern(String pattern, List<MatchBinding> existing) {
         Matcher m = Pattern.compile(
-                "\\(\\s*(?<fromVar>\\w+)\\s*(?::\\s*(?<fromLabel>\\w+))?\\s*(?:\\{[^}]*\\})?\\s*\\)"
+                "\\(\\s*(?<fromVar>\\w+)\\s*(?::\\s*(?<fromLabel>\\w+))?\\s*(?:\\{(?<fromProps>[^}]*)\\})?\\s*\\)"
                         + "\\s*-\\s*\\[\\s*(?<relVar>\\w*)\\s*(?::\\s*(?<edgeType>\\w+))?\\s*\\*\\s*"
                         + "(?<minHops>\\d*)\\s*\\.\\.?\\s*(?<maxHops>\\d*)\\s*\\]"
-                        + "\\s*->\\s*\\(\\s*(?<toVar>\\w+)\\s*(?::\\s*(?<toLabel>\\w+))?\\s*(?:\\{[^}]*\\})?\\s*\\)")
+                        + "\\s*->\\s*\\(\\s*(?<toVar>\\w+)\\s*(?::\\s*(?<toLabel>\\w+))?\\s*(?:\\{(?<toProps>[^}]*)\\})?\\s*\\)")
                 .matcher(pattern);
         if (!m.find()) {
             throw new CypherException("Invalid variable-length pattern: " + pattern);
         }
         String fromVar = m.group("fromVar");
         String fromLabel = m.group("fromLabel");
+        String fromPropsStr = m.group("fromProps");
         String relVar = m.group("relVar");
         String edgeType = m.group("edgeType");
         int minHops = m.group("minHops") == null || m.group("minHops").isEmpty()
@@ -627,9 +643,12 @@ public class CypherEngine {
                 ? Math.max(minHops, 1) : Integer.parseInt(m.group("maxHops"));
         String toVar = m.group("toVar");
         String toLabel = m.group("toLabel");
+        String toPropsStr = m.group("toProps");
         if (minHops > maxHops) {
             throw new CypherException("minHops > maxHops: " + pattern);
         }
+        Map<String, Object> fromProps = parseProperties(fromPropsStr);
+        Map<String, Object> toProps = parseProperties(toPropsStr);
         List<MatchBinding> results = new ArrayList<>();
         for (MatchBinding base : existing) {
             List<Long> starts = base.variables.containsKey(fromVar)
@@ -638,6 +657,7 @@ public class CypherEngine {
             for (long startId : starts) {
                 Node startNode = store.getNode(startId);
                 if (startNode == null) continue;
+                if (!matchesProperties(startNode.getProperties(), fromProps)) continue;
                 List<long[]> paths = boundedBfs(startId, maxHops, edgeType);
                 for (long[] path : paths) {
                     if (path.length - 1 < minHops) continue;
@@ -645,6 +665,7 @@ public class CypherEngine {
                     Node endNode = store.getNode(endId);
                     if (endNode == null) continue;
                     if (toLabel != null && !endNode.hasLabel(toLabel)) continue;
+                    if (!matchesProperties(endNode.getProperties(), toProps)) continue;
                     MatchBinding copy = base.copy();
                     copy.variables.put(fromVar, startNode);
                     copy.variables.put(toVar, endNode);
@@ -656,6 +677,15 @@ public class CypherEngine {
             }
         }
         return results;
+    }
+
+    /** 简化属性等值匹配:空 properties 表示不过滤。 */
+    private static boolean matchesProperties(Map<String, Object> actual, Map<String, Object> required) {
+        if (required == null || required.isEmpty()) return true;
+        for (Map.Entry<String, Object> entry : required.entrySet()) {
+            if (!Objects.equals(actual.get(entry.getKey()), entry.getValue())) return false;
+        }
+        return true;
     }
 
     /** BFS，从 start 出发，沿 edgeType（可选）行走最多 maxHops 步，返回所有可达终点的最短路径数组。 */
@@ -740,17 +770,45 @@ public class CypherEngine {
     }
 
     private List<MatchBinding> expandEdgePattern(String pattern, List<MatchBinding> existing) {
-        // (a)-[:TYPE]->(b) 或 (a)-[r:TYPE]->(b) 或 (a)-[:TYPE {k:v}]->(b)
-        Matcher m = Pattern.compile(
-                "\\(\\s*(\\w+)\\s*\\)-\\[\\s*(\\w*)\\s*:\\s*(\\w+)\\s*(?:\\{(.+?)\\})?\\s*\\]->\\(\\s*(\\w+)\\s*\\)")
+        // 同时支持 (a:Label)-[:TYPE]->(b:Label) 和 (a:Label)<-[:TYPE]-(b:Label)。
+        // Neo4j 风格:箭头方向写在方括号外两侧,< 表示 b 指向 a。
+        // 这里统一让箭头字符落在 ]-([<>]) 之前的 [ ]- 中,确保两种写法都识别。
+        // Pattern A: "(a)<-[:TYPE]-(b)" — 左箭头在左侧
+        Matcher forward = Pattern.compile(
+                "\\(\\s*(?<fromVar>\\w+)\\s*(?::(?<fromLabel>\\w+))?\\s*\\)"
+                        + "\\s*-\\s*\\[\\s*(?<relVar>\\w*)\\s*:\\s*(?<edgeType>\\w+)\\s*(?:\\{(?<props>[^}]*)\\})?\\s*\\]"
+                        + "\\s*->\\s*\\(\\s*(?<toVar>\\w+)\\s*(?::(?<toLabel>\\w+))?\\s*\\)")
                 .matcher(pattern);
-        if (!m.find()) { throw new CypherException("Invalid edge pattern: " + pattern); }
+        Matcher backward = Pattern.compile(
+                "\\(\\s*(?<fromVar>\\w+)\\s*(?::(?<fromLabel>\\w+))?\\s*\\)"
+                        + "\\s*<-\\s*\\[\\s*(?<relVar>\\w*)\\s*:\\s*(?<edgeType>\\w+)\\s*(?:\\{(?<props>[^}]*)\\})?\\s*\\]"
+                        + "\\s*-\\s*\\(\\s*(?<toVar>\\w+)\\s*(?::(?<toLabel>\\w+))?\\s*\\)")
+                .matcher(pattern);
 
-        String fromVar = m.group(1);
-        String relVar = m.group(2);
-        String edgeType = m.group(3);
-        String propsStr = m.group(4);
-        String toVar = m.group(5);
+        Matcher m;
+        boolean reverse;
+        if (forward.find()) {
+            m = forward;
+            reverse = false;
+        } else if (backward.find()) {
+            m = backward;
+            reverse = true;
+        } else {
+            throw new CypherException("Invalid edge pattern: " + pattern);
+        }
+
+        String fromVar = m.group("fromVar");
+        String fromLabel = m.group("fromLabel");
+        String relVar = m.group("relVar");
+        String edgeType = m.group("edgeType");
+        String propsStr = m.group("props");
+        String toVar = m.group("toVar");
+        String toLabel = m.group("toLabel");
+
+        String leftVar = reverse ? toVar : fromVar;
+        String rightVar = reverse ? fromVar : toVar;
+        String leftLabel = reverse ? toLabel : fromLabel;
+        String rightLabel = reverse ? fromLabel : toLabel;
 
         List<Edge> candidates;
         if (edgeType != null && !edgeType.isEmpty()) {
@@ -766,20 +824,25 @@ public class CypherEngine {
         List<MatchBinding> results = new ArrayList<>();
         for (MatchBinding base : existing) {
             for (Edge edge : candidates) {
-                Node fromNode = (base.variables.containsKey(fromVar)) ?
-                        (Node) base.variables.get(fromVar) : store.getNode(edge.getStartNodeId());
-                Node toNode = store.getNode(edge.getEndNodeId());
+                Node startNode = (base.variables.containsKey(leftVar)) ?
+                        (Node) base.variables.get(leftVar) : store.getNode(edge.getStartNodeId());
+                Node endNode = store.getNode(edge.getEndNodeId());
 
-                if (fromNode == null || toNode == null) { continue; }
-                if (base.variables.containsKey(fromVar) && !base.variables.get(fromVar).equals(fromNode)) continue;
+                if (startNode == null || endNode == null) { continue; }
+                if (base.variables.containsKey(leftVar) && !base.variables.get(leftVar).equals(startNode)) continue;
+
+                if (leftLabel != null && !leftLabel.isEmpty()
+                        && !startNode.getLabels().contains(leftLabel)) continue;
+                if (rightLabel != null && !rightLabel.isEmpty()
+                        && !endNode.getLabels().contains(rightLabel)) continue;
 
 
                 MatchBinding copy = base.copy();
-                // 确保 fromVar 也在绑定中（for MATCH (a)-[r]->(b)）
-                if (!copy.variables.containsKey(fromVar)) {
-                    copy.variables.put(fromVar, fromNode);
+                // 确保 leftVar 也在绑定中
+                if (!copy.variables.containsKey(leftVar)) {
+                    copy.variables.put(leftVar, startNode);
                 }
-                copy.variables.put(toVar, toNode);
+                copy.variables.put(rightVar, endNode);
                 if (relVar != null && !relVar.isEmpty()) {
                     copy.variables.put(relVar, edge);
                 }
@@ -1125,7 +1188,8 @@ public class CypherEngine {
         }
         if (upperBody.equals("INDEXES")) {
             List<Map<String, Object>> rows = new ArrayList<>();
-            if (store instanceof InMemoryGraphStore ims) {
+            InMemoryGraphStore ims = unwrapInMemoryStore(store);
+            if (ims != null) {
                 for (List<String> index : ims.getPropertyIndexes()) {
                     Map<String, Object> row = new LinkedHashMap<>();
                     row.put("Name", index.get(0) + "_" + index.get(1));
@@ -1486,12 +1550,196 @@ public class CypherEngine {
     }
 
     private List<Map<String, Object>> executeShowStats() {
-        if (!(store instanceof InMemoryGraphStore ims)) {
+        InMemoryGraphStore ims = unwrapInMemoryStore(store);
+        if (ims == null) {
             throw new CypherException("SHOW STATS requires InMemoryGraphStore");
         }
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.putAll(ims.getStats());
         return List.of(stats);
+    }
+
+    /**
+     * 把 ReadOnlyGraphStore / GraphWriteTransaction 之类的包装层解开,露出底层
+     * InMemoryGraphStore。返回 null 时说明 store 不是内存图。
+     */
+    private static InMemoryGraphStore unwrapInMemoryStore(GraphStore store) {
+        if (store instanceof InMemoryGraphStore ims) return ims;
+        if (store instanceof ReadOnlyGraphStore ros) {
+            GraphStore delegate = reflectDelegate(ros);
+            if (delegate instanceof InMemoryGraphStore ims) return ims;
+        }
+        // GraphWriteTransaction 直接实现 GraphStore,反射取出 workingStore 字段
+        if (store instanceof GraphWriteTransaction tx) {
+            try {
+                java.lang.reflect.Field f = GraphWriteTransaction.class.getDeclaredField("workingStore");
+                f.setAccessible(true);
+                Object ws = f.get(tx);
+                if (ws instanceof InMemoryGraphStore ims) return ims;
+            } catch (ReflectiveOperationException ignored) {
+                // 回落到 null
+            }
+        }
+        return null;
+    }
+
+    /** 通过反射取出 ReadOnlyGraphStore.delegate 字段,避免公开 API 暴露实现细节。 */
+    private static GraphStore reflectDelegate(ReadOnlyGraphStore ros) {
+        try {
+            java.lang.reflect.Field f = ReadOnlyGraphStore.class.getDeclaredField("delegate");
+            f.setAccessible(true);
+            return (GraphStore) f.get(ros);
+        } catch (ReflectiveOperationException e) {
+            return null;
+        }
+    }
+
+    // ==================== CALL 过程调用 ====================
+
+    /**
+     * 支持形如 {@code CALL db.<name>(<args>)} 的内置过程调用：
+     * <ul>
+     *     <li>{@code CALL db.version()} — 返回实现版本</li>
+     *     <li>{@code CALL db.stats()} — 返回当前图统计</li>
+     *     <li>{@code CALL db.tags()} — 返回所有 tag schema</li>
+     *     <li>{@code CALL db.edges()} — 返回所有 edge type schema</li>
+     *     <li>{@code CALL db.indexes()} — 返回所有属性索引</li>
+     * </ul>
+     */
+    private List<Map<String, Object>> executeCall(String cypher) {
+        Matcher m = Pattern.compile("(?i)^\\s*CALL\\s+([\\w.]+)\\s*(?:\\((.*)\\))?\\s*$")
+                .matcher(cypher.trim());
+        if (!m.matches()) {
+            throw new CypherException("Invalid CALL statement: " + cypher);
+        }
+        String procedure = m.group(1).toLowerCase();
+        String[] args = m.group(2) == null || m.group(2).isBlank()
+                ? new String[0]
+                : splitByComma(m.group(2)).stream()
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .toArray(String[]::new);
+        return switch (procedure) {
+            case "db.version", "version" -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("version", "z-graph-1.0.0");
+                row.put("build", "in-memory MVP");
+                yield List.of(row);
+            }
+            case "db.stats", "stats" -> executeShowStats();
+            case "db.tags", "tags" -> listSchemas("TAG");
+            case "db.edges", "edges" -> listSchemas("EDGE");
+            case "db.indexes", "indexes" -> listIndexes();
+            case "db.branches", "branches" -> listBranches();
+            case "db.commits", "commits" -> listCommits();
+            case "db.head", "head" -> listHead(procedureArgs(args));
+            default -> throw new CypherException("Unknown procedure: " + procedure);
+        };
+    }
+
+    /** 把 CALL db.head('<branch>') 的字符串参数解出来,缺省 main。 */
+    private String procedureArgs(String[] args) {
+        if (args.length == 0) return "main";
+        String first = args[0].trim();
+        if (first.startsWith("'") && first.endsWith("'") && first.length() >= 2) {
+            return first.substring(1, first.length() - 1);
+        }
+        if (first.startsWith("\"") && first.endsWith("\"") && first.length() >= 2) {
+            return first.substring(1, first.length() - 1);
+        }
+        return first;
+    }
+
+    private List<Map<String, Object>> listBranches() {
+        requireRepository();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (String branch : repository.listBranches()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("Name", branch);
+            row.put("Head", repository.getBranchHead(branch).getId());
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private List<Map<String, Object>> listCommits() {
+        requireRepository();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (GraphCommit commit : repository.listCommits()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("Id", commit.getId());
+            row.put("Branch", commit.getBranch());
+            row.put("Author", commit.getAuthor());
+            row.put("Message", commit.getMessage());
+            row.put("Parents", commit.getParents());
+            row.put("Nodes", commit.getNodeCount());
+            row.put("Edges", commit.getEdgeCount());
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private List<Map<String, Object>> listHead(String branch) {
+        requireRepository();
+        GraphCommit head = repository.getBranchHead(branch);
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("Branch", branch);
+        row.put("Id", head.getId());
+        row.put("Author", head.getAuthor());
+        row.put("Message", head.getMessage());
+        row.put("Nodes", head.getNodeCount());
+        row.put("Edges", head.getEdgeCount());
+        return List.of(row);
+    }
+
+    private void requireRepository() {
+        if (repository == null) {
+            throw new CypherException(
+                    "CALL db.branches / db.commits / db.head requires a GraphVersionStore binding");
+        }
+    }
+
+    private List<Map<String, Object>> listSchemas(String kind) {
+        if ("TAG".equals(kind)) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (String tag : store.listTags()) {
+                TagSchema schema = store.getTagSchema(tag);
+                if (schema == null) continue;
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("Name", schema.getName());
+                row.put("Fields", schema.getFields().size());
+                rows.add(row);
+            }
+            return rows;
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (String edge : store.listEdgeTypes()) {
+            EdgeTypeSchema schema = store.getEdgeTypeSchema(edge);
+            if (schema == null) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("Name", schema.getName());
+            row.put("Fields", schema.getFields().size());
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private List<Map<String, Object>> listIndexes() {
+        InMemoryGraphStore ims = unwrapInMemoryStore(store);
+        if (ims == null) {
+            return List.of();
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (List<String> index : ims.getPropertyIndexes()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("Name", index.get(0) + "." + index.get(1));
+            String label = index.get(0);
+            boolean isEdge = store.getEdgeTypeSchema(label) != null
+                    && store.listTags().stream().noneMatch(t -> t.equals(label));
+            row.put("Kind", isEdge ? "EDGE" : "TAG");
+            rows.add(row);
+        }
+        return rows;
     }
 
     /** CREATE TAG INDEX ON <name> / CREATE EDGE INDEX ON <name> / CREATE INDEX ON <name> */

@@ -58,9 +58,9 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
             log.debug("Received message signature=0x{}", String.format("%02X", signature & 0xFF));
 
             switch (signature) {
-                case BoltConstants.MSG_HELLO -> handleHello(ctx, msg.payload);
-                case BoltConstants.MSG_RUN -> handleRun(ctx, msg.payload);
-                case BoltConstants.MSG_PULL -> handlePull(ctx, msg.payload);
+                case BoltConstants.MSG_HELLO -> handleHello(ctx, msg);
+                case BoltConstants.MSG_RUN -> handleRun(ctx, msg);
+                case BoltConstants.MSG_PULL -> handlePull(ctx, msg);
                 case BoltConstants.MSG_GOODBYE -> {
                     log.info("Client sent GOODBYE, closing connection");
                     if (activeTransaction != null) {
@@ -70,13 +70,12 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
                     ctx.close();
                 }
                 case BoltConstants.MSG_RESET -> handleReset(ctx);
-                case BoltConstants.MSG_DISCARD -> handleDiscard(ctx, msg.payload);
-                case BoltConstants.MSG_BEGIN -> handleBegin(ctx, msg.payload);
-                case BoltConstants.MSG_COMMIT -> handleCommit(ctx, msg.payload);
-                case BoltConstants.MSG_ROLLBACK -> handleRollback(ctx, msg.payload);
+                case BoltConstants.MSG_DISCARD -> handleDiscard(ctx, msg);
+                case BoltConstants.MSG_BEGIN -> handleBegin(ctx, msg);
+                case BoltConstants.MSG_COMMIT -> handleCommit(ctx, msg);
+                case BoltConstants.MSG_ROLLBACK -> handleRollback(ctx, msg);
                 default -> {
-                    log.warn("Unsupported message signature=0x{}, sending FAILURE",
-                            String.format("%02X", signature & 0xFF));
+                    log.warn("Unsupported message signature=0x{}", String.format("%02X", signature & 0xFF));
                     writeFailure(ctx, "Unsupported message signature: 0x" + Integer.toHexString(signature & 0xFF));
                 }
             }
@@ -88,10 +87,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         }
     }
 
-    private void handleBegin(ChannelHandlerContext ctx, ByteBuf payload) {
-        if (payload.readableBytes() > 0) {
-            BoltFrames.readValue(payload);
-        }
+    private void handleBegin(ChannelHandlerContext ctx, BoltMessage msg) {
         if (activeTransaction != null) {
             writeFailure(ctx, "Transaction already active");
             return;
@@ -100,10 +96,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         writeSuccess(ctx, Map.of("tx_id", UUID.randomUUID().toString(), "branch", "main"));
     }
 
-    private void handleCommit(ChannelHandlerContext ctx, ByteBuf payload) {
-        if (payload.readableBytes() > 0) {
-            BoltFrames.readValue(payload);
-        }
+    private void handleCommit(ChannelHandlerContext ctx, BoltMessage msg) {
         if (activeTransaction == null) {
             writeFailure(ctx, "No active transaction");
             return;
@@ -119,10 +112,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         }
     }
 
-    private void handleRollback(ChannelHandlerContext ctx, ByteBuf payload) {
-        if (payload.readableBytes() > 0) {
-            BoltFrames.readValue(payload);
-        }
+    private void handleRollback(ChannelHandlerContext ctx, BoltMessage msg) {
         if (activeTransaction == null) {
             writeFailure(ctx, "No active transaction");
             return;
@@ -131,12 +121,11 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         activeTransaction = null;
         writeSuccess(ctx, Map.of());
     }
-    private void handleHello(ChannelHandlerContext ctx, ByteBuf payload) {
-        // HELLO 结构:[extra_metadata_map]
-        // POC 阶段只读取 metadata,但不强校验
-        if (payload.readableBytes() > 0) {
-            Object metadata = BoltFrames.readValue(payload);
-            log.info("HELLO metadata: {}", metadata);
+
+    private void handleHello(ChannelHandlerContext ctx, BoltMessage msg) {
+        // HELLO 结构:[extra_metadata_map]，字段已被 decoder 解析
+        if (!msg.fields.isEmpty()) {
+            log.info("HELLO metadata: {}", msg.fields.get(0));
         }
         Map<String, Object> successMeta = new LinkedHashMap<>();
         successMeta.put("connection_id", UUID.randomUUID().toString());
@@ -145,23 +134,24 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         writeSuccess(ctx, successMeta);
     }
 
-    private void handleRun(ChannelHandlerContext ctx, ByteBuf payload) {
-        // RUN 结构:[statement, parameters, [extra_metadata]]
-        String cypher = (String) BoltFrames.readValue(payload);
-        // parameters map(可选)
-        Map<String, Object> parameters = payload.readableBytes() > 0
-                ? (Map<String, Object>) BoltFrames.readValue(payload) : Map.of();
+    private void handleRun(ChannelHandlerContext ctx, BoltMessage msg) {
+        // RUN 结构:[statement, parameters, [extra_metadata]] — decoder 已切好字段
+        if (msg.fields.isEmpty()) {
+            writeFailure(ctx, "RUN missing statement");
+            return;
+        }
+        String cypher = (String) msg.fields.get(0);
+        Map<String, Object> parameters = msg.fields.size() >= 2 && msg.fields.get(1) instanceof Map
+                ? (Map<String, Object>) msg.fields.get(1) : Map.of();
         log.info("RUN cypher='{}' params={}", cypher, parameters);
 
         long qid = nextQid.getAndIncrement();
         try {
             List<Map<String, Object>> rows = executeCypher(cypher, parameters);
-            // 字段名:第一行的 key 集合
             List<String> fields = rows.isEmpty() ? List.of() : List.copyOf(rows.get(0).keySet());
             streams.put(qid, rows);
             streamFields.put(qid, fields);
             streamCursor.put(qid, 0);
-            // RUN SUCCESS 包含 fields 描述
             writeSuccess(ctx, buildRunSuccessMeta(qid, fields));
         } catch (Exception e) {
             streams.remove(qid);
@@ -183,16 +173,17 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
                 || upper.contains(" DELETE ")
                 || upper.contains("DETACH DELETE")));
         if (activeTransaction != null) {
-            return new CypherEngine(activeTransaction).execute(cypher, parameters);
+            return new CypherEngine(activeTransaction, graphRepository).execute(cypher, parameters);
         }
         if (!mutating) {
-            return new CypherEngine(graphRepository.checkoutBranch("main").getStore()).execute(cypher, parameters);
+            return new CypherEngine(graphRepository.checkoutBranch("main").getStore(), graphRepository)
+                    .execute(cypher, parameters);
         }
 
         IllegalStateException lastConflict = null;
         for (int attempt = 0; attempt < 2; attempt++) {
             GraphWriteTransaction transaction = graphRepository.beginWrite("main");
-            List<Map<String, Object>> rows = new CypherEngine(transaction).execute(cypher, parameters);
+            List<Map<String, Object>> rows = new CypherEngine(transaction, graphRepository).execute(cypher, parameters);
             try {
                 transaction.commit("bolt", "RUN " + cypher);
                 return rows;
@@ -205,9 +196,11 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
                 : lastConflict;
     }
 
-    private void handlePull(ChannelHandlerContext ctx, ByteBuf payload) {
-        // PULL 结构:[{qid, n}]
-        Map<String, Object> extra = (Map<String, Object>) BoltFrames.readValue(payload);
+    private void handlePull(ChannelHandlerContext ctx, BoltMessage msg) {
+        // PULL 结构:[{qid, n}] — 字段已被 decoder 解析
+        Map<String, Object> extra = msg.fields.isEmpty()
+                ? Map.of()
+                : (Map<String, Object>) msg.fields.get(0);
         long qid = ((Number) extra.get("qid")).longValue();
         long n = extra.containsKey("n") ? ((Number) extra.get("n")).longValue() : -1;
 
@@ -243,8 +236,13 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         writeSuccess(ctx, buildPullCompleteMeta(qid, hasMore));
     }
 
-    private void handleDiscard(ChannelHandlerContext ctx, ByteBuf payload) {
-        Map<String, Object> extra = (Map<String, Object>) BoltFrames.readValue(payload);
+    private void handleDiscard(ChannelHandlerContext ctx, BoltMessage msg) {
+        // DISCARD 结构:[{qid, n}] — 字段已被 decoder 解析
+        if (msg.fields.isEmpty()) {
+            writeSuccess(ctx, Map.of());
+            return;
+        }
+        Map<String, Object> extra = (Map<String, Object>) msg.fields.get(0);
         long qid = ((Number) extra.get("qid")).longValue();
         streams.remove(qid);
         streamFields.remove(qid);
@@ -316,10 +314,11 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
 
     private void writeRecord(ChannelHandlerContext ctx, List<String> fields, Map<String, Object> row) {
         ByteBuf buf = ctx.alloc().buffer();
-        // RECORD 结构:List[value1, value2, ...] 按字段顺序
+        // RECORD 结构:struct signature=0x71,fields=[value1, value2, ...] 按字段顺序
         java.util.List<Object> values = new java.util.ArrayList<>(fields.size());
         for (String f : fields) values.add(row.get(f));
-        BoltFrames.writeStruct(buf, BoltConstants.RESP_RECORD, values);
+        // values.toArray() 把 List 解构成 varargs,否则 writeStruct 会把它当成 1 个字段
+        BoltFrames.writeStruct(buf, BoltConstants.RESP_RECORD, values.toArray());
         ctx.writeAndFlush(wrapAsChunk(buf));
     }
 
