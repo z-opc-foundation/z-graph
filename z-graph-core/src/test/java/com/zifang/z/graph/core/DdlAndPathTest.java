@@ -85,7 +85,8 @@ class DdlAndPathTest {
         assertTrue(store.hasPropertyIndex("Person", "name"));
         List<Map<String, Object>> indexes = engine.execute("SHOW INDEXES");
         assertEquals(1, indexes.size());
-        assertEquals("Person", indexes.get(0).get("Tag"));
+        assertEquals("Person", indexes.get(0).get("On"));
+        assertEquals("TAG", indexes.get(0).get("Kind"));
 
         engine.execute("DROP TAG INDEX ON Person.name");
         assertFalse(store.hasPropertyIndex("Person", "name"));

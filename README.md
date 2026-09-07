@@ -12,8 +12,11 @@
 ## 已对齐 NebulaGraph 的能力
 
 - **Tag / EdgeType schema**：声明属性名、数据类型与 `NOT NULL` 约束，存写前自动校验；schema 也会随 commit 进入快照并随仓库重新加载恢复。
-- **DDL via Cypher**：`CREATE TAG` / `DROP TAG` / `CREATE EDGE` / `DROP EDGE` / `CREATE TAG INDEX ON <tag>.<prop>` / `DROP TAG INDEX ON <tag>.<prop>` / `ALTER TAG / EDGE ADD|DROP (<field> ...)`。
+- **DDL via Cypher**：`CREATE TAG` / `DROP TAG` / `CREATE EDGE` / `DROP EDGE` / `CREATE TAG INDEX ON <tag>.<prop>` / `CREATE EDGE INDEX ON <edge>.<prop>` / `DROP TAG INDEX` / `DROP EDGE INDEX` / `ALTER TAG / EDGE ADD|DROP (<field> ...)`。
+- **EXPLAIN**：只读查询计划预览，标注 `IndexSeek` / `LabelScan` / `VarLenExpand` / `Aggregate` 等算子，便于调优索引。
+- **DESCRIBE TAG / DESCRIBE EDGE / DESCRIBE GRAPH / SHOW STATS**：NebulaGraph 风格的管理命令。
 - **索引下推**：单节点 `MATCH (n:L) WHERE n.prop = value` 在已建 `(L, prop)` 索引时直接走索引查找，省掉全标签扫描。
+- **EXISTS / NOT EXISTS 子查询**：`MATCH (n) WHERE EXISTS { (n)-[]->() }` 用在外层 binding 上检查出/入边存在性。
 - **REBUILD INDEX**：`REBUILD TAG INDEX <tag>.<prop>` 对当前内存索引做手动 rebuild 钩子（当前实现同步空操作）。
 - **SHOW TAGS / SHOW EDGES / SHOW INDEXES / SHOW TAG \<name\> / SHOW EDGE \<name\>**：NebulaGraph 风格的管理 Cypher。
 - **变长路径匹配**：`(a)-[*min..max]->(b)` 与 `(a)-[:TYPE*min..max]->(b)`，按边类型过滤、按起止节点标签过滤，绑定返回最短路径集合。

@@ -58,7 +58,8 @@ class ShowAndAggregationTest {
         store.createPropertyIndex("Person", "name");
         List<Map<String, Object>> rows = engine.execute("SHOW INDEXES");
         assertEquals(1, rows.size());
-        assertEquals("Person", rows.get(0).get("Tag"));
+        assertEquals("Person", rows.get(0).get("On"));
+        assertEquals("TAG", rows.get(0).get("Kind"));
         assertEquals("name", rows.get(0).get("Property"));
     }
 

@@ -45,6 +45,7 @@ public class CypherEngine {
             String rest = trimmed.substring(6).trim();
             String restUpper = rest.toUpperCase();
             if (restUpper.startsWith("TAG INDEX") || restUpper.startsWith("TAGINDEX")
+                    || restUpper.startsWith("EDGE INDEX") || restUpper.startsWith("EDGEINDEX")
                     || restUpper.startsWith("INDEX")) {
                 return executeCreateIndex(trimmed);
             }
@@ -71,10 +72,17 @@ public class CypherEngine {
         if (upper.startsWith("REBUILD")) {
             return executeRebuildIndex(trimmed);
         }
+        if (upper.startsWith("EXPLAIN")) {
+            return executeExplain(trimmed);
+        }
+        if (upper.startsWith("DESCRIBE") || upper.startsWith("DESC")) {
+            return executeDescribe(trimmed);
+        }
         if (upper.startsWith("DROP")) {
             String rest = trimmed.substring(4).trim();
             String restUpper = rest.toUpperCase();
-            if (restUpper.startsWith("TAG INDEX") || restUpper.startsWith("INDEX")) {
+            if (restUpper.startsWith("TAG INDEX") || restUpper.startsWith("EDGE INDEX")
+                    || restUpper.startsWith("INDEX")) {
                 return executeDropIndex(trimmed);
             }
             if (restUpper.startsWith("TAG ")) {
@@ -618,6 +626,14 @@ public class CypherEngine {
     }
 
     private boolean evaluateCondition(String condition, MatchBinding binding) {
+        // EXISTS { MATCH (n)-[r]->(m) ... } 子查询
+        String upper = condition.toUpperCase().trim();
+        if (upper.startsWith("EXISTS")) {
+            return evaluateExistsSubquery(condition.trim(), binding);
+        }
+        if (upper.startsWith("NOT EXISTS")) {
+            return !evaluateExistsSubquery(condition.trim().substring("NOT ".length()), binding);
+        }
         // n.prop op value 或 n.prop IS NULL
         String[] ops = {"!=", ">=", "<=", "=", ">", "<"};
         for (String op : ops) {
@@ -642,6 +658,52 @@ public class CypherEngine {
             return resolveExpression(varName, binding) != null;
         }
         throw new CypherException("Cannot parse WHERE condition: " + condition);
+    }
+
+    /**
+     * 支持形如 {@code EXISTS { (var)-[:TYPE]->(m) }} 或
+     * {@code EXISTS { MATCH (var)-[]->(m) }} 的子查询。
+     * 当前实现要求子查询第一个节点必须绑定到外层 binding 中的变量。
+     */
+    private boolean evaluateExistsSubquery(String expression, MatchBinding binding) {
+        String body = expression.trim();
+        if (body.toUpperCase().startsWith("EXISTS")) {
+            body = body.substring("EXISTS".length()).trim();
+        }
+        int braceStart = body.indexOf('{');
+        int braceEnd = body.lastIndexOf('}');
+        if (braceStart < 0 || braceEnd < 0 || braceEnd <= braceStart) {
+            throw new CypherException("EXISTS requires { ... } body: " + expression);
+        }
+        String inner = body.substring(braceStart + 1, braceEnd).trim();
+        // 去掉内部 MATCH 关键字
+        if (inner.toUpperCase().startsWith("MATCH")) {
+            inner = inner.substring("MATCH".length()).trim();
+        }
+        // 简单形式：单节点绑定 + 任意关系。例如 "(n)-[]->(m)"
+        Matcher anchorMatcher = Pattern.compile(
+                "\\(\\s*(\\w+)\\s*\\)\\s*-\\s*\\[\\s*\\]\\s*->\\s*\\(").matcher(inner);
+        if (anchorMatcher.find()) {
+            String anchor = anchorMatcher.group(1);
+            Object target = binding.variables.get(anchor);
+            if (target instanceof Node node) {
+                return !store.getOutEdges(node.getId()).isEmpty();
+            }
+            return false;
+        }
+        Matcher incomingMatcher = Pattern.compile(
+                "\\(\\s*(\\w+)\\s*\\)\\s*<-\\s*\\[\\s*\\]\\s*-\\s*\\(").matcher(inner);
+        if (incomingMatcher.find()) {
+            String anchor = incomingMatcher.group(1);
+            Object target = binding.variables.get(anchor);
+            if (target instanceof Node node) {
+                return !store.getInEdges(node.getId()).isEmpty();
+            }
+            return false;
+        }
+        // 退路：用 resolvePattern 完整展开子查询，看结果是否非空
+        List<MatchBinding> sub = resolvePattern(inner);
+        return !sub.isEmpty();
     }
 
     private Object resolveExpression(String expr, MatchBinding binding) {
@@ -882,13 +944,20 @@ public class CypherEngine {
             }
             return rows;
         }
+        if (upperBody.equals("STATS")) {
+            return executeShowStats();
+        }
         if (upperBody.equals("INDEXES")) {
             List<Map<String, Object>> rows = new ArrayList<>();
             if (store instanceof InMemoryGraphStore ims) {
                 for (List<String> index : ims.getPropertyIndexes()) {
                     Map<String, Object> row = new LinkedHashMap<>();
                     row.put("Name", index.get(0) + "_" + index.get(1));
-                    row.put("Tag", index.get(0));
+                    String label = index.get(0);
+                    boolean isEdge = store.getEdgeTypeSchema(label) != null
+                            && store.listTags().stream().noneMatch(t -> t.equals(label));
+                    row.put("Kind", isEdge ? "EDGE" : "TAG");
+                    row.put("On", label);
                     row.put("Property", index.get(1));
                     rows.add(row);
                 }
@@ -1123,16 +1192,152 @@ public class CypherEngine {
                 "Note", "in-memory index is always up-to-date"));
     }
 
-    /** CREATE TAG INDEX ON <name> / CREATE INDEX ON <name> */
+    // ==================== EXPLAIN 查询计划 ====================
+
+    /**
+     * 输出只读的执行计划，不实际执行查询。计划中会标注：
+     * <ul>
+     *     <li>是否走索引下推以及下推命中的索引；</li>
+     *     <li>模式是否含变长路径；</li>
+     *     <li>聚合分组列；</li>
+     *     <li>写入语义（CREATE/MERGE/SET/DELETE）。</li>
+     * </ul>
+     */
+    private List<Map<String, Object>> executeExplain(String cypher) {
+        String body = stripLeadingKeyword(cypher, "EXPLAIN").trim();
+        String upper = body.toUpperCase();
+        List<Map<String, Object>> plan = new ArrayList<>();
+
+        if (upper.startsWith("CREATE TAG") || upper.startsWith("CREATE EDGE")
+                || upper.startsWith("CREATE TAG INDEX") || upper.startsWith("CREATE INDEX")
+                || upper.startsWith("DROP TAG") || upper.startsWith("DROP EDGE")
+                || upper.startsWith("DROP TAG INDEX") || upper.startsWith("DROP INDEX")
+                || upper.startsWith("ALTER TAG") || upper.startsWith("ALTER EDGE")
+                || upper.startsWith("REBUILD")) {
+            plan.add(step("DDL", body));
+            return plan;
+        }
+        if (upper.startsWith("SHOW")) {
+            plan.add(step("MetaScan", body));
+            return plan;
+        }
+        if (upper.startsWith("CREATE")) {
+            plan.add(step("NodeCreate", body));
+            return plan;
+        }
+        if (upper.startsWith("MERGE")) {
+            plan.add(step("NodeUpsert", body));
+            return plan;
+        }
+
+        // MATCH 路径：探测索引下推和模式特征
+        String upperBody = upper;
+        String matchPattern = extractClause(body, upperBody, "MATCH",
+                "WHERE|SET|DELETE|DETACH|RETURN|ORDER|LIMIT|SKIP|WITH|UNWIND");
+        String whereClause = extractClause(body, upperBody, "WHERE",
+                "SET|DELETE|DETACH|RETURN|ORDER|LIMIT|SKIP|WITH|UNWIND");
+        String returnClause = extractClause(body, upperBody, "RETURN",
+                "ORDER|LIMIT|SKIP|WITH");
+        if (matchPattern != null && whereClause != null) {
+            IndexedSeed seed = tryIndexSeed(matchPattern, whereClause);
+            if (seed != null) {
+                plan.add(step("IndexSeek",
+                        "label-index lookup using WHERE predicate on "
+                                + whereClause.trim()));
+            } else {
+                plan.add(step("LabelScan",
+                        "scan label index then apply WHERE filter: "
+                                + whereClause.trim()));
+            }
+        } else if (matchPattern != null) {
+            if (matchPattern.matches(".*\\*\\d*\\.\\.?\\d*.*")) {
+                plan.add(step("VarLenExpand", "BFS up to declared hops"));
+            } else {
+                plan.add(step("PatternMatch", matchPattern));
+            }
+        }
+        if (returnClause != null) {
+            List<Projection> projections = parseProjections(returnClause);
+            List<String> aggregates = projections.stream()
+                    .filter(p -> p.aggregate() != null)
+                    .map(Projection::alias)
+                    .toList();
+            List<String> groupKeys = projections.stream()
+                    .filter(p -> p.aggregate() == null)
+                    .map(Projection::alias)
+                    .toList();
+            if (!aggregates.isEmpty()) {
+                plan.add(step("Aggregate",
+                        "aggregates=" + aggregates + " groupBy=" + groupKeys));
+            } else {
+                plan.add(step("Project", returnClause));
+            }
+        }
+        return plan;
+    }
+
+    private static Map<String, Object> step(String operator, String detail) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("Operator", operator);
+        row.put("Detail", detail);
+        return row;
+    }
+
+    // ==================== DESCRIBE / SHOW STATS ====================
+
+    /**
+     * DESCRIBE TAG <name> / DESCRIBE EDGE <name> 是 SHOW TAG / SHOW EDGE 的别名，
+     * 与 NebulaGraph 客户端习惯一致。
+     */
+    private List<Map<String, Object>> executeDescribe(String cypher) {
+        String body;
+        if (cypher.toUpperCase().startsWith("DESCRIBE")) {
+            body = cypher.substring("DESCRIBE".length()).trim();
+        } else {
+            body = cypher.substring("DESC".length()).trim();
+        }
+        String upper = body.toUpperCase();
+        if (upper.startsWith("TAG ")) {
+            return executeShow("SHOW TAG " + body.substring(4).trim());
+        }
+        if (upper.startsWith("EDGE ")) {
+            return executeShow("SHOW EDGE " + body.substring(5).trim());
+        }
+        if (upper.equals("STATS") || upper.equals("GRAPH")) {
+            return executeShowStats();
+        }
+        throw new CypherException("Unsupported DESCRIBE: " + cypher);
+    }
+
+    private List<Map<String, Object>> executeShowStats() {
+        if (!(store instanceof InMemoryGraphStore ims)) {
+            throw new CypherException("SHOW STATS requires InMemoryGraphStore");
+        }
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.putAll(ims.getStats());
+        return List.of(stats);
+    }
+
+    /** CREATE TAG INDEX ON <name> / CREATE EDGE INDEX ON <name> / CREATE INDEX ON <name> */
     private List<Map<String, Object>> executeCreateIndex(String cypher) {
         String upper = cypher.toUpperCase();
         String body;
+        String kind;
         if (upper.startsWith("CREATE TAG INDEX ON")) {
             body = stripLeadingKeyword(cypher, "CREATE TAG INDEX ON");
+            kind = "TAG";
         } else if (upper.startsWith("CREATE TAGINDEX ON")) {
             body = stripLeadingKeyword(cypher, "CREATE TAGINDEX ON");
+            kind = "TAG";
+        } else if (upper.startsWith("CREATE EDGE INDEX ON")) {
+            body = stripLeadingKeyword(cypher, "CREATE EDGE INDEX ON");
+            kind = "EDGE";
+        } else if (upper.startsWith("CREATE EDGEINDEX ON")) {
+            body = stripLeadingKeyword(cypher, "CREATE EDGEINDEX ON");
+            kind = "EDGE";
         } else if (upper.startsWith("CREATE INDEX ON")) {
             body = stripLeadingKeyword(cypher, "CREATE INDEX ON");
+            kind = "TAG";
         } else {
             throw new CypherException("Unsupported CREATE INDEX: " + cypher);
         }
@@ -1140,25 +1345,34 @@ public class CypherEngine {
         if (parts.length != 2) {
             throw new CypherException("CREATE INDEX expects <tag>.<property>: " + cypher);
         }
-        String tag = parts[0].trim();
+        String label = parts[0].trim();
         String property = parts[1].trim();
         if (!(store instanceof InMemoryGraphStore ims)) {
             throw new CypherException("Index management requires InMemoryGraphStore");
         }
-        boolean created = ims.createPropertyIndex(tag, property);
-        if (!created && !ims.hasPropertyIndex(tag, property)) {
-            throw new CypherException("Failed to create index: " + tag + "." + property);
+        boolean created = ims.createPropertyIndex(label, property);
+        if (!created && !ims.hasPropertyIndex(label, property)) {
+            throw new CypherException("Failed to create index: " + label + "." + property);
         }
-        return List.of(Map.of("Index", tag + "." + property));
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("Kind", kind);
+        row.put("Name", label + "." + property);
+        return List.of(row);
     }
 
     private List<Map<String, Object>> executeDropIndex(String cypher) {
         String upper = cypher.toUpperCase();
         String body;
+        String kind;
         if (upper.startsWith("DROP TAG INDEX ON")) {
             body = stripLeadingKeyword(cypher, "DROP TAG INDEX ON");
+            kind = "TAG";
+        } else if (upper.startsWith("DROP EDGE INDEX ON")) {
+            body = stripLeadingKeyword(cypher, "DROP EDGE INDEX ON");
+            kind = "EDGE";
         } else if (upper.startsWith("DROP INDEX ON")) {
             body = stripLeadingKeyword(cypher, "DROP INDEX ON");
+            kind = "TAG";
         } else {
             throw new CypherException("Unsupported DROP INDEX: " + cypher);
         }
@@ -1166,16 +1380,19 @@ public class CypherEngine {
         if (parts.length != 2) {
             throw new CypherException("DROP INDEX expects <tag>.<property>: " + cypher);
         }
-        String tag = parts[0].trim();
+        String label = parts[0].trim();
         String property = parts[1].trim();
         if (!(store instanceof InMemoryGraphStore ims)) {
             throw new CypherException("Index management requires InMemoryGraphStore");
         }
-        boolean dropped = ims.dropPropertyIndex(tag, property);
+        boolean dropped = ims.dropPropertyIndex(label, property);
         if (!dropped) {
-            throw new CypherException("Index not found: " + tag + "." + property);
+            throw new CypherException("Index not found: " + label + "." + property);
         }
-        return List.of(Map.of("Dropped", tag + "." + property));
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("Kind", kind);
+        row.put("Dropped", label + "." + property);
+        return List.of(row);
     }
 
     private static String stripLeadingKeyword(String cypher, String keywordUpper) {
