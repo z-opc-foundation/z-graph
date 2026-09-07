@@ -32,8 +32,47 @@ public class CypherEngine {
     /**
      * 执行 Cypher 语句，返回结果行列表。
      * 每行是一个 Map<String, Object>（列名 → 值）。
+     * 支持分号分隔的多语句，结果按执行顺序拼接。
      */
     public List<Map<String, Object>> execute(String cypher) {
+        String trimmed = cypher.trim();
+        if (trimmed.isEmpty()) { throw new CypherException("Empty Cypher statement"); }
+
+        List<String> statements = splitStatements(trimmed);
+        if (statements.size() == 1) {
+            return executeSingle(trimmed);
+        }
+        List<Map<String, Object>> combined = new ArrayList<>();
+        for (String stmt : statements) {
+            String s = stmt.trim();
+            if (s.isEmpty()) continue;
+            combined.addAll(executeSingle(s));
+        }
+        return combined;
+    }
+
+    /** 按分号切分语句，跳过字符串字面量内的分号。 */
+    private static List<String> splitStatements(String input) {
+        List<String> result = new ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+        boolean inSingle = false;
+        boolean inDouble = false;
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (c == '\'' && !inDouble) inSingle = !inSingle;
+            else if (c == '"' && !inSingle) inDouble = !inDouble;
+            if (c == ';' && !inSingle && !inDouble) {
+                result.add(sb.toString());
+                sb = new StringBuilder();
+            } else {
+                sb.append(c);
+            }
+        }
+        if (sb.length() > 0) result.add(sb.toString());
+        return result;
+    }
+
+    private List<Map<String, Object>> executeSingle(String cypher) {
         String trimmed = cypher.trim();
         if (trimmed.isEmpty()) { throw new CypherException("Empty Cypher statement"); }
 
@@ -297,14 +336,18 @@ public class CypherEngine {
     // ==================== MATCH ====================
 
     private List<Map<String, Object>> executeMatch(String cypher) {
-        // 拆分 MATCH / WHERE / SET / DELETE / RETURN
+        // 拆分 MATCH / WHERE / SET / DELETE / RETURN / ORDER / LIMIT / SKIP
         String upper = cypher.toUpperCase();
         String pattern = extractClause(cypher, upper, "MATCH", "WHERE|SET|DELETE|DETACH|RETURN|ORDER|LIMIT|SKIP|WITH|UNWIND");
         String whereClause = extractClause(cypher, upper, "WHERE", "SET|DELETE|DETACH|RETURN|ORDER|LIMIT|SKIP|WITH|UNWIND");
         String setClause = extractClause(cypher, upper, "SET", "DELETE|DETACH|RETURN|ORDER|LIMIT|SKIP|WITH");
         String deleteClause = extractClause(cypher, upper, "DELETE", "RETURN|ORDER|LIMIT|SKIP|WITH");
         String detachDelete = extractClause(cypher, upper, "DETACH DELETE", "RETURN|ORDER|LIMIT|SKIP|WITH");
+        String withClause = extractClause(cypher, upper, "WITH", "RETURN|ORDER|LIMIT|SKIP|WHERE|SET|DELETE|DETACH");
         String returnClause = extractClause(cypher, upper, "RETURN", "ORDER|LIMIT|SKIP|WITH");
+        String orderClause = extractClause(cypher, upper, "ORDER BY", "LIMIT|SKIP|WITH");
+        String limitClause = extractClause(cypher, upper, "LIMIT", "SKIP|WITH");
+        String skipClause = extractClause(cypher, upper, "SKIP", "LIMIT|WITH");
 
         // 如果有 DETACH DELETE，用它覆盖 DELETE
         if (detachDelete != null) { deleteClause = null; }
@@ -340,15 +383,148 @@ public class CypherEngine {
             return executeDelete(detachDelete.trim(), bindings, true);
         }
 
-        // 5. 如果有 RETURN，执行投影
-        if (returnClause != null && !returnClause.trim().isEmpty()) {
-            return executeReturnProjection(returnClause.trim(), bindings);
+        // 5. WITH 投影：把当前 bindings 转成下游 bindings
+        if (withClause != null && !withClause.trim().isEmpty()) {
+            bindings = applyWithProjection(bindings, withClause.trim());
         }
 
-        // 默认返回所有绑定变量
-        return bindings.stream()
-                .map(MatchBinding::toResultMap)
-                .collect(Collectors.toList());
+        // 6. 如果有 RETURN，执行投影；否则返回全部绑定
+        List<Map<String, Object>> rows;
+        if (returnClause != null && !returnClause.trim().isEmpty()) {
+            rows = executeReturnProjection(returnClause.trim(), bindings);
+        } else {
+            rows = bindings.stream()
+                    .map(MatchBinding::toResultMap)
+                    .collect(Collectors.toList());
+        }
+
+        // 7. ORDER BY / SKIP / LIMIT 应用到投影后的结果
+        return applyOrderingAndLimits(rows, orderClause, skipClause, limitClause, bindings);
+    }
+
+    /**
+     * WITH projection：将当前 binding 集合转成新 binding 集合。
+     * 形如 {@code WITH n.name AS name, n.age AS age ORDER BY ...}，支持别名。
+     */
+    private List<MatchBinding> applyWithProjection(List<MatchBinding> bindings, String withClause) {
+        String body = withClause;
+        // 去掉可能的 ORDER BY 后缀
+        int orderIdx = body.toUpperCase().indexOf(" ORDER BY ");
+        if (orderIdx >= 0) body = body.substring(0, orderIdx);
+        List<MatchBinding> next = new ArrayList<>();
+        for (MatchBinding binding : bindings) {
+            MatchBinding copy = binding.copy();
+            Map<String, Object> newVars = new LinkedHashMap<>();
+            for (Projection projection : parseProjections(body)) {
+                if (projection.aggregate() != null) {
+                    throw new CypherException("WITH does not support aggregations in this subset");
+                }
+                newVars.put(projection.alias(),
+                        resolveExpression(projection.expr(), binding));
+            }
+            copy.variables.clear();
+            copy.variables.putAll(newVars);
+            next.add(copy);
+        }
+        return next;
+    }
+
+    /**
+     * 对投影后的结果应用 ORDER BY / SKIP / LIMIT。
+     * ORDER BY 支持形如 {@code expr [ASC|DESC]}，多列用逗号分隔。
+     * 先按列名匹配 alias；其次按 {@code var.prop} 匹配结果行；最后回落到原始 binding 解析。
+     */
+    private List<Map<String, Object>> applyOrderingAndLimits(
+            List<Map<String, Object>> rows,
+            String orderClause,
+            String skipClause,
+            String limitClause,
+            List<MatchBinding> bindings) {
+        List<Map<String, Object>> ordered = rows;
+        if (orderClause != null && !orderClause.trim().isEmpty()) {
+            List<OrderKey> keys = parseOrderClause(orderClause.trim());
+            ordered = new ArrayList<>(rows);
+            ordered.sort((a, b) -> compareByKeys(a, b, keys, bindings, rows));
+        }
+        int from = 0;
+        int to = ordered.size();
+        if (skipClause != null && !skipClause.trim().isEmpty()) {
+            from = Math.max(0, (int) Double.parseDouble(skipClause.trim()));
+        }
+        if (limitClause != null && !limitClause.trim().isEmpty()) {
+            to = Math.min(ordered.size(), from + (int) Double.parseDouble(limitClause.trim()));
+        }
+        if (from >= ordered.size()) return List.of();
+        return new ArrayList<>(ordered.subList(from, Math.min(to, ordered.size())));
+    }
+
+    private int compareByKeys(Map<String, Object> a, Map<String, Object> b,
+                              List<OrderKey> keys,
+                              List<MatchBinding> bindings,
+                              List<Map<String, Object>> rows) {
+        for (OrderKey key : keys) {
+            int idx = rows.indexOf(a);
+            MatchBinding bindingA = (idx >= 0 && idx < bindings.size()) ? bindings.get(idx) : null;
+            idx = rows.indexOf(b);
+            MatchBinding bindingB = (idx >= 0 && idx < bindings.size()) ? bindings.get(idx) : null;
+            Object av = resolveOrderKey(key.column, a, bindingA);
+            Object bv = resolveOrderKey(key.column, b, bindingB);
+            int cmp;
+            if (av == null && bv == null) cmp = 0;
+            else if (av == null) cmp = -1;
+            else if (bv == null) cmp = 1;
+            else if (av instanceof Number && bv instanceof Number) {
+                cmp = Double.compare(((Number) av).doubleValue(), ((Number) bv).doubleValue());
+            } else {
+                cmp = String.valueOf(av).compareTo(String.valueOf(bv));
+            }
+            if (cmp != 0) return key.ascending ? cmp : -cmp;
+        }
+        return 0;
+    }
+
+    /** 按 alias → row → binding 顺序解析排序键。 */
+    private Object resolveOrderKey(String key, Map<String, Object> row, MatchBinding binding) {
+        if (row != null && row.containsKey(key)) {
+            return row.get(key);
+        }
+        // 尝试按 var.prop 直接读行（投影未取别名的情况）
+        if (binding != null) {
+            int dot = key.indexOf('.');
+            if (dot > 0) {
+                String varName = key.substring(0, dot);
+                String prop = key.substring(dot + 1);
+                Object target = binding.variables.get(varName);
+                if (target instanceof Node node) return node.get(prop);
+                if (target instanceof Edge edge) return edge.get(prop);
+            }
+            if (binding.variables.containsKey(key)) {
+                return binding.variables.get(key);
+            }
+        }
+        return null;
+    }
+
+    private record OrderKey(String column, boolean ascending) {
+    }
+
+    private List<OrderKey> parseOrderClause(String clause) {
+        List<OrderKey> keys = new ArrayList<>();
+        for (String part : splitByComma(clause)) {
+            String token = part.trim();
+            if (token.isEmpty()) continue;
+            boolean ascending = true;
+            String upper = token.toUpperCase();
+            if (upper.endsWith(" DESC")) {
+                ascending = false;
+                token = token.substring(0, token.length() - 5).trim();
+            } else if (upper.endsWith(" ASC")) {
+                ascending = true;
+                token = token.substring(0, token.length() - 4).trim();
+            }
+            keys.add(new OrderKey(token, ascending));
+        }
+        return keys;
     }
 
     private List<Map<String, Object>> executeDelete(String deleteExpr, List<MatchBinding> bindings, boolean detach) {

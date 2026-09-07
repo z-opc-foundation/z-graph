@@ -134,6 +134,57 @@ public final class GraphVersionStore {
         return checkout(getBranchHead(branch).getId());
     }
 
+    /** 把指定 commit 的快照导出为独立文件，便于备份/迁移。 */
+    public synchronized Path exportSnapshot(String commitId, Path target) throws IOException {
+        InMemoryGraphStore snapshot = snapshots.get(commitId);
+        if (snapshot == null) {
+            throw new IllegalArgumentException("Unknown commit: " + commitId);
+        }
+        Path parent = target.getParent();
+        if (parent != null) Files.createDirectories(parent);
+        Path temp = target.resolveSibling(target.getFileName() + ".tmp");
+        try (OutputStream output = Files.newOutputStream(temp,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+             DataOutputStream out = new DataOutputStream(output)) {
+            out.writeInt(STORAGE_MAGIC);
+            out.writeInt(STORAGE_VERSION);
+            writeSnapshot(out, snapshot);
+        }
+        try {
+            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException ignored) {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+        return target;
+    }
+
+    /**
+     * 从 snapshot 文件导入：在当前 head 上新建一个 commit，把快照内容写进去。
+     * 返回新产生的 commit，方便调用方继续推进分支。
+     */
+    public synchronized GraphCommit importSnapshot(Path source,
+                                                   String branch,
+                                                   String author,
+                                                   String message) throws IOException {
+        requireBranch(branch);
+        try (InputStream input = Files.newInputStream(source);
+             DataInputStream in = new DataInputStream(input)) {
+            int magic = in.readInt();
+            int version = in.readInt();
+            if (magic != STORAGE_MAGIC) {
+                throw new IllegalArgumentException("Snapshot magic mismatch: " + source);
+            }
+            if (version < 2 || version > STORAGE_VERSION) {
+                throw new IllegalArgumentException("Snapshot version unsupported: " + version);
+            }
+            InMemoryGraphStore snapshot = readSnapshot(in, version);
+            GraphCommit commit = createCommit(List.of(branches.get(branch)), branch, author, message, snapshot);
+            branches.put(branch, commit.getId());
+            persistState();
+            return commit;
+        }
+    }
+
     /**
      * 将 source branch 合并到 target branch。只自动合并三方模型中一侧发生变化的实体；
      * 同一节点/边两侧都发生不一致修改时返回冲突，且不会移动 target head。

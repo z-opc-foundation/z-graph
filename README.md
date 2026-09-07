@@ -17,6 +17,10 @@
 - **DESCRIBE TAG / DESCRIBE EDGE / DESCRIBE GRAPH / SHOW STATS**：NebulaGraph 风格的管理命令。
 - **索引下推**：单节点 `MATCH (n:L) WHERE n.prop = value` 在已建 `(L, prop)` 索引时直接走索引查找，省掉全标签扫描。
 - **EXISTS / NOT EXISTS 子查询**：`MATCH (n) WHERE EXISTS { (n)-[]->() }` 用在外层 binding 上检查出/入边存在性。
+- **ORDER BY / SKIP / LIMIT**：`MATCH ... RETURN ... ORDER BY <col> [ASC|DESC] SKIP <n> LIMIT <m>`，列名优先匹配 alias，再回落到 `var.prop` 和原始 binding。
+- **WITH 子句**：`MATCH ... WITH <expr> AS <alias>, ... RETURN ...` 把当前 bindings 重投影为下游可用变量。
+- **多语句**：`;` 分隔的多条 Cypher 顺序执行，结果拼接返回；字符串字面量内的 `;` 不会被切分。
+- **Snapshot 导入 / 导出**：`GraphVersionStore.exportSnapshot(commitId, file)` 与 `importSnapshot(file, branch, author, message)`，用于备份 / 跨仓库迁移 commit 内容（含 schema / index）。
 - **REBUILD INDEX**：`REBUILD TAG INDEX <tag>.<prop>` 对当前内存索引做手动 rebuild 钩子（当前实现同步空操作）。
 - **SHOW TAGS / SHOW EDGES / SHOW INDEXES / SHOW TAG \<name\> / SHOW EDGE \<name\>**：NebulaGraph 风格的管理 Cypher。
 - **变长路径匹配**：`(a)-[*min..max]->(b)` 与 `(a)-[:TYPE*min..max]->(b)`，按边类型过滤、按起止节点标签过滤，绑定返回最短路径集合。
