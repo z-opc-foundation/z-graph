@@ -103,6 +103,82 @@ checkout.query("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN b.name AS frie
 checkout.query("MATCH (n:Person) RETURN n.city AS city, count(n) AS cnt");
 ```
 
+## 前端控制台 (z-graph-console)
+
+`z-graph-console/` 是一个 React + Vite 单页应用，对应 `GraphControlServer` 暴露的 HTTP API。它提供：
+
+- **总览**：节点/边/分支/提交 KPI + 最近 5 次 commit 列表 + 示例查询。
+- **分支**：每个分支的 head commit + 该分支的提交数与节点/边统计。
+- **提交历史**：按分支筛选、按 message / author / commit id 搜索，支持点击 commit id 复制。
+- **Cypher 查询**：在线编辑器 + 预设示例（节点与边、变长路径、反向关系、聚合、CALL db.*、SHOW 等）；支持"分支 head / 指定 commit"两种绑定模式；执行结果表格化展示。
+- **Schema**：运行 `CALL db.tags()` / `db.edges()` / `db.indexes()`，展示当前 head 上的 schema 与索引。
+
+开发：
+
+```bash
+cd z-graph-console
+npm install
+npm run dev   # http://localhost:5173, Vite 把 /api/* 代理到 8090
+```
+
+打包：
+
+```bash
+npm run build   # 产物 dist/,由 frontend.Dockerfile 拷贝进 Nginx 镜像
+```
+
+通过环境变量切换 API 地址：`VITE_API_BASE=http://z-graph-server:8090` 或在运行时于界面侧栏填入。
+
+## 部署 — 三种镜像与分布式拓扑
+
+GitHub Actions 在 `.github/workflows/build-images.yml` 自动构建并把以下三个镜像推到 GHCR：
+
+| 镜像 | 用途 | 主要内容 |
+| --- | --- | --- |
+| `ghcr.io/z-opc-foundation/z-graph-server` | 服务端独立部署 | Bolt 4.4 + HTTP 控制面,JRE 多阶段构建,非 root 用户 |
+| `ghcr.io/z-opc-foundation/z-graph-frontend` | 前端独立部署 | Nginx 1.27 + React 静态产物,`/api` 反代到 server,`${Z_GRAPH_API_UPSTREAM}` 可注入 |
+| `ghcr.io/z-opc-foundation/z-graph-all-in-one` | 单容器 demo / 内网 | 一个 JRE + Nginx,同进程拉起 server 与前端,适合单机 |
+
+触发策略：
+
+- push 到 `main` → 跑 Java 测试 + 构建 + 推送三个镜像到 GHCR(latest + commit sha tag)。
+- push tag `v*` → 推送版本化镜像。
+- PR / `workflow_dispatch` → 只跑构建不推送。
+
+### docker-compose 分布式部署
+
+```bash
+# 服务 + 前端分离(默认 profile=distributed)
+docker compose -f deploy/docker/docker-compose.yml up -d z-graph-server z-graph-frontend
+# 访问 http://localhost:8080 看前端,8080 反代到 8090 控制面
+
+# 单容器一体机
+docker compose -f deploy/docker/docker-compose.yml --profile all-in-one up -d z-graph-all-in-one
+# 访问 http://localhost:8081
+
+# 多副本展示(分布式部署拓扑)
+docker compose -f deploy/docker/docker-compose.yml --profile cluster up -d
+```
+
+`docker-compose.yml` 内置四个 profile:`distributed`(默认 server + frontend)、`all-in-one`、`cluster`(多 server 节点 + 前端)、`frontend`(仅前端)。
+
+### Kubernetes 部署
+
+`deploy/kubernetes/z-graph.yaml` 包含完整的 Namespace + ConfigMap + PVC + Deployment + Service 资源：
+
+```bash
+kubectl apply -f deploy/kubernetes/z-graph.yaml
+kubectl port-forward -n z-graph svc/z-graph-frontend 8080:80
+```
+
+文件里附带了注释掉的 Ingress 示例，可按域名（如 `z-graph.example.com`）暴露到集群外。当前 `z-graph-server` 是单实例内存存储，多副本属于 topology 演示；生产多副本方案需要外部共享存储（NFS / CSI）替换 PVC。
+
+### 持久化与 CORS
+
+- 数据持久化：服务端镜像把 `/var/lib/z-graph` 暴露为 volume，仓库通过 `repository.bin` 原子写入；容器重启后自动恢复 commit / branch / schema。
+- CORS：`GraphControlServer` 默认 `Access-Control-Allow-Origin: *`；生产部署通过环境变量 `Z_GRAPH_CORS_ALLOWED_ORIGINS=https://your.domain` 收紧。
+- 健康检查：`/health` 暴露 head commit id 与节点 / 边计数，K8s readiness / liveness 与 docker-compose healthcheck 都使用它。
+
 ## 开源参考说明
 
 架构分层和协议兼容目标参考 [NebulaGraph](https://github.com/vesoft-inc/nebula)。NebulaGraph 为 Apache License 2.0 项目；本工程仅采用其公开架构思想和协议资料，不复制其未授权代码，并保留上游项目链接及许可证边界。

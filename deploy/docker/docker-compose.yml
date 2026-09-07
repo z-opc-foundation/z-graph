@@ -1,0 +1,125 @@
+# z-graph 分布式部署 — docker-compose
+#
+# 启动: docker compose -f deploy/docker/docker-compose.yml up -d
+# 停止: docker compose -f deploy/docker/docker-compose.yml down
+#
+# 这里展示 3 种部署模式(任选其一):
+#   1. profile=distributed:z-graph-server + z-graph-frontend + nginx 反代(默认)
+#   2. profile=all-in-one:   单容器 z-graph-all-in-one
+#   3. profile=cluster:      多实例 server(暂未实现分布式协调,仅展示 topology)
+
+name: z-graph
+
+x-common-env: &common-env
+  Z_GRAPH_BOLT_PORT: 7687
+  Z_GRAPH_HTTP_PORT: 8090
+  Z_GRAPH_CORS_ALLOWED_ORIGINS: "*"
+
+services:
+  # ========== 1. 服务端(z-graph-server) ==========
+  z-graph-server:
+    image: ghcr.io/z-opc-foundation/z-graph-server:${Z_GRAPH_IMAGE_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/server.Dockerfile
+    container_name: z-graph-server
+    restart: unless-stopped
+    ports:
+      - "7687:7687"   # Bolt 4.4
+      - "8090:8090"   # HTTP 控制面
+    environment:
+      <<: *common-env
+      Z_GRAPH_DATA_DIR: /var/lib/z-graph
+    volumes:
+      - z-graph-data:/var/lib/z-graph
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - z-graph-net
+
+  # ========== 2. 前端(z-graph-frontend + nginx 反代到 server) ==========
+  z-graph-frontend:
+    image: ghcr.io/z-opc-foundation/z-graph-frontend:${Z_GRAPH_IMAGE_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/frontend.Dockerfile
+    container_name: z-graph-frontend
+    restart: unless-stopped
+    depends_on:
+      z-graph-server:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    environment:
+      Z_GRAPH_API_UPSTREAM: z-graph-server:8090
+    networks:
+      - z-graph-net
+    profiles: ["distributed", "cluster", "frontend"]
+
+  # ========== 3. 一体化镜像(z-graph-all-in-one) ==========
+  z-graph-all-in-one:
+    image: ghcr.io/z-opc-foundation/z-graph-all-in-one:${Z_GRAPH_IMAGE_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/all-in-one.Dockerfile
+    container_name: z-graph-all-in-one
+    restart: unless-stopped
+    ports:
+      - "8081:80"     # 控制台 + API 反代
+      - "7687:7687"   # Bolt 直连(供本地 driver 使用)
+      - "8090:8090"   # HTTP 控制面直连
+    environment:
+      <<: *common-env
+      Z_GRAPH_DATA_DIR: /var/lib/z-graph
+      Z_GRAPH_API_UPSTREAM: 127.0.0.1:8090
+    volumes:
+      - z-graph-data:/var/lib/z-graph
+    networks:
+      - z-graph-net
+    profiles: ["all-in-one"]
+
+  # ========== 4. 集群示例(分布式部署拓扑) ==========
+  z-graph-server-node-2:
+    image: ghcr.io/z-opc-foundation/z-graph-server:${Z_GRAPH_IMAGE_TAG:-latest}
+    container_name: z-graph-server-2
+    restart: unless-stopped
+    ports:
+      - "7688:7687"
+      - "8091:8090"
+    environment:
+      <<: *common-env
+      Z_GRAPH_DATA_DIR: /var/lib/z-graph
+    volumes:
+      - z-graph-data-2:/var/lib/z-graph
+    networks:
+      - z-graph-net
+    profiles: ["cluster"]
+
+  z-graph-server-node-3:
+    image: ghcr.io/z-opc-foundation/z-graph-server:${Z_GRAPH_IMAGE_TAG:-latest}
+    container_name: z-graph-server-3
+    restart: unless-stopped
+    ports:
+      - "7689:7687"
+      - "8092:8090"
+    environment:
+      <<: *common-env
+      Z_GRAPH_DATA_DIR: /var/lib/z-graph
+    volumes:
+      - z-graph-data-3:/var/lib/z-graph
+    networks:
+      - z-graph-net
+    profiles: ["cluster"]
+
+volumes:
+  z-graph-data:
+  z-graph-data-2:
+  z-graph-data-3:
+
+networks:
+  z-graph-net:
+    driver: bridge

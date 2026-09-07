@@ -64,3 +64,9 @@ Desktop.ini
 *.tmp
 *.bak
 *.orig
+
+# Node.js / Vite / React 控制台
+z-graph-console/node_modules/
+z-graph-console/dist/
+z-graph-console/.vite/
+z-graph-console/.npm/

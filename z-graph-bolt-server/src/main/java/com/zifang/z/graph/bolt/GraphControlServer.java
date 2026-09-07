@@ -44,6 +44,46 @@ public final class GraphControlServer {
         server.createContext("/meta/branches", this::handleBranches);
         server.createContext("/meta/commits", this::handleCommits);
         server.createContext("/query", this::handleQuery);
+        // OPTIONS 预检 + CORS 头:允许浏览器前端直接访问此控制面
+        server.createContext("/options", exchange -> writeNoContent(exchange));
+    }
+
+    /**
+     * 解析 CORS 配置。系统属性 {@code z.graph.cors.allowedOrigins} 可以指定
+     * 逗号分隔的 origin 列表,默认允许所有 origin(方便本地与容器调试)。
+     */
+    private static String[] allowedOrigins() {
+        String raw = System.getProperty("z.graph.cors.allowedOrigins",
+                System.getenv().getOrDefault("Z_GRAPH_CORS_ALLOWED_ORIGINS", "*"));
+        if (raw == null || raw.isBlank()) return new String[]{"*"};
+        return java.util.Arrays.stream(raw.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toArray(String[]::new);
+    }
+
+    private static void applyCorsHeaders(HttpExchange exchange) {
+        String[] origins = allowedOrigins();
+        String requestedOrigin = exchange.getRequestHeaders().getFirst("Origin");
+        if ("*".equals(origins[0])) {
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        } else if (requestedOrigin != null && java.util.Arrays.asList(origins).contains(requestedOrigin)) {
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", requestedOrigin);
+            exchange.getResponseHeaders().set("Vary", "Origin");
+        }
+        exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        exchange.getResponseHeaders().set("Access-Control-Max-Age", "3600");
+    }
+
+    private static void writeNoContent(HttpExchange exchange) throws IOException {
+        if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
+            applyCorsHeaders(exchange);
+            exchange.sendResponseHeaders(204, -1);
+            exchange.getResponseBody().close();
+        } else {
+            writeJson(exchange, 405, Map.of("error", "Method not allowed"));
+        }
     }
 
     public void start() {
@@ -65,10 +105,12 @@ public final class GraphControlServer {
         body.put("head", head.getId());
         body.put("nodeCount", head.getNodeCount());
         body.put("edgeCount", head.getEdgeCount());
+        applyCorsHeaders(exchange);
         writeJson(exchange, 200, body);
     }
 
     private void handleBranches(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
         writeJson(exchange, 200, metaService.branches());
     }
 
@@ -86,10 +128,12 @@ public final class GraphControlServer {
             item.put("edgeCount", commit.getEdgeCount());
             commits.add(item);
         }
+        applyCorsHeaders(exchange);
         writeJson(exchange, 200, commits);
     }
 
     private void handleQuery(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
         Map<String, String> parameters = queryParameters(exchange.getRequestURI());
         String cypher = parameters.get("cypher");
         if (cypher == null || cypher.isBlank()) {

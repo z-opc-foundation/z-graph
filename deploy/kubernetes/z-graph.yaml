@@ -1,0 +1,205 @@
+# Kubernetes 部署 z-graph 分布式集群(frontend + 多 server 节点 + PVC)
+# 适用 kubectl 1.24+,镜像仓库假设为 ghcr.io/z-opc-foundation/z-graph-{server,frontend}
+#
+# 使用方式:
+#   kubectl apply -f deploy/kubernetes/z-graph.yaml
+#   kubectl port-forward -n z-graph svc/z-graph-frontend 8080:80
+#
+# 当前 z-graph-server 是单实例内存存储,多实例属于 topology 演示;
+# 生产多副本方案需要外部共享存储(NFS/CSI)替换 PVC。
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: z-graph
+  labels:
+    app.kubernetes.io/part-of: z-graph
+
+---
+# ===== 后端 ConfigMap:记录公共环境变量 =====
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: z-graph-config
+  namespace: z-graph
+data:
+  Z_GRAPH_BOLT_PORT: "7687"
+  Z_GRAPH_HTTP_PORT: "8090"
+  Z_GRAPH_CORS_ALLOWED_ORIGINS: "*"
+  Z_GRAPH_DATA_DIR: "/var/lib/z-graph"
+
+---
+# ===== 后端无状态服务 + 反向 Deployment =====
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: z-graph-data
+  namespace: z-graph
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: z-graph-server
+  namespace: z-graph
+  labels:
+    app.kubernetes.io/name: z-graph-server
+    app.kubernetes.io/part-of: z-graph
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # 单副本避免并发写
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: z-graph-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: z-graph-server
+        app.kubernetes.io/part-of: z-graph
+    spec:
+      containers:
+        - name: z-graph-server
+          image: ghcr.io/z-opc-foundation/z-graph-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: bolt
+              containerPort: 7687
+            - name: http
+              containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: z-graph-config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/z-graph
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: z-graph-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: z-graph-server
+  namespace: z-graph
+  labels:
+    app.kubernetes.io/name: z-graph-server
+spec:
+  selector:
+    app.kubernetes.io/name: z-graph-server
+  ports:
+    - name: bolt
+      port: 7687
+      targetPort: bolt
+    - name: http
+      port: 8090
+      targetPort: http
+
+---
+# ===== 前端 Deployment + ClusterIP Service =====
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: z-graph-frontend
+  namespace: z-graph
+  labels:
+    app.kubernetes.io/name: z-graph-frontend
+    app.kubernetes.io/part-of: z-graph
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: z-graph-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: z-graph-frontend
+        app.kubernetes.io/part-of: z-graph
+    spec:
+      containers:
+        - name: z-graph-frontend
+          image: ghcr.io/z-opc-foundation/z-graph-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: Z_GRAPH_API_UPSTREAM
+              value: z-graph-server:8090
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: z-graph-frontend
+  namespace: z-graph
+  labels:
+    app.kubernetes.io/name: z-graph-frontend
+spec:
+  selector:
+    app.kubernetes.io/name: z-graph-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+# ===== Ingress(可选):把 / 暴露到外部域名 =====
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: z-graph
+#   namespace: z-graph
+# spec:
+#   rules:
+#     - host: z-graph.example.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: z-graph-frontend
+#                 port:
+#                   number: 80
