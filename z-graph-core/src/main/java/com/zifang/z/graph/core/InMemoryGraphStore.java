@@ -39,6 +39,9 @@ public class InMemoryGraphStore implements GraphStore {
     private final Set<IndexDefinition> propertyIndexDefinitions = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<IndexDefinition, ConcurrentHashMap<Object, Set<Long>>> propertyIndexes =
             new ConcurrentHashMap<>();
+    /** Tag / EdgeType schema 表（NebulaGraph 风格的可选 schema）。 */
+    private final ConcurrentHashMap<String, TagSchema> tagSchemas = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, EdgeTypeSchema> edgeTypeSchemas = new ConcurrentHashMap<>();
 
     private final AtomicLong nextNodeId = new AtomicLong(0);
     private final AtomicLong nextEdgeId = new AtomicLong(0);
@@ -57,7 +60,9 @@ public class InMemoryGraphStore implements GraphStore {
 
     /** 以完整标签集合创建节点，供快照复制和版本合并保留多标签。 */
     public Node addNode(long id, Collection<String> labels, Map<String, Object> properties) {
-        Node node = new Node(id, labels != null ? labels : List.of(), deepCopyMap(properties));
+        Collection<String> safeLabels = labels != null ? labels : List.of();
+        validateTagSchemas(safeLabels, properties);
+        Node node = new Node(id, safeLabels, deepCopyMap(properties));
         Node previous = nodes.put(id, node);
         if (previous != null) {
             for (String oldLabel : previous.getLabels()) {
@@ -143,6 +148,7 @@ public class InMemoryGraphStore implements GraphStore {
             throw new IllegalArgumentException(
                     "Edge references non-existent node: start=" + startNodeId + ", end=" + endNodeId);
         }
+        validateEdgeTypeSchema(type, properties);
         Edge edge = new Edge(id, type, startNodeId, endNodeId, deepCopyMap(properties));
         Edge previous = edges.put(id, edge);
         if (previous != null) {
@@ -323,7 +329,96 @@ public class InMemoryGraphStore implements GraphStore {
         for (IndexDefinition definition : propertyIndexDefinitions) {
             copy.createPropertyIndex(definition.label(), definition.propertyKey());
         }
+        for (TagSchema schema : tagSchemas.values()) {
+            copy.createTag(schema);
+        }
+        for (EdgeTypeSchema schema : edgeTypeSchemas.values()) {
+            copy.createEdgeType(schema);
+        }
         return copy;
+    }
+
+    private void validateTagSchemas(Collection<String> labels, Map<String, Object> properties) {
+        for (String label : labels) {
+            TagSchema schema = tagSchemas.get(label);
+            if (schema != null) {
+                schema.validate(properties);
+            }
+        }
+    }
+
+    private void validateEdgeTypeSchema(String type, Map<String, Object> properties) {
+        EdgeTypeSchema schema = edgeTypeSchemas.get(type);
+        if (schema != null) {
+            schema.validate(properties);
+        }
+    }
+
+    @Override
+    public synchronized void createTag(TagSchema schema) {
+        // 若存在同名 schema，需按新 schema 校验现有节点
+        for (Long nodeId : getNodeIdsByLabel(schema.getName())) {
+            Node node = nodes.get(nodeId);
+            if (node != null) {
+                schema.validate(node.getProperties());
+            }
+        }
+        tagSchemas.put(schema.getName(), schema);
+    }
+
+    @Override
+    public synchronized boolean dropTag(String tagName) {
+        TagSchema schema = tagSchemas.remove(tagName);
+        if (schema == null) return false;
+        // 仅当没有该标签的节点时才允许删除，避免悬挂引用
+        Set<Long> existing = labelIndex.get(tagName);
+        if (existing != null && !existing.isEmpty()) {
+            tagSchemas.put(tagName, schema);
+            throw new IllegalStateException(
+                    "Tag " + tagName + " still has " + existing.size() + " nodes");
+        }
+        return true;
+    }
+
+    @Override
+    public TagSchema getTagSchema(String tagName) {
+        return tagSchemas.get(tagName);
+    }
+
+    @Override
+    public List<String> listTags() {
+        return tagSchemas.keySet().stream().sorted().toList();
+    }
+
+    @Override
+    public synchronized void createEdgeType(EdgeTypeSchema schema) {
+        for (Edge edge : getEdgesByType(schema.getName())) {
+            schema.validate(edge.getProperties());
+        }
+        edgeTypeSchemas.put(schema.getName(), schema);
+    }
+
+    @Override
+    public synchronized boolean dropEdgeType(String edgeTypeName) {
+        EdgeTypeSchema schema = edgeTypeSchemas.remove(edgeTypeName);
+        if (schema == null) return false;
+        Set<Long> existing = typeIndex.get(edgeTypeName);
+        if (existing != null && !existing.isEmpty()) {
+            edgeTypeSchemas.put(edgeTypeName, schema);
+            throw new IllegalStateException(
+                    "EdgeType " + edgeTypeName + " still has " + existing.size() + " edges");
+        }
+        return true;
+    }
+
+    @Override
+    public EdgeTypeSchema getEdgeTypeSchema(String edgeTypeName) {
+        return edgeTypeSchemas.get(edgeTypeName);
+    }
+
+    @Override
+    public List<String> listEdgeTypes() {
+        return edgeTypeSchemas.keySet().stream().sorted().toList();
     }
 
     private record IndexDefinition(String label, String propertyKey) {
@@ -379,6 +474,8 @@ public class InMemoryGraphStore implements GraphStore {
         stats.put("labelCount", labelIndex.size());
         stats.put("edgeTypeCount", typeIndex.size());
         stats.put("propertyIndexCount", propertyIndexDefinitions.size());
+        stats.put("tagSchemaCount", tagSchemas.size());
+        stats.put("edgeTypeSchemaCount", edgeTypeSchemas.size());
         return stats;
     }
 }

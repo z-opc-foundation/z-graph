@@ -1,7 +1,9 @@
 package com.zifang.z.graph.core;
 
+import com.zifang.z.graph.api.EdgeTypeSchema;
 import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.api.GraphStore;
+import com.zifang.z.graph.api.TagSchema;
 
 import java.util.List;
 import java.util.Map;
@@ -43,5 +45,21 @@ public final class GraphCheckout {
 
     public long getEdgeCount() {
         return store.getEdgeCount();
+    }
+
+    public TagSchema getTagSchema(String tagName) {
+        return store.getTagSchema(tagName);
+    }
+
+    public List<String> listTags() {
+        return store.listTags();
+    }
+
+    public EdgeTypeSchema getEdgeTypeSchema(String edgeTypeName) {
+        return store.getEdgeTypeSchema(edgeTypeName);
+    }
+
+    public List<String> listEdgeTypes() {
+        return store.listEdgeTypes();
     }
 }

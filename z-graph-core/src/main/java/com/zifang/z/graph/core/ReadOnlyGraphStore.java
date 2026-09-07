@@ -1,8 +1,10 @@
 package com.zifang.z.graph.core;
 
 import com.zifang.z.graph.api.Edge;
+import com.zifang.z.graph.api.EdgeTypeSchema;
 import com.zifang.z.graph.api.GraphStore;
 import com.zifang.z.graph.api.Node;
+import com.zifang.z.graph.api.TagSchema;
 
 import java.util.List;
 import java.util.Map;
@@ -138,6 +140,26 @@ public final class ReadOnlyGraphStore implements GraphStore {
 
     public boolean hasPropertyIndex(String label, String propertyKey) {
         return delegate instanceof InMemoryGraphStore store && store.hasPropertyIndex(label, propertyKey);
+    }
+
+    @Override
+    public TagSchema getTagSchema(String tagName) {
+        return delegate.getTagSchema(tagName);
+    }
+
+    @Override
+    public List<String> listTags() {
+        return delegate.listTags();
+    }
+
+    @Override
+    public EdgeTypeSchema getEdgeTypeSchema(String edgeTypeName) {
+        return delegate.getEdgeTypeSchema(edgeTypeName);
+    }
+
+    @Override
+    public List<String> listEdgeTypes() {
+        return delegate.listEdgeTypes();
     }
 
     private static Node copyNode(Node node) {

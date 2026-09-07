@@ -1,9 +1,11 @@
 package com.zifang.z.graph.core;
 
 import com.zifang.z.graph.api.Edge;
+import com.zifang.z.graph.api.EdgeTypeSchema;
 import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.api.GraphMergeResult;
 import com.zifang.z.graph.api.Node;
+import com.zifang.z.graph.api.TagSchema;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -44,7 +46,7 @@ import java.util.Set;
 public final class GraphVersionStore {
 
     private static final int STORAGE_MAGIC = 0x5A475246;
-    private static final int STORAGE_VERSION = 2;
+    private static final int STORAGE_VERSION = 3;
 
     private final Map<String, GraphCommit> commits = new LinkedHashMap<>();
     private final Map<String, InMemoryGraphStore> snapshots = new LinkedHashMap<>();
@@ -183,12 +185,21 @@ public final class GraphVersionStore {
         requireBranch(branch);
         String currentHeadId = branches.get(branch);
         if (!Objects.equals(currentHeadId, baseCommitId)) {
-            throw new IllegalStateException("Branch advanced since transaction started: " + branch);
+            throw new StaleHeadException(
+                    "Branch advanced since transaction started: " + branch
+                            + " (expected " + baseCommitId + ", actual " + currentHeadId + ")");
         }
         GraphCommit commit = createCommit(List.of(baseCommitId), branch, author, message, workingStore);
         branches.put(branch, commit.getId());
         persistState();
         return commit;
+    }
+
+    /**
+     * 当并发事务提交时，branch head 已被推进，提示调用方放弃或重试。
+     */
+    public static class StaleHeadException extends IllegalStateException {
+        public StaleHeadException(String message) { super(message); }
     }
 
     synchronized long allocateNodeId() {
@@ -214,8 +225,13 @@ public final class GraphVersionStore {
         }
         try (InputStream input = Files.newInputStream(stateFile);
              DataInputStream in = new DataInputStream(input)) {
-            if (in.readInt() != STORAGE_MAGIC || in.readInt() != STORAGE_VERSION) {
+            int magic = in.readInt();
+            int version = in.readInt();
+            if (magic != STORAGE_MAGIC) {
                 throw new IllegalStateException("Unsupported z-graph repository format: " + stateFile);
+            }
+            if (version < 2 || version > STORAGE_VERSION) {
+                throw new IllegalStateException("Unsupported z-graph repository version: " + version);
             }
             sequence = in.readLong();
             nextNodeId = in.readLong();
@@ -234,7 +250,7 @@ public final class GraphVersionStore {
 
             int snapshotCount = in.readInt();
             for (int i = 0; i < snapshotCount; i++) {
-                snapshots.put(readString(in), readSnapshot(in));
+                snapshots.put(readString(in), readSnapshot(in, version));
             }
             return !commits.isEmpty() && !branches.isEmpty();
         } catch (IOException e) {
@@ -330,10 +346,36 @@ public final class GraphVersionStore {
             writeString(out, index.get(0));
             writeString(out, index.get(1));
         }
+
+        // V3+: Tag / EdgeType schemas
+        List<String> tags = graph.listTags();
+        out.writeInt(tags.size());
+        for (String tag : tags) {
+            TagSchema schema = graph.getTagSchema(tag);
+            writeString(out, schema.getName());
+            out.writeInt(schema.getFields().size());
+            for (TagSchema.Field field : schema.getFields()) {
+                writeString(out, field.getName());
+                writeString(out, field.getType().name());
+                out.writeBoolean(field.isNullable());
+            }
+        }
+        List<String> edgeTypes = graph.listEdgeTypes();
+        out.writeInt(edgeTypes.size());
+        for (String edgeType : edgeTypes) {
+            EdgeTypeSchema schema = graph.getEdgeTypeSchema(edgeType);
+            writeString(out, schema.getName());
+            out.writeInt(schema.getFields().size());
+            for (TagSchema.Field field : schema.getFields()) {
+                writeString(out, field.getName());
+                writeString(out, field.getType().name());
+                out.writeBoolean(field.isNullable());
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")
-    private static InMemoryGraphStore readSnapshot(DataInputStream in) throws IOException {
+    private static InMemoryGraphStore readSnapshot(DataInputStream in, int version) throws IOException {
         InMemoryGraphStore graph = new InMemoryGraphStore();
         int nodeCount = in.readInt();
         for (int i = 0; i < nodeCount; i++) {
@@ -351,6 +393,34 @@ public final class GraphVersionStore {
         int indexCount = in.readInt();
         for (int i = 0; i < indexCount; i++) {
             graph.createPropertyIndex(readString(in), readString(in));
+        }
+        if (version >= 3) {
+            int tagCount = in.readInt();
+            for (int i = 0; i < tagCount; i++) {
+                String tagName = readString(in);
+                int fieldCount = in.readInt();
+                List<TagSchema.Field> fields = new ArrayList<>(fieldCount);
+                for (int j = 0; j < fieldCount; j++) {
+                    String fieldName = readString(in);
+                    TagSchema.DataType type = TagSchema.DataType.valueOf(readString(in));
+                    boolean nullable = in.readBoolean();
+                    fields.add(new TagSchema.Field(fieldName, type, nullable));
+                }
+                graph.createTag(new TagSchema(tagName, fields));
+            }
+            int edgeTypeCount = in.readInt();
+            for (int i = 0; i < edgeTypeCount; i++) {
+                String edgeTypeName = readString(in);
+                int fieldCount = in.readInt();
+                List<TagSchema.Field> fields = new ArrayList<>(fieldCount);
+                for (int j = 0; j < fieldCount; j++) {
+                    String fieldName = readString(in);
+                    TagSchema.DataType type = TagSchema.DataType.valueOf(readString(in));
+                    boolean nullable = in.readBoolean();
+                    fields.add(new TagSchema.Field(fieldName, type, nullable));
+                }
+                graph.createEdgeType(new EdgeTypeSchema(edgeTypeName, fields));
+            }
         }
         return graph;
     }

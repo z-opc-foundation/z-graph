@@ -98,4 +98,49 @@ public interface GraphStore {
 
     /** 回滚变更（内存模式下是 no-op） */
     void rollback();
+
+    // ==================== Schema（NebulaGraph 风格 Tag / EdgeType）====================
+
+    /**
+     * 注册或替换一个 Tag schema。若已有同名 schema 则覆盖，覆盖前会按旧 schema 校验现有节点，
+     * 校验失败时抛出 SchemaViolationException。
+     */
+    default void createTag(TagSchema schema) {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
+
+    /** 删除一个 Tag schema，仅当没有对应标签节点时才允许删除。 */
+    default boolean dropTag(String tagName) {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
+
+    /** 返回当前已注册的 Tag schema，未注册返回 null。 */
+    default TagSchema getTagSchema(String tagName) {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
+
+    /** 返回所有 Tag schema 名称，按字典序排列。 */
+    default List<String> listTags() {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
+
+    /** 注册或替换一个 EdgeType schema。语义同 {@link #createTag(TagSchema)}。 */
+    default void createEdgeType(EdgeTypeSchema schema) {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
+
+    /** 删除一个 EdgeType schema，仅当没有对应类型边时才允许删除。 */
+    default boolean dropEdgeType(String edgeTypeName) {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
+
+    /** 返回当前已注册的 EdgeType schema，未注册返回 null。 */
+    default EdgeTypeSchema getEdgeTypeSchema(String edgeTypeName) {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
+
+    /** 返回所有 EdgeType schema 名称，按字典序排列。 */
+    default List<String> listEdgeTypes() {
+        throw new UnsupportedOperationException("Schema management not implemented");
+    }
 }

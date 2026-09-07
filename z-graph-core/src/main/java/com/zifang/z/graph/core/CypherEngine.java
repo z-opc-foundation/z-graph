@@ -49,6 +49,8 @@ public class CypherEngine {
             return executeReturn(trimmed);
         } else if (upper.startsWith("UNWIND")) {
             return executeUnwind(trimmed);
+        } else if (upper.startsWith("SHOW")) {
+            return executeShow(trimmed);
         } else {
             throw new CypherException("Unsupported Cypher statement: " + trimmed);
         }
@@ -501,15 +503,34 @@ public class CypherEngine {
     // ==================== RETURN 投影 ====================
 
     private List<Map<String, Object>> executeReturnProjection(String returnExpr, List<MatchBinding> bindings) {
-        List<Map<String, Object>> results = new ArrayList<>();
-        for (MatchBinding binding : bindings) {
-            results.add(projectRow(returnExpr, binding));
+        List<Projection> projections = parseProjections(returnExpr);
+        boolean hasAggregate = projections.stream().anyMatch(p -> p.aggregate != null);
+        if (!hasAggregate) {
+            List<Map<String, Object>> results = new ArrayList<>();
+            for (MatchBinding binding : bindings) {
+                results.add(projectRow(projections, binding));
+            }
+            return results;
         }
-        return results;
+        return aggregateProjections(projections, bindings);
     }
 
     private Map<String, Object> projectRow(String returnExpr, MatchBinding binding) {
+        return projectRow(parseProjections(returnExpr), binding);
+    }
+
+    private Map<String, Object> projectRow(List<Projection> projections, MatchBinding binding) {
         Map<String, Object> row = new LinkedHashMap<>();
+        for (Projection projection : projections) {
+            row.put(projection.alias, projection.aggregate == null
+                    ? resolveExpression(projection.expr, binding)
+                    : projection.aggregate.compute(List.of(binding)));
+        }
+        return row;
+    }
+
+    private List<Projection> parseProjections(String returnExpr) {
+        List<Projection> projections = new ArrayList<>();
         List<String> exprs = splitByComma(returnExpr);
         int idx = 0;
         for (String expr : exprs) {
@@ -522,15 +543,120 @@ public class CypherEngine {
                 alias = expr.substring(asPos + 4).trim();
             } else {
                 valueExpr = expr;
-                // 生成别名: n.name → n_name, n.id → n_id
                 alias = valueExpr.replace('.', '_').replace(' ', '_');
-                if (alias.isEmpty()) { alias = "column_" + (idx + 1); }
+                if (alias.isEmpty()) alias = "column_" + (idx + 1);
             }
-            Object value = resolveExpression(valueExpr, binding);
-            row.put(alias, value);
+            AggregateCall aggregate = parseAggregate(valueExpr);
+            projections.add(new Projection(valueExpr, alias, aggregate));
             idx++;
         }
-        return row;
+        return projections;
+    }
+
+    /** 聚合投影：按非聚合列分组，再对聚合列计算。空集合但有聚合时仍返回一行。 */
+    private List<Map<String, Object>> aggregateProjections(List<Projection> projections, List<MatchBinding> bindings) {
+        Map<String, List<MatchBinding>> groups = new LinkedHashMap<>();
+        Map<String, Map<String, Object>> groupKeys = new LinkedHashMap<>();
+        List<Projection> nonAggregates = projections.stream()
+                .filter(p -> p.aggregate == null)
+                .toList();
+        for (MatchBinding binding : bindings) {
+            StringBuilder key = new StringBuilder();
+            Map<String, Object> keyMap = new LinkedHashMap<>();
+            for (Projection projection : nonAggregates) {
+                Object value = resolveExpression(projection.expr, binding);
+                key.append(value == null ? "<null>" : value.toString()).append('');
+                keyMap.put(projection.alias, value);
+            }
+            String keyStr = key.toString();
+            groups.computeIfAbsent(keyStr, ignored -> new ArrayList<>()).add(binding);
+            groupKeys.putIfAbsent(keyStr, keyMap);
+        }
+        List<Map<String, Object>> results = new ArrayList<>();
+        if (groups.isEmpty() && !bindings.isEmpty()) {
+            return results;
+        }
+        if (groups.isEmpty()) {
+            // 纯聚合且无输入：仍返回一行，让 count=0 / sum=null 之类语义正确
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (Projection projection : projections) {
+                if (projection.aggregate != null) {
+                    row.put(projection.alias, projection.aggregate.compute(List.of()));
+                }
+            }
+            return List.of(row);
+        }
+        for (Map.Entry<String, List<MatchBinding>> entry : groups.entrySet()) {
+            Map<String, Object> row = new LinkedHashMap<>(groupKeys.get(entry.getKey()));
+            for (Projection projection : projections) {
+                if (projection.aggregate != null) {
+                    row.put(projection.alias, projection.aggregate.compute(entry.getValue()));
+                }
+            }
+            results.add(row);
+        }
+        return results;
+    }
+
+    /** 解析聚合调用，例如 {@code count(n)} / {@code count(*)} / {@code sum(n.age)} / {@code avg(n.age)}。 */
+    private AggregateCall parseAggregate(String expr) {
+        Matcher matcher = Pattern.compile("(?i)^(count|sum|avg|min|max)\\s*\\(\\s*(.+?)\\s*\\)$").matcher(expr.trim());
+        if (!matcher.matches()) return null;
+        String function = matcher.group(1).toLowerCase();
+        String inner = matcher.group(2).trim();
+        String source = "*".equals(inner) ? null : inner;
+        return new AggregateCall(function, source);
+    }
+
+    private Object evaluateAggregate(String function, String source, List<MatchBinding> bindings) {
+        if (bindings == null) bindings = List.of();
+        if ("count".equals(function)) {
+            if (source == null) return (long) bindings.size();
+            long nonNull = 0;
+            for (MatchBinding binding : bindings) {
+                if (resolveExpression(source, binding) != null) nonNull++;
+            }
+            return nonNull;
+        }
+        List<Object> values = new ArrayList<>();
+        for (MatchBinding binding : bindings) {
+            Object value = source == null ? binding.variables.values().stream().findFirst().orElse(null)
+                    : resolveExpression(source, binding);
+            if (value instanceof Number) values.add(value);
+        }
+        if (values.isEmpty()) return null;
+        return switch (function) {
+            case "sum" -> values.stream().mapToDouble(v -> ((Number) v).doubleValue()).sum();
+            case "avg" -> values.stream().mapToDouble(v -> ((Number) v).doubleValue()).average().orElse(0);
+            case "min" -> values.stream().min((a, b) -> compareNumbersOrStrings(a, b)).orElse(null);
+            case "max" -> values.stream().max((a, b) -> compareNumbersOrStrings(a, b)).orElse(null);
+            default -> null;
+        };
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static int compareNumbersOrStrings(Object a, Object b) {
+        if (a instanceof Number && b instanceof Number) {
+            return Double.compare(((Number) a).doubleValue(), ((Number) b).doubleValue());
+        }
+        return String.valueOf(a).compareTo(String.valueOf(b));
+    }
+
+    private record Projection(String expr, String alias, AggregateCall aggregate) {
+    }
+
+    private final class AggregateCall {
+        final String function;
+        final String source;
+
+        AggregateCall(String function, String source) {
+            this.function = function;
+            this.source = source;
+        }
+
+        Object compute(List<MatchBinding> bindings) {
+            return evaluateAggregate(function, source, bindings);
+        }
     }
 
     // ==================== UNWIND ====================
@@ -557,6 +683,87 @@ public class CypherEngine {
             results.add(row);
         }
         return results;
+    }
+
+    // ==================== SHOW 管理语句（NebulaGraph 风格）====================
+
+    /**
+     * 支持以下管理语句：
+     * <ul>
+     *     <li>SHOW TAGS</li>
+     *     <li>SHOW EDGES</li>
+     *     <li>SHOW INDEXES</li>
+     *     <li>SHOW TAG <name></li>
+     *     <li>SHOW EDGE <name></li>
+     * </ul>
+     */
+    private List<Map<String, Object>> executeShow(String cypher) {
+        String body = cypher.substring(4).trim();
+        String upperBody = body.toUpperCase();
+        if (upperBody.equals("TAGS")) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (String tag : store.listTags()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("Name", tag);
+                rows.add(row);
+            }
+            return rows;
+        }
+        if (upperBody.equals("EDGES")) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (String edgeType : store.listEdgeTypes()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("Name", edgeType);
+                rows.add(row);
+            }
+            return rows;
+        }
+        if (upperBody.equals("INDEXES")) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            if (store instanceof InMemoryGraphStore ims) {
+                for (List<String> index : ims.getPropertyIndexes()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("Name", index.get(0) + "_" + index.get(1));
+                    row.put("Tag", index.get(0));
+                    row.put("Property", index.get(1));
+                    rows.add(row);
+                }
+            }
+            return rows;
+        }
+        if (upperBody.startsWith("TAG ")) {
+            String name = body.substring(4).trim();
+            TagSchema schema = store.getTagSchema(name);
+            if (schema == null) {
+                throw new CypherException("Tag not found: " + name);
+            }
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (TagSchema.Field field : schema.getFields()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("Field", field.getName());
+                row.put("Type", field.getType().name());
+                row.put("Null", field.isNullable() ? "YES" : "NO");
+                rows.add(row);
+            }
+            return rows;
+        }
+        if (upperBody.startsWith("EDGE ")) {
+            String name = body.substring(5).trim();
+            EdgeTypeSchema schema = store.getEdgeTypeSchema(name);
+            if (schema == null) {
+                throw new CypherException("EdgeType not found: " + name);
+            }
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (TagSchema.Field field : schema.getFields()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("Field", field.getName());
+                row.put("Type", field.getType().name());
+                row.put("Null", field.isNullable() ? "YES" : "NO");
+                rows.add(row);
+            }
+            return rows;
+        }
+        throw new CypherException("Unsupported SHOW statement: " + cypher);
     }
 
     // ==================== 工具方法 ====================

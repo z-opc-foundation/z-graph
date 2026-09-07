@@ -1,9 +1,11 @@
 package com.zifang.z.graph.core;
 
 import com.zifang.z.graph.api.Edge;
+import com.zifang.z.graph.api.EdgeTypeSchema;
 import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.api.GraphStore;
 import com.zifang.z.graph.api.Node;
+import com.zifang.z.graph.api.TagSchema;
 
 import java.util.List;
 import java.util.Map;
@@ -184,6 +186,54 @@ public final class GraphWriteTransaction implements GraphStore {
     public boolean dropPropertyIndex(String label, String propertyKey) {
         ensureOpen();
         return workingStore.dropPropertyIndex(label, propertyKey);
+    }
+
+    @Override
+    public void createTag(TagSchema schema) {
+        ensureOpen();
+        workingStore.createTag(schema);
+    }
+
+    @Override
+    public boolean dropTag(String tagName) {
+        ensureOpen();
+        return workingStore.dropTag(tagName);
+    }
+
+    @Override
+    public TagSchema getTagSchema(String tagName) {
+        ensureOpen();
+        return workingStore.getTagSchema(tagName);
+    }
+
+    @Override
+    public List<String> listTags() {
+        ensureOpen();
+        return workingStore.listTags();
+    }
+
+    @Override
+    public void createEdgeType(EdgeTypeSchema schema) {
+        ensureOpen();
+        workingStore.createEdgeType(schema);
+    }
+
+    @Override
+    public boolean dropEdgeType(String edgeTypeName) {
+        ensureOpen();
+        return workingStore.dropEdgeType(edgeTypeName);
+    }
+
+    @Override
+    public EdgeTypeSchema getEdgeTypeSchema(String edgeTypeName) {
+        ensureOpen();
+        return workingStore.getEdgeTypeSchema(edgeTypeName);
+    }
+
+    @Override
+    public List<String> listEdgeTypes() {
+        ensureOpen();
+        return workingStore.listEdgeTypes();
     }
 
     @Override
