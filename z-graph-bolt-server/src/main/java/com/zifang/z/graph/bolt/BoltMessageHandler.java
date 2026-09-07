@@ -178,6 +178,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
     private List<Map<String, Object>> executeCypher(String cypher, Map<String, Object> parameters) {
         String upper = cypher.trim().toUpperCase();
         boolean mutating = upper.startsWith("CREATE")
+                || upper.startsWith("MERGE")
                 || (upper.startsWith("MATCH") && (upper.contains(" SET ")
                 || upper.contains(" DELETE ")
                 || upper.contains("DETACH DELETE")));

@@ -243,7 +243,7 @@ QPS: 5278.2
 | 维度 | 结果 |
 |------|------|
 | `GraphVersionStore` 单元测试 | ✅ 9/9：commit、branch、checkout、merge、冲突、持久化恢复、Query/Meta facade |
-| `CypherEngine` 单元测试 | ✅ 14/14：含参数绑定 |
+| `CypherEngine` 单元测试 | ✅ 15/15：含参数绑定和 MERGE upsert |
 | `InMemoryGraphStore` 单元测试 | ✅ 12/12：含属性索引 |
 | Bolt 协议单元测试 | ✅ 14/14 |
 | Bolt 事务 E2E | ✅ BEGIN → RUN → PULL → COMMIT |

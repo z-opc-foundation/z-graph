@@ -151,8 +151,20 @@ class CypherEngineTest {
     }
 
     @Test
+    void mergeUpsertsExistingNode() {
+        List<Map<String, Object>> first = engine.execute(
+                "MERGE (n:Person {name: 'Alice'}) RETURN n.name AS name");
+        List<Map<String, Object>> second = engine.execute(
+                "MERGE (n:Person {name: 'Alice'}) RETURN n.name AS name");
+        assertEquals(1, first.size());
+        assertEquals(1, second.size());
+        assertEquals(1, store.getNodeCount());
+        assertEquals("Alice", second.get(0).get("name"));
+    }
+
+    @Test
     void unsupportedStatementThrows() {
         assertThrows(CypherEngine.CypherException.class,
-                () -> engine.execute("MERGE (n:Person {name: 'Alice'})"));
+                () -> engine.execute("CALL db.labels()"));
     }
 }

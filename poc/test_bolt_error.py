@@ -271,17 +271,17 @@ def test_transaction_lifecycle(r):
 
 
 def test_run_invalid_cypher(r):
-    """执行非法 Cypher → FAILURE（使用 MERGE 等未实现语句）"""
+    """执行非法 Cypher → FAILURE（使用 CALL 等未实现语句）"""
     def f():
         sock = socket.socket()
         sock.connect((HOST, PORT))
         try:
             sock.sendall(make_hello())
             assert recv_chunk(sock)[0] == 0x70
-            # 执行 CypherEngine 不支持的语句(MERGE)
-            sock.sendall(make_run("MERGE (n:Person {name: 'Alice'})"))
+            # 执行 CypherEngine 不支持的语句(CALL)
+            sock.sendall(make_run("CALL db.labels()"))
             sig, _, _ = recv_chunk(sock)
-            r.assert_eq("Unsupported Cypher (MERGE) gets FAILURE", sig, 0x7F)
+            r.assert_eq("Unsupported Cypher (CALL) gets FAILURE", sig, 0x7F)
         finally:
             sock.sendall(make_goodbye())
             sock.close()

@@ -43,6 +43,8 @@ public class CypherEngine {
             return executeMatch(trimmed);
         } else if (upper.startsWith("CREATE")) {
             return executeCreate(trimmed);
+        } else if (upper.startsWith("MERGE")) {
+            return executeMerge(trimmed);
         } else if (upper.startsWith("RETURN")) {
             return executeReturn(trimmed);
         } else if (upper.startsWith("UNWIND")) {
@@ -184,6 +186,56 @@ public class CypherEngine {
         row.put("end", toId);
         row.putAll(props);
         return row;
+    }
+
+    // ==================== MERGE ====================
+
+    /** MERGE 的最小节点 upsert 语义：按标签和全部属性精确匹配，不存在时创建。 */
+    private List<Map<String, Object>> executeMerge(String cypher) {
+        String body = cypher.substring(5).trim();
+        String returnClause = null;
+        String upperBody = body.toUpperCase();
+        int returnPos = upperBody.indexOf(" RETURN ");
+        if (returnPos >= 0) {
+            returnClause = body.substring(returnPos + 8).trim();
+            body = body.substring(0, returnPos).trim();
+        }
+
+        Matcher matcher = Pattern.compile("\\(\\s*(\\w*)\\s*(?::(\\w+))?\\s*(?:\\{(.+?)\\})?\\s*\\)")
+                .matcher(body);
+        if (!matcher.matches()) {
+            throw new CypherException("MERGE currently supports one node pattern: " + body);
+        }
+        String variable = matcher.group(1);
+        String label = matcher.group(2);
+        Map<String, Object> properties = parseProperties(matcher.group(3));
+
+        Node node = null;
+        List<Long> candidates = label == null
+                ? store.getAllNodeIds() : store.getNodeIdsByLabel(label);
+        for (Long candidate : candidates) {
+            Node current = store.getNode(candidate);
+            if (current != null && (label == null || current.hasLabel(label))
+                    && properties.entrySet().stream()
+                    .allMatch(entry -> Objects.equals(entry.getValue(), current.get(entry.getKey())))) {
+                node = current;
+                break;
+            }
+        }
+        if (node == null) {
+            node = store.addNode(label, properties);
+        }
+
+        MatchBinding binding = new MatchBinding();
+        if (!variable.isEmpty()) binding.variables.put(variable, node);
+        if (returnClause != null && !returnClause.isEmpty()) {
+            return executeReturnProjection(returnClause, List.of(binding));
+        }
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", node.getId());
+        row.put("label", label);
+        row.putAll(node.getProperties());
+        return List.of(row);
     }
 
     // ==================== MATCH ====================

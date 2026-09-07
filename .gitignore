@@ -1,17 +1,66 @@
 # Maven build output
 **/target/
+**/dependency-reduced-pom.xml
+**/maven-archiver/
+**/maven-status/
 
 # IDE metadata
 .idea/
 *.iml
+*.iws
+*.ipr
+.vscode/
+.project
+.classpath
+.settings/
+nbproject/
+nbbuild/
+nbdist/
+.nb-gradle/
 
 # macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# Linux/Windows editor temp
+*~
+*.swp
+*.swo
+
+# JVM crash / native logs
+hs_err_pid*.log
+replay_pid*.log
+*.dmp
+core.*
 
 # Runtime logs and local process files
 *.log
+logs/
 poc/*.pid
+poc/*.out
 poc/bolt-server.log
+poc/control-server.log
+nohup.out
+
+# Python caches (poc scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
 
 # Local repository data
 z-graph-data/
+z-graph-runtime/
+
+# OS / packaging
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Coverage / temp
+*.tmp
+*.bak
+*.orig
