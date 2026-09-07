@@ -39,6 +39,17 @@ public class EdgeTypeSchema {
 
     public boolean hasField(String name) { return getField(name) != null; }
 
+    /** 返回一个追加了新字段的新 schema（不可变）。 */
+    public EdgeTypeSchema withAddedField(TagSchema.Field field) {
+        if (hasField(field.getName())) {
+            throw new IllegalArgumentException(
+                    "EdgeType " + name + " already has field '" + field.getName() + "'");
+        }
+        List<TagSchema.Field> next = new ArrayList<>(fields);
+        next.add(field);
+        return new EdgeTypeSchema(name, next);
+    }
+
     public void validate(Map<String, Object> properties) {
         if (properties == null) properties = Map.of();
         for (Map.Entry<String, Object> entry : properties.entrySet()) {

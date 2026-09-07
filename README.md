@@ -12,7 +12,9 @@
 ## 已对齐 NebulaGraph 的能力
 
 - **Tag / EdgeType schema**：声明属性名、数据类型与 `NOT NULL` 约束，存写前自动校验；schema 也会随 commit 进入快照并随仓库重新加载恢复。
-- **DDL via Cypher**：`CREATE TAG` / `DROP TAG` / `CREATE EDGE` / `DROP EDGE` / `CREATE TAG INDEX ON <tag>.<prop>` / `DROP TAG INDEX ON <tag>.<prop>`。
+- **DDL via Cypher**：`CREATE TAG` / `DROP TAG` / `CREATE EDGE` / `DROP EDGE` / `CREATE TAG INDEX ON <tag>.<prop>` / `DROP TAG INDEX ON <tag>.<prop>` / `ALTER TAG / EDGE ADD|DROP (<field> ...)`。
+- **索引下推**：单节点 `MATCH (n:L) WHERE n.prop = value` 在已建 `(L, prop)` 索引时直接走索引查找，省掉全标签扫描。
+- **REBUILD INDEX**：`REBUILD TAG INDEX <tag>.<prop>` 对当前内存索引做手动 rebuild 钩子（当前实现同步空操作）。
 - **SHOW TAGS / SHOW EDGES / SHOW INDEXES / SHOW TAG \<name\> / SHOW EDGE \<name\>**：NebulaGraph 风格的管理 Cypher。
 - **变长路径匹配**：`(a)-[*min..max]->(b)` 与 `(a)-[:TYPE*min..max]->(b)`，按边类型过滤、按起止节点标签过滤，绑定返回最短路径集合。
 - **OPTIONAL MATCH**：模式未命中仍返回一行（左部变量为 null）。
@@ -58,6 +60,9 @@ GraphCommit second = feature.commit("bob", "feature graph");
 
 GraphCheckout checkout = repository.checkout(second.getId());
 checkout.query("CREATE TAG Person (name STRING NOT NULL, age INT)");
+checkout.query("CREATE TAG INDEX ON Person.name");
+checkout.query("ALTER TAG Person ADD (city STRING)");
+checkout.query("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.city AS city");
 checkout.query("MATCH (n:Person) RETURN n.name AS name");
 checkout.query("SHOW TAGS");
 checkout.query("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN b.name AS friend");

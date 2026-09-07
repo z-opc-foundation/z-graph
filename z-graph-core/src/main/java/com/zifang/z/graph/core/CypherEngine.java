@@ -57,6 +57,20 @@ public class CypherEngine {
             }
             return executeCreate(trimmed);
         }
+        if (upper.startsWith("ALTER")) {
+            String rest = trimmed.substring(5).trim();
+            String restUpper = rest.toUpperCase();
+            if (restUpper.startsWith("TAG ")) {
+                return executeAlterTag(trimmed);
+            }
+            if (restUpper.startsWith("EDGE ") || restUpper.startsWith("EDGETYPE")) {
+                return executeAlterEdgeType(trimmed);
+            }
+            throw new CypherException("Unsupported ALTER statement: " + trimmed);
+        }
+        if (upper.startsWith("REBUILD")) {
+            return executeRebuildIndex(trimmed);
+        }
         if (upper.startsWith("DROP")) {
             String rest = trimmed.substring(4).trim();
             String restUpper = rest.toUpperCase();
@@ -289,7 +303,14 @@ public class CypherEngine {
 
 
         // 1. 解析 MATCH 模式，找到候选节点
-        List<MatchBinding> bindings = resolvePattern(pattern);
+        List<MatchBinding> bindings;
+        // 优化路径：单节点模式 + WHERE 等值 + 索引命中时直接走索引
+        IndexedSeed seed = tryIndexSeed(pattern, whereClause);
+        if (seed != null) {
+            bindings = seed.bindings;
+        } else {
+            bindings = resolvePattern(pattern);
+        }
 
         // 2. 应用 WHERE 过滤
         if (whereClause != null && !whereClause.trim().isEmpty()) {
@@ -983,6 +1004,125 @@ public class CypherEngine {
         return List.of(Map.of("Dropped", name));
     }
 
+    /** ALTER TAG <name> ADD (<field> <type> [, ...]) / DROP (<field>) */
+    private List<Map<String, Object>> executeAlterTag(String cypher) {
+        return executeAlterSchema(cypher, "TAG", true);
+    }
+
+    private List<Map<String, Object>> executeAlterEdgeType(String cypher) {
+        return executeAlterSchema(cypher, "EDGE", false);
+    }
+
+    private List<Map<String, Object>> executeAlterSchema(String cypher, String kind, boolean isTag) {
+        String prefix = "ALTER " + kind + " ";
+        String body = stripLeadingKeyword(cypher, prefix);
+        int parenStart = body.indexOf('(');
+        if (parenStart < 0) {
+            throw new CypherException("ALTER " + kind + " requires ADD/DROP clause: " + cypher);
+        }
+        String nameAndAction = body.substring(0, parenStart).trim();
+        int parenEnd = findMatchingClose(body, parenStart);
+        if (parenEnd < 0) {
+            throw new CypherException("Unbalanced parentheses: " + cypher);
+        }
+        String fieldsStr = body.substring(parenStart + 1, parenEnd);
+
+        String[] parts = nameAndAction.split("\\s+");
+        if (parts.length != 2) {
+            throw new CypherException("Expected ALTER " + kind + " <name> ADD|DROP: " + cypher);
+        }
+        String name = parts[0];
+        String action = parts[1].toUpperCase();
+        if (!"ADD".equals(action) && !"DROP".equals(action)) {
+            throw new CypherException("ALTER " + kind + " only supports ADD or DROP: " + cypher);
+        }
+        if (isTag) {
+            TagSchema current = store.getTagSchema(name);
+            if (current == null) {
+                throw new CypherException("Tag not found: " + name);
+            }
+            TagSchema next = applySchemaAction(current, fieldsStr, action, "ALTER TAG " + name);
+            store.createTag(next);
+            return List.of(Map.of("Altered", name, "Action", action, "Fields", next.getFields().size()));
+        } else {
+            EdgeTypeSchema current = store.getEdgeTypeSchema(name);
+            if (current == null) {
+                throw new CypherException("EdgeType not found: " + name);
+            }
+            EdgeTypeSchema next = applyEdgeAction(current, fieldsStr, action);
+            store.createEdgeType(next);
+            return List.of(Map.of("Altered", name, "Action", action, "Fields", next.getFields().size()));
+        }
+    }
+
+    private TagSchema applySchemaAction(TagSchema current, String fieldsStr, String action, String context) {
+        List<TagSchema.Field> currentFields = current.getFields();
+        if ("DROP".equals(action)) {
+            Set<String> dropNames = parseFieldNames(fieldsStr);
+            List<TagSchema.Field> kept = new ArrayList<>();
+            for (TagSchema.Field field : currentFields) {
+                if (!dropNames.contains(field.getName())) kept.add(field);
+            }
+            if (kept.size() == currentFields.size()) {
+                throw new CypherException("No fields dropped: " + context);
+            }
+            return new TagSchema(current.getName(), kept);
+        }
+        List<TagSchema.Field> added = parseSchemaFields(fieldsStr);
+        TagSchema next = current;
+        for (TagSchema.Field field : added) {
+            try {
+                next = next.withAddedField(field);
+            } catch (IllegalArgumentException ex) {
+                throw new CypherException(ex.getMessage());
+            }
+        }
+        return next;
+    }
+
+    private EdgeTypeSchema applyEdgeAction(EdgeTypeSchema current, String fieldsStr, String action) {
+        List<TagSchema.Field> currentFields = current.getFields();
+        if ("DROP".equals(action)) {
+            Set<String> dropNames = parseFieldNames(fieldsStr);
+            List<TagSchema.Field> kept = new ArrayList<>();
+            for (TagSchema.Field field : currentFields) {
+                if (!dropNames.contains(field.getName())) kept.add(field);
+            }
+            if (kept.size() == currentFields.size()) {
+                throw new CypherException("No fields dropped");
+            }
+            return new EdgeTypeSchema(current.getName(), kept);
+        }
+        List<TagSchema.Field> added = parseSchemaFields(fieldsStr);
+        EdgeTypeSchema next = current;
+        for (TagSchema.Field field : added) {
+            try {
+                next = next.withAddedField(field);
+            } catch (IllegalArgumentException ex) {
+                throw new CypherException(ex.getMessage());
+            }
+        }
+        return next;
+    }
+
+    private Set<String> parseFieldNames(String fieldsStr) {
+        Set<String> names = new LinkedHashSet<>();
+        for (String token : splitByComma(fieldsStr)) {
+            String name = token.trim();
+            if (!name.isEmpty()) names.add(name);
+        }
+        if (names.isEmpty()) {
+            throw new CypherException("DROP requires at least one field name");
+        }
+        return names;
+    }
+
+    /** REBUILD TAG INDEX <name> / REBUILD INDEX <name>。当前为同步空操作，索引已实时维护。 */
+    private List<Map<String, Object>> executeRebuildIndex(String cypher) {
+        return List.of(Map.of("Rebuilt", "ok",
+                "Note", "in-memory index is always up-to-date"));
+    }
+
     /** CREATE TAG INDEX ON <name> / CREATE INDEX ON <name> */
     private List<Map<String, Object>> executeCreateIndex(String cypher) {
         String upper = cypher.toUpperCase();
@@ -1113,6 +1253,41 @@ public class CypherEngine {
             row.put("column_1", null);
         }
         return List.of(row);
+    }
+
+    // ==================== 索引下推优化 ====================
+
+    /** 单节点 MATCH + WHERE 等值 + 索引命中时构造的 binding 集合。 */
+    private record IndexedSeed(List<MatchBinding> bindings) {
+    }
+
+    /**
+     * 探测索引下推机会：当模式仅为 {@code (var:Label)} 且 WHERE 形如
+     * {@code var.prop = value} 且存在 {@code (Label, prop)} 索引时，直接用索引替换全表扫描。
+     */
+    private IndexedSeed tryIndexSeed(String pattern, String whereClause) {
+        if (whereClause == null || whereClause.trim().isEmpty()) return null;
+        if (!(store instanceof InMemoryGraphStore ims)) return null;
+        Matcher patMatch = Pattern.compile("^\\s*\\(\\s*(\\w+)\\s*:\\s*(\\w+)\\s*\\)\\s*$").matcher(pattern.trim());
+        if (!patMatch.matches()) return null;
+        String var = patMatch.group(1);
+        String label = patMatch.group(2);
+        Matcher whereMatch = Pattern.compile(
+                "^\\s*" + Pattern.quote(var) + "\\s*\\.\\s*(\\w+)\\s*=\\s*(.+?)\\s*$").matcher(whereClause.trim());
+        if (!whereMatch.matches()) return null;
+        String property = whereMatch.group(1);
+        Object value = evaluateLiteral(whereMatch.group(2));
+        if (!ims.hasPropertyIndex(label, property)) return null;
+        List<Long> ids = ims.findNodesByProperty(label, property, value);
+        List<MatchBinding> bindings = new ArrayList<>(ids.size());
+        for (long id : ids) {
+            Node node = store.getNode(id);
+            if (node == null) continue;
+            MatchBinding binding = new MatchBinding();
+            binding.variables.put(var, node);
+            bindings.add(binding);
+        }
+        return new IndexedSeed(bindings);
     }
 
     // ==================== 工具方法 ====================

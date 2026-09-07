@@ -77,6 +77,19 @@ public class TagSchema {
     public boolean hasField(String name) { return getField(name) != null; }
 
     /**
+     * 返回一个追加了新字段的新 schema（不可变）。
+     */
+    public TagSchema withAddedField(Field field) {
+        if (hasField(field.getName())) {
+            throw new IllegalArgumentException(
+                    "Tag " + name + " already has field '" + field.getName() + "'");
+        }
+        List<Field> next = new ArrayList<>(fields);
+        next.add(field);
+        return new TagSchema(name, next);
+    }
+
+    /**
      * 校验一组属性是否符合 schema。未声明 schema 的标签应跳过本校验。
      *
      * @throws SchemaViolationException 当属性集不合法时抛出
