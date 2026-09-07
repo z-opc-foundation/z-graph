@@ -39,10 +39,42 @@ public class CypherEngine {
 
         String upper = trimmed.toUpperCase();
 
+        // CREATE / DROP 二级关键字分发：CREATE TAG/CREATE EDGE/CREATE TAG INDEX/CREATE INDEX
+        // 与 CREATE (node pattern) 共用前缀
+        if (upper.startsWith("CREATE")) {
+            String rest = trimmed.substring(6).trim();
+            String restUpper = rest.toUpperCase();
+            if (restUpper.startsWith("TAG INDEX") || restUpper.startsWith("TAGINDEX")
+                    || restUpper.startsWith("INDEX")) {
+                return executeCreateIndex(trimmed);
+            }
+            if (restUpper.startsWith("TAG ")) {
+                return executeCreateTag(trimmed);
+            }
+            if (restUpper.startsWith("EDGE ") || restUpper.startsWith("EDGE TYPE")
+                    || restUpper.startsWith("EDGETYPE")) {
+                return executeCreateEdgeType(trimmed);
+            }
+            return executeCreate(trimmed);
+        }
+        if (upper.startsWith("DROP")) {
+            String rest = trimmed.substring(4).trim();
+            String restUpper = rest.toUpperCase();
+            if (restUpper.startsWith("TAG INDEX") || restUpper.startsWith("INDEX")) {
+                return executeDropIndex(trimmed);
+            }
+            if (restUpper.startsWith("TAG ")) {
+                return executeDropTag(trimmed);
+            }
+            if (restUpper.startsWith("EDGE ") || restUpper.startsWith("EDGETYPE")) {
+                return executeDropEdgeType(trimmed);
+            }
+            throw new CypherException("Unsupported DROP statement: " + trimmed);
+        }
         if (upper.startsWith("MATCH")) {
             return executeMatch(trimmed);
-        } else if (upper.startsWith("CREATE")) {
-            return executeCreate(trimmed);
+        } else if (upper.startsWith("OPTIONAL MATCH")) {
+            return executeOptionalMatch(trimmed);
         } else if (upper.startsWith("MERGE")) {
             return executeMerge(trimmed);
         } else if (upper.startsWith("RETURN")) {
@@ -349,12 +381,123 @@ public class CypherEngine {
         for (String part : parts) {
             part = part.trim();
             if (part.contains("->") || part.contains("<-")) {
-                results = expandEdgePattern(part, results);
+                if (isVariableLengthPattern(part)) {
+                    results = expandVariableEdgePattern(part, results);
+                } else {
+                    results = expandEdgePattern(part, results);
+                }
             } else {
                 results = expandNodePattern(part, results);
             }
         }
         return results;
+    }
+
+    private static boolean isVariableLengthPattern(String pattern) {
+        return Pattern.compile("\\)\\s*-\\s*\\[[^\\]]*\\*[^\\]]*\\]\\s*->\\s*\\(")
+                .matcher(pattern).find();
+    }
+
+    /**
+     * 变长路径匹配：{@code (a)-[*min..max]->(b)} 或 {@code (a:Label)-[:TYPE*min..max]->(b:Label)}。
+     * 当前实现对每个起始节点做 BFS，记录最短路径到达的可达终点。
+     */
+    private List<MatchBinding> expandVariableEdgePattern(String pattern, List<MatchBinding> existing) {
+        Matcher m = Pattern.compile(
+                "\\(\\s*(?<fromVar>\\w+)\\s*(?::\\s*(?<fromLabel>\\w+))?\\s*(?:\\{[^}]*\\})?\\s*\\)"
+                        + "\\s*-\\s*\\[\\s*(?<relVar>\\w*)\\s*(?::\\s*(?<edgeType>\\w+))?\\s*\\*\\s*"
+                        + "(?<minHops>\\d*)\\s*\\.\\.?\\s*(?<maxHops>\\d*)\\s*\\]"
+                        + "\\s*->\\s*\\(\\s*(?<toVar>\\w+)\\s*(?::\\s*(?<toLabel>\\w+))?\\s*(?:\\{[^}]*\\})?\\s*\\)")
+                .matcher(pattern);
+        if (!m.find()) {
+            throw new CypherException("Invalid variable-length pattern: " + pattern);
+        }
+        String fromVar = m.group("fromVar");
+        String fromLabel = m.group("fromLabel");
+        String relVar = m.group("relVar");
+        String edgeType = m.group("edgeType");
+        int minHops = m.group("minHops") == null || m.group("minHops").isEmpty()
+                ? 1 : Integer.parseInt(m.group("minHops"));
+        int maxHops = m.group("maxHops") == null || m.group("maxHops").isEmpty()
+                ? Math.max(minHops, 1) : Integer.parseInt(m.group("maxHops"));
+        String toVar = m.group("toVar");
+        String toLabel = m.group("toLabel");
+        if (minHops > maxHops) {
+            throw new CypherException("minHops > maxHops: " + pattern);
+        }
+        List<MatchBinding> results = new ArrayList<>();
+        for (MatchBinding base : existing) {
+            List<Long> starts = base.variables.containsKey(fromVar)
+                    ? List.of(((Node) base.variables.get(fromVar)).getId())
+                    : (fromLabel != null ? store.getNodeIdsByLabel(fromLabel) : store.getAllNodeIds());
+            for (long startId : starts) {
+                Node startNode = store.getNode(startId);
+                if (startNode == null) continue;
+                List<long[]> paths = boundedBfs(startId, maxHops, edgeType);
+                for (long[] path : paths) {
+                    if (path.length - 1 < minHops) continue;
+                    long endId = path[path.length - 1];
+                    Node endNode = store.getNode(endId);
+                    if (endNode == null) continue;
+                    if (toLabel != null && !endNode.hasLabel(toLabel)) continue;
+                    MatchBinding copy = base.copy();
+                    copy.variables.put(fromVar, startNode);
+                    copy.variables.put(toVar, endNode);
+                    if (relVar != null && !relVar.isEmpty()) {
+                        copy.variables.put(relVar, pathSummary(path, edgeType));
+                    }
+                    results.add(copy);
+                }
+            }
+        }
+        return results;
+    }
+
+    /** BFS，从 start 出发，沿 edgeType（可选）行走最多 maxHops 步，返回所有可达终点的最短路径数组。 */
+    private List<long[]> boundedBfs(long startId, int maxHops, String edgeType) {
+        List<long[]> paths = new ArrayList<>();
+        if (maxHops == 0) {
+            paths.add(new long[]{startId});
+            return paths;
+        }
+        java.util.Deque<long[]> queue = new java.util.ArrayDeque<>();
+        queue.add(new long[]{startId});
+        while (!queue.isEmpty()) {
+            long[] path = queue.poll();
+            int depth = path.length - 1;
+            if (depth >= maxHops) continue;
+            Node tail = store.getNode(path[path.length - 1]);
+            if (tail == null) continue;
+            for (Edge edge : store.getOutEdges(tail.getId())) {
+                if (edgeType != null && !edgeType.isEmpty() && !edgeType.equals(edge.getType())) continue;
+                long next = edge.getEndNodeId();
+                long[] newPath = Arrays.copyOf(path, path.length + 1);
+                newPath[newPath.length - 1] = next;
+                paths.add(newPath);
+                if (depth + 1 < maxHops) {
+                    queue.add(newPath);
+                }
+            }
+        }
+        return paths;
+    }
+
+    private List<Map<String, Object>> pathSummary(long[] path, String edgeType) {
+        List<Map<String, Object>> edges = new ArrayList<>();
+        for (int i = 0; i < path.length - 1; i++) {
+            for (Edge e : store.getOutEdges(path[i])) {
+                if (e.getEndNodeId() == path[i + 1]
+                        && (edgeType == null || edgeType.isEmpty() || edgeType.equals(e.getType()))) {
+                    Map<String, Object> entry = new LinkedHashMap<>();
+                    entry.put("type", e.getType());
+                    entry.put("from", e.getStartNodeId());
+                    entry.put("to", e.getEndNodeId());
+                    edges.add(entry);
+                    break;
+                }
+            }
+        }
+        return edges;
     }
 
     private List<MatchBinding> expandNodePattern(String pattern, List<MatchBinding> existing) {
@@ -764,6 +907,212 @@ public class CypherEngine {
             return rows;
         }
         throw new CypherException("Unsupported SHOW statement: " + cypher);
+    }
+
+    // ==================== DDL：CREATE/DROP TAG / EDGE TYPE / INDEX ====================
+
+    /** CREATE TAG <name> (<field> <type> [NOT NULL], ...) */
+    private List<Map<String, Object>> executeCreateTag(String cypher) {
+        String body = stripLeadingKeyword(cypher, "CREATE TAG");
+        int parenStart = body.indexOf('(');
+        if (parenStart < 0) {
+            throw new CypherException("CREATE TAG requires (field type, ...): " + cypher);
+        }
+        String name = body.substring(0, parenStart).trim();
+        int parenEnd = findMatchingClose(body, parenStart);
+        if (parenEnd < 0) {
+            throw new CypherException("Unbalanced parentheses: " + cypher);
+        }
+        String fieldsStr = body.substring(parenStart + 1, parenEnd);
+        TagSchema schema = new TagSchema(name, parseSchemaFields(fieldsStr));
+        store.createTag(schema);
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("Name", name);
+        row.put("Fields", schema.getFields().size());
+        return List.of(row);
+    }
+
+    private List<Map<String, Object>> executeDropTag(String cypher) {
+        String body = stripLeadingKeyword(cypher, "DROP TAG");
+        String name = body.trim();
+        if (name.isEmpty()) {
+            throw new CypherException("DROP TAG requires a name: " + cypher);
+        }
+        boolean dropped = store.dropTag(name);
+        if (!dropped) {
+            throw new CypherException("Tag not found: " + name);
+        }
+        return List.of(Map.of("Dropped", name));
+    }
+
+    private List<Map<String, Object>> executeCreateEdgeType(String cypher) {
+        String body;
+        if (cypher.toUpperCase().startsWith("CREATE EDGE TYPE")) {
+            body = stripLeadingKeyword(cypher, "CREATE EDGE TYPE");
+        } else {
+            body = stripLeadingKeyword(cypher, "CREATE EDGE");
+        }
+        int parenStart = body.indexOf('(');
+        if (parenStart < 0) {
+            throw new CypherException("CREATE EDGE requires (field type, ...): " + cypher);
+        }
+        String name = body.substring(0, parenStart).trim();
+        int parenEnd = findMatchingClose(body, parenStart);
+        if (parenEnd < 0) {
+            throw new CypherException("Unbalanced parentheses: " + cypher);
+        }
+        String fieldsStr = body.substring(parenStart + 1, parenEnd);
+        EdgeTypeSchema schema = new EdgeTypeSchema(name, parseSchemaFields(fieldsStr));
+        store.createEdgeType(schema);
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("Name", name);
+        row.put("Fields", schema.getFields().size());
+        return List.of(row);
+    }
+
+    private List<Map<String, Object>> executeDropEdgeType(String cypher) {
+        String body = stripLeadingKeyword(cypher, "DROP EDGE");
+        String name = body.trim();
+        if (name.isEmpty()) {
+            throw new CypherException("DROP EDGE requires a name: " + cypher);
+        }
+        boolean dropped = store.dropEdgeType(name);
+        if (!dropped) {
+            throw new CypherException("EdgeType not found: " + name);
+        }
+        return List.of(Map.of("Dropped", name));
+    }
+
+    /** CREATE TAG INDEX ON <name> / CREATE INDEX ON <name> */
+    private List<Map<String, Object>> executeCreateIndex(String cypher) {
+        String upper = cypher.toUpperCase();
+        String body;
+        if (upper.startsWith("CREATE TAG INDEX ON")) {
+            body = stripLeadingKeyword(cypher, "CREATE TAG INDEX ON");
+        } else if (upper.startsWith("CREATE TAGINDEX ON")) {
+            body = stripLeadingKeyword(cypher, "CREATE TAGINDEX ON");
+        } else if (upper.startsWith("CREATE INDEX ON")) {
+            body = stripLeadingKeyword(cypher, "CREATE INDEX ON");
+        } else {
+            throw new CypherException("Unsupported CREATE INDEX: " + cypher);
+        }
+        String[] parts = body.trim().split("\\.");
+        if (parts.length != 2) {
+            throw new CypherException("CREATE INDEX expects <tag>.<property>: " + cypher);
+        }
+        String tag = parts[0].trim();
+        String property = parts[1].trim();
+        if (!(store instanceof InMemoryGraphStore ims)) {
+            throw new CypherException("Index management requires InMemoryGraphStore");
+        }
+        boolean created = ims.createPropertyIndex(tag, property);
+        if (!created && !ims.hasPropertyIndex(tag, property)) {
+            throw new CypherException("Failed to create index: " + tag + "." + property);
+        }
+        return List.of(Map.of("Index", tag + "." + property));
+    }
+
+    private List<Map<String, Object>> executeDropIndex(String cypher) {
+        String upper = cypher.toUpperCase();
+        String body;
+        if (upper.startsWith("DROP TAG INDEX ON")) {
+            body = stripLeadingKeyword(cypher, "DROP TAG INDEX ON");
+        } else if (upper.startsWith("DROP INDEX ON")) {
+            body = stripLeadingKeyword(cypher, "DROP INDEX ON");
+        } else {
+            throw new CypherException("Unsupported DROP INDEX: " + cypher);
+        }
+        String[] parts = body.trim().split("\\.");
+        if (parts.length != 2) {
+            throw new CypherException("DROP INDEX expects <tag>.<property>: " + cypher);
+        }
+        String tag = parts[0].trim();
+        String property = parts[1].trim();
+        if (!(store instanceof InMemoryGraphStore ims)) {
+            throw new CypherException("Index management requires InMemoryGraphStore");
+        }
+        boolean dropped = ims.dropPropertyIndex(tag, property);
+        if (!dropped) {
+            throw new CypherException("Index not found: " + tag + "." + property);
+        }
+        return List.of(Map.of("Dropped", tag + "." + property));
+    }
+
+    private static String stripLeadingKeyword(String cypher, String keywordUpper) {
+        if (!cypher.toUpperCase().startsWith(keywordUpper)) {
+            throw new IllegalStateException("Expected prefix " + keywordUpper);
+        }
+        return cypher.substring(keywordUpper.length()).trim();
+    }
+
+    private static int findMatchingClose(String body, int openIdx) {
+        int depth = 0;
+        for (int i = openIdx; i < body.length(); i++) {
+            char c = body.charAt(i);
+            if (c == '(') depth++;
+            else if (c == ')') {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
+    private List<TagSchema.Field> parseSchemaFields(String fieldsStr) {
+        List<TagSchema.Field> fields = new ArrayList<>();
+        List<String> parts = splitByComma(fieldsStr);
+        for (String part : parts) {
+            String token = part.trim();
+            if (token.isEmpty()) continue;
+            boolean nullable = true;
+            String[] tail = token.split("\\s+");
+            int nameEnd = tail.length;
+            if (tail[tail.length - 1].equalsIgnoreCase("NULL") && tail.length >= 2
+                    && tail[tail.length - 2].equalsIgnoreCase("NOT")) {
+                nullable = false;
+                nameEnd = tail.length - 2;
+            }
+            if (nameEnd < 2) {
+                throw new CypherException("Invalid schema field: " + part);
+            }
+            String fieldName = tail[0];
+            String typeToken = tail[1].toUpperCase();
+            try {
+                TagSchema.DataType type = TagSchema.DataType.valueOf(typeToken);
+                fields.add(new TagSchema.Field(fieldName, type, nullable));
+            } catch (IllegalArgumentException ex) {
+                throw new CypherException("Unknown schema type: " + typeToken);
+            }
+        }
+        return fields;
+    }
+
+    // ==================== OPTIONAL MATCH ====================
+
+    /**
+     * OPTIONAL MATCH 的最小子集：模式同 MATCH，但匹配失败时仍然产生一行（左部变量为 null）。
+     * 语法：OPTIONAL MATCH (n:Label) [WHERE ...] [RETURN ...]。
+     */
+    private List<Map<String, Object>> executeOptionalMatch(String cypher) {
+        String rest = cypher.substring("OPTIONAL MATCH".length()).trim();
+        // 复用 executeMatch 的子句切分：把 prefix 改写成 MATCH 形式
+        List<Map<String, Object>> rows = executeMatch("MATCH " + rest);
+        if (!rows.isEmpty()) {
+            return rows;
+        }
+        // 模式未命中时返回一行空白，列名取自 RETURN 或默认 column_1
+        String upper = rest.toUpperCase();
+        int returnIdx = upper.indexOf(" RETURN ");
+        Map<String, Object> row = new LinkedHashMap<>();
+        if (returnIdx >= 0) {
+            String returnClause = rest.substring(returnIdx + 8).trim();
+            for (Projection projection : parseProjections(returnClause)) {
+                row.put(projection.alias, null);
+            }
+        } else {
+            row.put("column_1", null);
+        }
+        return List.of(row);
     }
 
     // ==================== 工具方法 ====================

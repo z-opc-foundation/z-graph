@@ -12,7 +12,10 @@
 ## 已对齐 NebulaGraph 的能力
 
 - **Tag / EdgeType schema**：声明属性名、数据类型与 `NOT NULL` 约束，存写前自动校验；schema 也会随 commit 进入快照并随仓库重新加载恢复。
+- **DDL via Cypher**：`CREATE TAG` / `DROP TAG` / `CREATE EDGE` / `DROP EDGE` / `CREATE TAG INDEX ON <tag>.<prop>` / `DROP TAG INDEX ON <tag>.<prop>`。
 - **SHOW TAGS / SHOW EDGES / SHOW INDEXES / SHOW TAG \<name\> / SHOW EDGE \<name\>**：NebulaGraph 风格的管理 Cypher。
+- **变长路径匹配**：`(a)-[*min..max]->(b)` 与 `(a)-[:TYPE*min..max]->(b)`，按边类型过滤、按起止节点标签过滤，绑定返回最短路径集合。
+- **OPTIONAL MATCH**：模式未命中仍返回一行（左部变量为 null）。
 - **聚合函数**：`count(*)` / `count(expr)` / `sum(expr)` / `avg(expr)` / `min(expr)` / `max(expr)`，按 RETURN 中的非聚合列自动 GROUP BY。
 - **MERGE 节点 upsert**：标签 + 全部属性精确匹配，不存在则创建，存在则返回现有节点。
 - **Bolt RUN 参数绑定**：通过 `$param` 展开为 Cypher 字面量。
@@ -54,8 +57,10 @@ feature.addNode("Person", Map.of("name", "Bob"));
 GraphCommit second = feature.commit("bob", "feature graph");
 
 GraphCheckout checkout = repository.checkout(second.getId());
+checkout.query("CREATE TAG Person (name STRING NOT NULL, age INT)");
 checkout.query("MATCH (n:Person) RETURN n.name AS name");
 checkout.query("SHOW TAGS");
+checkout.query("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN b.name AS friend");
 checkout.query("MATCH (n:Person) RETURN n.city AS city, count(n) AS cnt");
 ```
 
