@@ -54,6 +54,7 @@ export const api = {
   commits: () => simpleRequest('/meta/commits'),
   schema: (branch = 'main') => simpleRequest('/meta/schema?branch=' + encodeURIComponent(branch)),
   stats: (branch = 'main') => simpleRequest('/meta/stats?branch=' + encodeURIComponent(branch)),
+  metrics: () => simpleRequest('/meta/metrics'),
 
   // 导出 / 导入
   exportData: (branch = 'main') => request('/meta/export?branch=' + encodeURIComponent(branch)),

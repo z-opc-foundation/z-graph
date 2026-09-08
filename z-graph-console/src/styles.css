@@ -383,3 +383,50 @@ td.mono, code.mono { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; 
 .api-expand { font-size: 12px; color: #64748b; }
 .api-endpoint-detail { padding: 0 16px 16px; }
 .api-endpoint-detail h3 { font-size: 13px; color: #94a3b8; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* 侧边栏状态指示灯 */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.status-dot.ok { background: #34d399; box-shadow: 0 0 6px #34d399; }
+.status-dot.down { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+/* 侧边栏指标 */
+.metrics-box { font-size: 12px; }
+.metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+.metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.metric-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e2e8f0;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+.metric-value.error { color: #fca5a5; }
+.metric-label {
+  font-size: 10px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.metrics-footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #1e293b;
+  font-size: 11px;
+  color: #64748b;
+}
