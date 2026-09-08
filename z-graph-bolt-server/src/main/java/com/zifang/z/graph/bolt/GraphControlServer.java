@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * 本地 Graphd 控制面服务骨架。
@@ -50,6 +51,9 @@ public final class GraphControlServer {
         server.createContext("/meta/commits", this::handleCommits);
         server.createContext("/meta/schema", this::handleSchema);
         server.createContext("/meta/stats", this::handleStats);
+        server.createContext("/meta/export", this::handleExport);
+        server.createContext("/meta/import", this::handleImport);
+        server.createContext("/query/batch", this::handleBatch);
         server.createContext("/query", this::handleQuery);
         // OPTIONS 预检 + CORS 头:允许浏览器前端直接访问此控制面
         server.createContext("/options", exchange -> writeNoContent(exchange));
@@ -192,8 +196,157 @@ public final class GraphControlServer {
         }
     }
 
+    /**
+     * POST /query/batch — 批量执行多条 Cypher 语句。
+     * 请求体: {"statements":[{"cypher":"...","branch":"main"},...]}
+     * 返回: {"results":[{...},{...},...],"elapsedMs":123}
+     */
+    private void handleBatch(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            writeJson(exchange, 405, Map.of("error", "POST required"));
+            return;
+        }
+        long start = System.currentTimeMillis();
+        try {
+            String body = readBody(exchange);
+            // 简易解析 statements 数组 — 提取每个 {cypher:..., branch:...} 对
+            List<Map<String, String>> statements = parseStatementsArray(body);
+            List<Object> results = new ArrayList<>();
+            String defaultBranch = "main";
+
+            for (Map<String, String> stmt : statements) {
+                String cypher = stmt.get("cypher");
+                String branch = stmt.getOrDefault("branch", defaultBranch);
+                if (cypher == null || cypher.isBlank()) {
+                    results.add(Map.of("error", "Missing 'cypher'"));
+                    continue;
+                }
+                try {
+                    String upper = cypher.trim().toUpperCase();
+                    boolean mutating = upper.startsWith("CREATE") || upper.startsWith("MERGE")
+                            || (upper.startsWith("MATCH") && (upper.contains(" SET ")
+                            || upper.contains(" DELETE ") || upper.contains("DETACH DELETE")));
+                    if (mutating) {
+                        GraphWriteTransaction tx = queryService.beginWrite(branch);
+                        List<Map<String, Object>> rows = new CypherEngine(tx, repository)
+                                .execute(cypher, Map.of());
+                        tx.commit("batch", "Batch: " + cypher.substring(0, Math.min(cypher.length(), 60)));
+                        results.add(Map.of("rows", rows, "statementIndex", statements.indexOf(stmt)));
+                    } else {
+                        var graphCheckout = repository.checkoutBranch(branch);
+                        List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
+                                .execute(cypher, Map.of());
+                        results.add(Map.of("rows", rows, "statementIndex", statements.indexOf(stmt)));
+                    }
+                } catch (Exception e) {
+                    results.add(Map.of("error", e.getMessage(), "statementIndex", statements.indexOf(stmt)));
+                }
+            }
+            long elapsed = System.currentTimeMillis() - start;
+            exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
+            writeJson(exchange, 200, Map.of("results", results, "elapsedMs", elapsed));
+        } catch (Exception e) {
+            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /meta/export — 导出当前分支的全部图数据（节点 + 边 + schema）。
+     */
+    private void handleExport(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        Map<String, String> params = queryParameters(exchange.getRequestURI());
+        String branch = params.getOrDefault("branch", "main");
+        try {
+            var graphCheckout = repository.checkoutBranch(branch);
+            var store = graphCheckout.getStore();
+            List<Map<String, Object>> nodes = new CypherEngine(store, repository)
+                    .execute("MATCH (n) RETURN n", Map.of());
+            // 获取所有边类型,逐个查询
+            List<Map<String, Object>> edges = new ArrayList<>();
+            List<Map<String, Object>> edgeTypes = new CypherEngine(store, repository)
+                    .execute("SHOW EDGES", Map.of());
+            for (Map<String, Object> et : edgeTypes) {
+                String typeName = String.valueOf(et.getOrDefault("Name", et.getOrDefault("name", "")));
+                if (!typeName.isEmpty()) {
+                    try {
+                        List<Map<String, Object>> typeEdges = new CypherEngine(store, repository)
+                                .execute("MATCH (a)-[r:" + typeName + "]->(b) RETURN r", Map.of());
+                        edges.addAll(typeEdges);
+                    } catch (Exception ignored) { }
+                }
+            }
+            List<Map<String, Object>> tags = new CypherEngine(store, repository)
+                    .execute("SHOW TAGS", Map.of());
+            GraphCommit head = metaService.head(branch);
+
+            Map<String, Object> export = new LinkedHashMap<>();
+            export.put("version", "z-graph-1.0");
+            export.put("branch", branch);
+            export.put("head", head.getId());
+            export.put("nodeCount", head.getNodeCount());
+            export.put("edgeCount", head.getEdgeCount());
+            export.put("schema", Map.of("tags", tags, "edgeTypes", edgeTypes));
+            export.put("nodes", nodes);
+            export.put("edges", edges);
+            export.put("exportedAt", System.currentTimeMillis());
+
+            // 设置下载头
+            exchange.getResponseHeaders().set("Content-Disposition",
+                    "attachment; filename=\"z-graph-export-" + branch + ".json\"");
+            writeJson(exchange, 200, export);
+        } catch (Exception e) {
+            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * POST /meta/import — 导入图数据。
+     * 请求体: {"branch":"main","nodes":[{"label":"Person","name":"Alice",...}],...}
+     */
+    private void handleImport(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            writeJson(exchange, 405, Map.of("error", "POST required"));
+            return;
+        }
+        long start = System.currentTimeMillis();
+        try {
+            String body = readBody(exchange);
+            Map<String, String> json = parseJsonStringMap(body);
+            String branch = json.getOrDefault("branch", "main");
+
+            // 通过 Cypher CREATE 语句导入
+            String nodesJson = json.get("nodes");
+            String edgesJson = json.get("edges");
+
+            int imported = 0;
+            if (nodesJson != null && !nodesJson.isBlank()) {
+                // 解析节点数组并生成 CREATE 语句
+                List<String> nodeStatements = parseNodeImportStatements(nodesJson);
+                for (String stmt : nodeStatements) {
+                    GraphWriteTransaction tx = queryService.beginWrite(branch);
+                    new CypherEngine(tx, repository).execute(stmt, Map.of());
+                    tx.commit("import", "Import node");
+                    imported++;
+                }
+            }
+
+            long elapsed = System.currentTimeMillis() - start;
+            exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
+            writeJson(exchange, 200, Map.of(
+                    "imported", imported,
+                    "branch", branch,
+                    "elapsedMs", elapsed));
+        } catch (Exception e) {
+            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+        }
+    }
+
     private void handleQuery(HttpExchange exchange) throws IOException {
         applyCorsHeaders(exchange);
+        long start = System.currentTimeMillis();
         // 允许 GET (?cypher=...) 和 POST (JSON body: {"cypher":"...","branch":"...","commit":"..."})
         String cypher;
         String branch;
@@ -229,16 +382,22 @@ public final class GraphControlServer {
                 List<Map<String, Object>> rows = new CypherEngine(tx, repository)
                         .execute(cypher, Map.of());
                 tx.commit("http", "HTTP query: " + cypher.substring(0, Math.min(cypher.length(), 80)));
+                long elapsed = System.currentTimeMillis() - start;
+                exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
                 writeJson(exchange, 200, rows);
             } else if (commit != null) {
                 var graphCheckout = repository.checkout(commit);
                 List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
                         .execute(cypher, Map.of());
+                long elapsed = System.currentTimeMillis() - start;
+                exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
                 writeJson(exchange, 200, rows);
             } else {
                 var graphCheckout = repository.checkoutBranch(branch);
                 List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
                         .execute(cypher, Map.of());
+                long elapsed = System.currentTimeMillis() - start;
+                exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
                 writeJson(exchange, 200, rows);
             }
         } catch (IllegalStateException conflict) {
@@ -360,5 +519,96 @@ public final class GraphControlServer {
             }
         }
         return result;
+    }
+
+    /**
+     * 从 JSON 数组字符串中解析语句列表。
+     * 格式: [{"cypher":"...","branch":"main"},...]（简易解析,支持嵌套引号）。
+     */
+    private static List<Map<String, String>> parseStatementsArray(String json) {
+        List<Map<String, String>> result = new ArrayList<>();
+        if (json == null || json.isBlank()) return result;
+        String trimmed = json.strip();
+        // 找到 "statements" 键后面的数组
+        int idx = trimmed.indexOf("\"statements\"");
+        if (idx < 0) {
+            // 可能整个 body 就是一个数组
+            idx = trimmed.indexOf("[");
+        } else {
+            idx = trimmed.indexOf("[", idx);
+        }
+        if (idx < 0) return result;
+        String arrayStr = trimmed.substring(idx);
+
+        // 逐个提取 {...} 块
+        int depth = 0;
+        int start = -1;
+        for (int i = 0; i < arrayStr.length(); i++) {
+            char c = arrayStr.charAt(i);
+            if (c == '[' && depth == 0) { depth = 1; start = -1; continue; }
+            if (c == '{' && depth >= 1) { depth++; if (start < 0) start = i; }
+            if (c == '}' && depth > 1) { depth--; if (depth == 1 && start >= 0) {
+                String obj = arrayStr.substring(start, i + 1);
+                result.add(parseJsonStringMap(obj));
+                start = -1;
+            }}
+            if (c == ']' && depth == 1) break;
+        }
+        return result;
+    }
+
+    /**
+     * 从 JSON 节点数组字符串中解析出 CREATE 语句。
+     * 格式: [{"label":"Person","name":"Alice","age":30},...]
+     */
+    private static List<String> parseNodeImportStatements(String nodesJson) {
+        List<String> statements = new ArrayList<>();
+        if (nodesJson == null || nodesJson.isBlank()) return statements;
+        String trimmed = nodesJson.strip();
+        if (trimmed.startsWith("[")) trimmed = trimmed.substring(1);
+        if (trimmed.endsWith("]")) trimmed = trimmed.substring(0, trimmed.length() - 1);
+
+        // 逐个提取 {...} 块
+        int depth = 0;
+        int start = -1;
+        List<String> nodeObjs = new ArrayList<>();
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c == '{') { depth++; if (start < 0) start = i; }
+            if (c == '}') { depth--; if (depth == 0 && start >= 0) {
+                nodeObjs.add(trimmed.substring(start, i + 1));
+                start = -1;
+            }}
+        }
+
+        for (String nodeObj : nodeObjs) {
+            Map<String, String> props = parseJsonStringMap(nodeObj);
+            String label = props.remove("label");
+            if (label == null || label.isBlank()) label = "Node";
+            StringBuilder sb = new StringBuilder("CREATE (n:");
+            sb.append(label).append(" {");
+            boolean first = true;
+            for (var entry : props.entrySet()) {
+                if (!first) sb.append(", ");
+                sb.append(entry.getKey()).append(": ");
+                String val = entry.getValue();
+                // 尝试解析为数字
+                try {
+                    long l = Long.parseLong(val);
+                    sb.append(l);
+                } catch (NumberFormatException nf) {
+                    try {
+                        double d = Double.parseDouble(val);
+                        sb.append(d);
+                    } catch (NumberFormatException nf2) {
+                        sb.append("'").append(val.replace("'", "\\'")).append("'");
+                    }
+                }
+                first = false;
+            }
+            sb.append("})");
+            statements.add(sb.toString());
+        }
+        return statements;
     }
 }

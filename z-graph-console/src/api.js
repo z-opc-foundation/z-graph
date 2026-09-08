@@ -25,8 +25,21 @@ async function request(path, options = {}) {
     throw new Error(`HTTP ${response.status} ${response.statusText}: ${detail || url}`);
   }
   const text = await response.text();
-  if (!text) return null;
-  try { return JSON.parse(text); } catch (e) { return text; }
+  const elapsed = response.headers.get('X-Response-Time');
+  if (!text) return { data: null, elapsed };
+  try {
+    return { data: JSON.parse(text), elapsed };
+  } catch (e) {
+    return { data: text, elapsed };
+  }
+}
+
+/**
+ * 简化版请求 — 直接返回 data（兼容旧调用）。
+ */
+async function simpleRequest(path, options = {}) {
+  const result = await request(path, options);
+  return result.data;
 }
 
 export const api = {
@@ -34,15 +47,27 @@ export const api = {
   setBaseUrl: (value) => { _baseUrl = value; if (typeof window !== 'undefined') window.__Z_GRAPH_API__ = value; },
 
   // 健康检查
-  health: () => request('/health'),
+  health: () => simpleRequest('/health'),
 
   // 元数据
-  branches: () => request('/meta/branches'),
-  commits: () => request('/meta/commits'),
-  schema: (branch = 'main') => request('/meta/schema?branch=' + encodeURIComponent(branch)),
-  stats: (branch = 'main') => request('/meta/stats?branch=' + encodeURIComponent(branch)),
+  branches: () => simpleRequest('/meta/branches'),
+  commits: () => simpleRequest('/meta/commits'),
+  schema: (branch = 'main') => simpleRequest('/meta/schema?branch=' + encodeURIComponent(branch)),
+  stats: (branch = 'main') => simpleRequest('/meta/stats?branch=' + encodeURIComponent(branch)),
 
-  // 查询 — 优先 POST (无 URL 长度限制),回退到 GET
+  // 导出 / 导入
+  exportData: (branch = 'main') => request('/meta/export?branch=' + encodeURIComponent(branch)),
+
+  // 批量查询
+  batch: async (statements) => {
+    return request('/query/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ statements })
+    });
+  },
+
+  // 查询 — 返回 {data, elapsed}，包含响应时间
   query: async (cypher, branch = 'main', commit = null) => {
     try {
       return await request('/query', {
@@ -51,7 +76,6 @@ export const api = {
         body: JSON.stringify({ cypher, branch, commit })
       });
     } catch (e) {
-      // 如果服务端不支持 POST,回退 GET
       if (e.message && e.message.includes('405')) {
         const params = new URLSearchParams();
         params.set('cypher', cypher);

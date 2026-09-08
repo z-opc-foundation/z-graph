@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { api } from '../api.js';
 
 const PRESETS = {
@@ -27,10 +27,15 @@ export default function QueryPage({ server }) {
   const [commit, setCommit] = useState('');
   const [branches, setBranches] = useState([]);
   const [commits, setCommits] = useState([]);
-  const [mode, setMode] = useState('branch'); // 'branch' | 'commit'
+  const [mode, setMode] = useState('branch');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [elapsed, setElapsed] = useState(null);
+  const [history, setHistory] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('z-graph-history') || '[]'); } catch { return []; }
+  });
+  const [showHistory, setShowHistory] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,30 +50,49 @@ export default function QueryPage({ server }) {
         if (bs.length && !bs.find(x => x.Name === branch)) {
           setBranch(bs[0].Name);
         }
-      } catch (e) { /* 静默:连接可能还没就绪 */ }
+      } catch (e) { /* 静默 */ }
     }
     load();
   }, [server.head]);
 
-  async function run() {
+  function addToHistory(cypher, elapsed) {
+    const entry = { cypher: cypher.substring(0, 200), time: Date.now(), elapsed, branch };
+    const newHistory = [entry, ...history.filter(h => h.cypher !== entry.cypher)].slice(0, 50);
+    setHistory(newHistory);
+    try { localStorage.setItem('z-graph-history', JSON.stringify(newHistory)); } catch { /* ignore */ }
+  }
+
+  const run = useCallback(async () => {
     if (!cypher.trim()) return;
     setLoading(true);
     setError(null);
     setResult(null);
+    setElapsed(null);
+    const startTime = performance.now();
     try {
-      const data = await api.query(cypher,
+      const response = await api.query(cypher,
         mode === 'branch' ? branch : null,
         mode === 'commit' ? commit : null);
-      setResult(data);
+      const ms = response.elapsed || Math.round(performance.now() - startTime) + 'ms';
+      setResult(response.data);
+      setElapsed(ms);
+      addToHistory(cypher, ms);
     } catch (e) {
       setError(e.message);
+      addToHistory(cypher, 'error');
     } finally {
       setLoading(false);
     }
-  }
+  }, [cypher, branch, commit, mode]);
 
   function applyPreset(key) {
     setCypher(PRESETS[key]);
+  }
+
+  function loadFromHistory(entry) {
+    setCypher(entry.cypher);
+    if (entry.branch) setBranch(entry.branch);
+    setShowHistory(false);
   }
 
   function loadResult(data) {
@@ -110,6 +134,9 @@ export default function QueryPage({ server }) {
             <option value="" disabled>载入示例…</option>
             {Object.keys(PRESETS).map(k => <option key={k} value={k}>{k}</option>)}
           </select>
+          <button onClick={() => setShowHistory(!showHistory)} disabled={loading}>
+            历史 ({history.length})
+          </button>
           <span style={{ flex: 1 }} />
           <div className="tabs" style={{ margin: 0, borderBottom: 'none' }}>
             <button className={mode === 'branch' ? 'active' : ''} onClick={() => setMode('branch')}>
@@ -120,6 +147,21 @@ export default function QueryPage({ server }) {
             </button>
           </div>
         </div>
+
+        {showHistory && (
+          <div className="history-panel">
+            {history.length === 0 && <div className="muted">暂无历史</div>}
+            {history.slice(0, 20).map((h, i) => (
+              <div key={i} className="history-item" onClick={() => loadFromHistory(h)}>
+                <span className="history-cypher mono">{h.cypher.substring(0, 80)}{h.cypher.length > 80 ? '…' : ''}</span>
+                <span className="history-meta">
+                  {h.elapsed && <span className="tag ok">{h.elapsed}</span>}
+                  <span className="muted">{new Date(h.time).toLocaleTimeString()}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div style={{ marginTop: 12 }}>
           {mode === 'branch'
@@ -143,12 +185,21 @@ export default function QueryPage({ server }) {
           style={{ width: '100%', marginTop: 12 }}
           rows={10}
           placeholder="MATCH (n:Person) RETURN n LIMIT 10"
+          onKeyDown={e => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+          }}
         />
-        <div className="help">支持 ; 分隔多语句;只读查询绑定当前 head,写查询在 main 上产生新 commit。</div>
+        <div className="help">支持 ; 分隔多语句; Ctrl+Enter 快捷执行;写查询在 main 上产生新 commit。</div>
       </div>
 
       <div className="card">
-        <h2>结果</h2>
+        <h2>
+          结果
+          {elapsed && <span className="tag ok" style={{ marginLeft: 8, fontSize: 11 }}>{elapsed}</span>}
+          {result && Array.isArray(result) && (
+            <span className="muted" style={{ marginLeft: 8, fontSize: 13 }}>{result.length} 行</span>
+          )}
+        </h2>
         {error && <div className="results"><pre className="error">{error}</pre></div>}
         {!error && !result && <div className="empty">尚未执行</div>}
         {!error && result && <div className="results">{loadResult(result)}</div>}
