@@ -5,9 +5,11 @@ import Branches from './pages/Branches.jsx';
 import Commits from './pages/Commits.jsx';
 import QueryPage from './pages/QueryPage.jsx';
 import Schema from './pages/Schema.jsx';
+import GraphView from './pages/GraphView.jsx';
 
 const TABS = [
   { id: 'dashboard', label: '总览', component: Dashboard },
+  { id: 'graph', label: '图视图', component: GraphView },
   { id: 'branches', label: '分支', component: Branches },
   { id: 'commits', label: '提交历史', component: Commits },
   { id: 'query', label: 'Cypher 查询', component: QueryPage },
