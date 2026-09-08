@@ -40,5 +40,5 @@ cd /opt/z-graph
 exec java \
     -Xms256m -Xmx1024m \
     -Dz.graph.dataDir="${Z_GRAPH_DATA_DIR:-/var/lib/z-graph}" \
-    -cp /opt/z-graph/server.jar \
+    -cp "/opt/z-graph/lib/*:/opt/z-graph/server.jar" \
     com.zifang.z.graph.bolt.ZGraphServer

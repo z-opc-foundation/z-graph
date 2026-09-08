@@ -3,9 +3,11 @@ package com.zifang.z.graph.bolt;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.zifang.z.graph.api.GraphCommit;
+import com.zifang.z.graph.core.CypherEngine;
 import com.zifang.z.graph.core.GraphMetaService;
 import com.zifang.z.graph.core.GraphQueryService;
 import com.zifang.z.graph.core.GraphVersionStore;
+import com.zifang.z.graph.core.GraphWriteTransaction;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -142,10 +144,37 @@ public final class GraphControlServer {
         }
         String branch = parameters.getOrDefault("branch", "main");
         String commit = parameters.get("commit");
-        List<Map<String, Object>> rows = commit == null
-                ? queryService.queryBranch(branch, cypher)
-                : queryService.queryCommit(commit, cypher);
-        writeJson(exchange, 200, rows);
+
+        String upper = cypher.trim().toUpperCase();
+        boolean mutating = upper.startsWith("CREATE")
+                || upper.startsWith("MERGE")
+                || (upper.startsWith("MATCH") && (upper.contains(" SET ")
+                || upper.contains(" DELETE ") || upper.contains("DETACH DELETE")));
+
+        try {
+            if (mutating && commit == null) {
+                // 写查询:通过 BEGIN+RUN+COMMIT 在独立事务提交,避免阻塞读请求
+                GraphWriteTransaction tx = queryService.beginWrite(branch);
+                List<Map<String, Object>> rows = new CypherEngine(tx, repository)
+                        .execute(cypher, Map.of());
+                tx.commit("http", "HTTP query: " + cypher.substring(0, Math.min(cypher.length(), 80)));
+                writeJson(exchange, 200, rows);
+            } else if (commit != null) {
+                var graphCheckout = repository.checkout(commit);
+                List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
+                        .execute(cypher, Map.of());
+                writeJson(exchange, 200, rows);
+            } else {
+                var graphCheckout = repository.checkoutBranch(branch);
+                List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
+                        .execute(cypher, Map.of());
+                writeJson(exchange, 200, rows);
+            }
+        } catch (IllegalStateException conflict) {
+            writeJson(exchange, 409, Map.of("error", "Stale head: " + conflict.getMessage()));
+        } catch (Exception e) {
+            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+        }
     }
 
     private static Map<String, String> queryParameters(URI uri) {

@@ -9,6 +9,7 @@
         <groupId>com.zifang</groupId>
         <artifactId>z-graph-parent</artifactId>
         <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
     </parent>
 
     <artifactId>z-graph-protocol</artifactId>

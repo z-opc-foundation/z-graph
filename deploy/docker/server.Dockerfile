@@ -7,20 +7,34 @@ FROM maven:3.9.9-eclipse-temurin-17 AS build
 WORKDIR /workspace
 
 # 先复制 pom 文件,让依赖层独立缓存
-COPY pom.xml z-graph-api/pom.xml z-graph-protocol/pom.xml \
-     z-graph-core/pom.xml z-graph-bolt-server/pom.xml \
-     z-graph-spring-boot-starter/pom.xml \
-     ./
+# 注意:每个模块的 <parent><relativePath> 已设为 ../pom.xml,
+# 所以我们必须保持 src 目录布局原样,不要把所有 pom 都压平到同一目录。
+COPY pom.xml /workspace/pom.xml
+COPY z-graph-api/pom.xml             /workspace/z-graph-api/pom.xml
+COPY z-graph-protocol/pom.xml        /workspace/z-graph-protocol/pom.xml
+COPY z-graph-core/pom.xml            /workspace/z-graph-core/pom.xml
+COPY z-graph-bolt-server/pom.xml     /workspace/z-graph-bolt-server/pom.xml
+COPY z-graph-spring-boot-starter/pom.xml /workspace/z-graph-spring-boot-starter/pom.xml
 
-# 仅下载依赖,利用 Docker 缓存
-RUN mvn -B -ntp -DskipTests dependency:go-offline || \
-    mvn -B -ntp -DskipTests -pl z-graph-bolt-server -am dependency:go-offline
+# 安装 parent POM 到本地仓库,让后续步骤能找到父依赖
+RUN mvn -B -ntp -f /workspace/pom.xml -N install -DskipTests
+
+# 仅下载 bolt-server 与传递依赖,利用 Docker 缓存
+RUN mvn -B -ntp -DskipTests -f /workspace/pom.xml -pl z-graph-bolt-server -am dependency:go-offline
 
 # 复制源代码并打包
-COPY . .
+COPY . /workspace/
+# 先 install 所有模块到本地仓库,dependency:copy-dependencies 才能解析兄弟模块
 RUN mvn -B -ntp -DskipTests \
-    -pl z-graph-bolt-server -am package \
+    -f /workspace/pom.xml \
+    -pl z-graph-bolt-server -am install \
     -Dmaven.javadoc.skip=true -Dassembly.skipAssembly=true
+
+# 把 bolt-server 与传递依赖 jar 拷到 staging 目录,运行时只依赖 JRE
+RUN mvn -B -ntp -f /workspace/pom.xml \
+    -pl z-graph-bolt-server dependency:copy-dependencies \
+    -DoutputDirectory=/workspace/z-graph-bolt-server/target/lib \
+    -DincludeScope=runtime
 
 # ===== 运行时阶段 =====
 FROM eclipse-temurin:17-jre-jammy AS runtime
@@ -38,6 +52,7 @@ WORKDIR /opt/z-graph
 
 # 复制打包后的 jar 与依赖
 COPY --from=build /workspace/z-graph-bolt-server/target/z-graph-bolt-server-*.jar /opt/z-graph/server.jar
+COPY --from=build /workspace/z-graph-bolt-server/target/lib/             /opt/z-graph/lib/
 
 USER zgraph
 
@@ -56,5 +71,5 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=15s --retries=5 \
 # 统一启动入口(Bolt + HTTP 控制面)
 ENTRYPOINT ["java", \
     "-Dz.graph.dataDir=/var/lib/z-graph", \
-    "-cp", "/opt/z-graph/server.jar", \
+    "-cp", "/opt/z-graph/lib/*:/opt/z-graph/server.jar", \
     "com.zifang.z.graph.bolt.ZGraphServer"]

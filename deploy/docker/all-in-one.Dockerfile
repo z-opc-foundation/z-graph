@@ -7,18 +7,30 @@
 FROM maven:3.9.9-eclipse-temurin-17 AS server-build
 WORKDIR /workspace
 
-COPY pom.xml z-graph-api/pom.xml z-graph-protocol/pom.xml \
-     z-graph-core/pom.xml z-graph-bolt-server/pom.xml \
-     z-graph-spring-boot-starter/pom.xml \
-     ./
+# 注意:每个模块的 <parent><relativePath> 已设为 ../pom.xml,
+# 所以必须保持 src 目录布局原样。
+COPY pom.xml /workspace/pom.xml
+COPY z-graph-api/pom.xml             /workspace/z-graph-api/pom.xml
+COPY z-graph-protocol/pom.xml        /workspace/z-graph-protocol/pom.xml
+COPY z-graph-core/pom.xml            /workspace/z-graph-core/pom.xml
+COPY z-graph-bolt-server/pom.xml     /workspace/z-graph-bolt-server/pom.xml
+COPY z-graph-spring-boot-starter/pom.xml /workspace/z-graph-spring-boot-starter/pom.xml
 
-RUN mvn -B -ntp -DskipTests dependency:go-offline || \
-    mvn -B -ntp -DskipTests -pl z-graph-bolt-server -am dependency:go-offline
+RUN mvn -B -ntp -f /workspace/pom.xml -N install -DskipTests
+RUN mvn -B -ntp -DskipTests -f /workspace/pom.xml -pl z-graph-bolt-server -am dependency:go-offline
 
-COPY . .
+COPY . /workspace/
+# 先 install 所有模块到本地仓库
 RUN mvn -B -ntp -DskipTests \
-    -pl z-graph-bolt-server -am package \
+    -f /workspace/pom.xml \
+    -pl z-graph-bolt-server -am install \
     -Dmaven.javadoc.skip=true -Dassembly.skipAssembly=true
+
+# 复制依赖 jar 到 staging 目录
+RUN mvn -B -ntp -f /workspace/pom.xml \
+    -pl z-graph-bolt-server dependency:copy-dependencies \
+    -DoutputDirectory=/workspace/z-graph-bolt-server/target/lib \
+    -DincludeScope=runtime
 
 # ===== 第二阶段:用 Node 构建前端 =====
 FROM node:20-alpine AS frontend-build
@@ -50,6 +62,7 @@ WORKDIR /opt/z-graph
 
 # 后端 jar
 COPY --from=server-build /workspace/z-graph-bolt-server/target/z-graph-bolt-server-*.jar /opt/z-graph/server.jar
+COPY --from=server-build /workspace/z-graph-bolt-server/target/lib/                    /opt/z-graph/lib/
 
 # 前端静态资源
 COPY --from=frontend-build /workspace/z-graph-console/dist /opt/z-graph/console
@@ -57,7 +70,6 @@ COPY --from=frontend-build /workspace/z-graph-console/dist /opt/z-graph/console
 # Nginx 配置 + 入口脚本
 COPY deploy/nginx/frontend.conf /etc/nginx/templates/default.conf.template
 COPY deploy/docker/all-in-one-entrypoint.sh /usr/local/bin/all-in-one-entrypoint.sh
-COPY deploy/docker/all-in-one-nginx.conf /etc/nginx/nginx.conf
 RUN chmod +x /usr/local/bin/all-in-one-entrypoint.sh
 
 USER zgraph
