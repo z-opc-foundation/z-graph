@@ -71,6 +71,7 @@ public final class GraphControlServer {
         server.createContext("/meta/export", logAndHandle(this::handleExport));
         server.createContext("/meta/import", logAndHandle(this::handleImport));
         server.createContext("/query/batch", logAndHandle(this::handleBatch));
+        server.createContext("/query/explain", logAndHandle(this::handleExplain));
         server.createContext("/query", logAndHandle(this::handleQuery));
         // OPTIONS 预检 + CORS 头
         server.createContext("/options", logAndHandle(exchange -> writeNoContent(exchange)));
@@ -355,6 +356,125 @@ public final class GraphControlServer {
         } catch (Exception e) {
             writeJson(exchange, 500, Map.of("error", e.getMessage()));
         }
+    }
+
+    /**
+     * POST /query/explain — 返回查询执行计划（不实际执行写操作）。
+     * 请求体: {"cypher":"MATCH (n) RETURN n","branch":"main"}
+     * 返回: {"plan":{...},"cypher":"...","parsedAt":"..."}
+     */
+    private void handleExplain(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            writeJson(exchange, 405, Map.of("error", "POST required"));
+            return;
+        }
+        try {
+            String body = readBody(exchange);
+            Map<String, String> json = parseJsonStringMap(body);
+            String cypher = json.get("cypher");
+            String branch = json.getOrDefault("branch", "main");
+
+            if (cypher == null || cypher.isBlank()) {
+                writeJson(exchange, 400, Map.of("error", "Missing 'cypher'"));
+                return;
+            }
+
+            // 构建执行计划
+            String upper = cypher.trim().toUpperCase();
+            List<Map<String, Object>> steps = new ArrayList<>();
+            Map<String, Object> plan = new LinkedHashMap<>();
+
+            // 解析查询类型
+            if (upper.startsWith("MATCH")) {
+                steps.add(Map.of("operation", "Scan", "description", "遍历节点和边"));
+                if (upper.contains(" WHERE ")) {
+                    steps.add(Map.of("operation", "Filter", "description", "过滤不满足条件的记录"));
+                }
+                if (upper.contains(" ORDER BY")) {
+                    steps.add(Map.of("operation", "Sort", "description", "排序结果"));
+                }
+                if (upper.contains(" LIMIT ")) {
+                    steps.add(Map.of("operation", "Limit", "description", "限制返回数量"));
+                }
+                if (upper.contains(" SKIP ")) {
+                    steps.add(Map.of("operation", "Skip", "description", "跳过前 N 条记录"));
+                }
+                if (upper.contains(" DISTINCT")) {
+                    steps.add(Map.of("operation", "Distinct", "description", "去重"));
+                }
+                steps.add(Map.of("operation", "Project", "description", "投影返回字段"));
+            } else if (upper.startsWith("CREATE")) {
+                steps.add(Map.of("operation", "CreateNodes", "description", "创建新节点"));
+                if (upper.contains(")-[") || upper.contains("]<-")) {
+                    steps.add(Map.of("operation", "CreateEdges", "description", "创建新边"));
+                }
+                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+            } else if (upper.startsWith("MERGE")) {
+                steps.add(Map.of("operation", "MatchOrCreate", "description", "查找匹配或创建新节点"));
+                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+            } else if (upper.startsWith("DELETE") || upper.startsWith("DETACH DELETE")) {
+                steps.add(Map.of("operation", "Scan", "description", "查找目标节点/边"));
+                if (upper.startsWith("DETACH")) {
+                    steps.add(Map.of("operation", "DetachEdges", "description", "删除关联边"));
+                }
+                steps.add(Map.of("operation", "DeleteNodes", "description", "删除节点"));
+                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+            } else if (upper.startsWith("MATCH") && upper.contains(" SET ")) {
+                steps.add(Map.of("operation", "Scan", "description", "查找匹配的节点/边"));
+                steps.add(Map.of("operation", "Update", "description", "更新属性"));
+                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+            } else if (upper.startsWith("SHOW")) {
+                steps.add(Map.of("operation", "SchemaLookup", "description", "查询 Schema 元数据"));
+            } else if (upper.startsWith("CALL")) {
+                steps.add(Map.of("operation", "ProcedureCall", "description", "调用内置过程"));
+            } else if (upper.startsWith("EXPLAIN") || upper.startsWith("PROFILE")) {
+                steps.add(Map.of("operation", "ExplainQuery", "description", "解析并返回执行计划"));
+            } else {
+                steps.add(Map.of("operation", "Unknown", "description", "未知查询类型"));
+            }
+
+            plan.put("queryType", detectQueryType(upper));
+            plan.put("steps", steps);
+            plan.put("estimatedComplexity", estimateComplexity(upper, steps.size()));
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("plan", plan);
+            result.put("cypher", cypher);
+            result.put("branch", branch);
+            result.put("parsedAt", System.currentTimeMillis());
+
+            applyCorsHeaders(exchange);
+            writeJson(exchange, 200, result);
+        } catch (Exception e) {
+            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+        }
+    }
+
+    private static String detectQueryType(String upper) {
+        if (upper.startsWith("MATCH") && !upper.contains(" SET ") && !upper.contains(" DELETE "))
+            return "READ";
+        if (upper.startsWith("CREATE") || upper.startsWith("MERGE")) return "WRITE";
+        if (upper.startsWith("DELETE") || upper.startsWith("DETACH")) return "WRITE";
+        if (upper.startsWith("MATCH") && upper.contains(" SET ")) return "WRITE";
+        if (upper.startsWith("SHOW") || upper.startsWith("CALL")) return "META";
+        return "UNKNOWN";
+    }
+
+    private static String estimateComplexity(String upper, int steps) {
+        boolean hasVariableLength = upper.contains("*1..") || upper.contains("*2..") || upper.contains("*3..");
+        boolean hasMultipleMATCH = countOccurrences(upper, "MATCH") > 1;
+        boolean hasAggregation = upper.contains("COUNT(") || upper.contains("SUM(")
+                || upper.contains("AVG(") || upper.contains("COLLECT(");
+        if (hasVariableLength || hasMultipleMATCH) return "HIGH";
+        if (steps > 4 || hasAggregation) return "MEDIUM";
+        return "LOW";
+    }
+
+    private static int countOccurrences(String str, String sub) {
+        int count = 0, idx = 0;
+        while ((idx = str.indexOf(sub, idx)) != -1) { count++; idx += sub.length(); }
+        return count;
     }
 
     /**
