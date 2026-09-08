@@ -18,7 +18,6 @@ export default function Commits({ server }) {
   const [error, setError] = useState(null);
   const [branchFilter, setBranchFilter] = useState('');
   const [search, setSearch] = useState('');
-  const [view, setView] = useState('graph'); // 'graph' | 'list'
   const [selectedCommit, setSelectedCommit] = useState(null);
 
   useEffect(() => {
@@ -48,9 +47,7 @@ export default function Commits({ server }) {
       .filter(c => !branchFilter || c.branch === branchFilter)
       .filter(c => !search || (c.message || '').toLowerCase().includes(search.toLowerCase())
         || (c.author || '').toLowerCase().includes(search.toLowerCase())
-        || (c.id || '').startsWith(search))
-      .slice()
-      .reverse(),
+        || (c.id || '').startsWith(search)),
     [commits, branchFilter, search]
   );
 
@@ -58,15 +55,6 @@ export default function Commits({ server }) {
     <>
       <div className="card">
         <div className="toolbar" style={{ marginBottom: 12 }}>
-          <div className="tabs" style={{ margin: 0, borderBottom: 'none' }}>
-            <button className={view === 'graph' ? 'active' : ''} onClick={() => setView('graph')}>
-              🌿 图视图
-            </button>
-            <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}>
-              📋 列表
-            </button>
-          </div>
-          <span style={{ flex: 1 }} />
           <select value={branchFilter} onChange={e => setBranchFilter(e.target.value)}>
             <option value="">所有分支</option>
             {branches.map(b => <option key={b} value={b}>{b}</option>)}
@@ -75,7 +63,7 @@ export default function Commits({ server }) {
             placeholder="搜索 commit message / author / id"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            style={{ width: 260 }}
+            style={{ flex: 1 }}
           />
           <button onClick={() => { setBranchFilter(''); setSearch(''); setSelectedCommit(null); }}>
             清空
@@ -87,43 +75,13 @@ export default function Commits({ server }) {
         {!loading && filtered.length === 0 && (
           <div className="empty">没有匹配的 commit</div>
         )}
-        {!loading && filtered.length > 0 && view === 'graph' && (
-          <CommitGraph
+        {!loading && filtered.length > 0 && (
+          <CommitFlowGraph
             commits={filtered}
             branches={branches}
             selected={selectedCommit}
             onSelect={setSelectedCommit}
           />
-        )}
-        {!loading && filtered.length > 0 && view === 'list' && (
-          <table>
-            <thead>
-              <tr>
-                <th>Commit</th><th>分支</th><th>父节点</th>
-                <th>作者</th><th>说明</th><th>节点</th><th>边</th><th>时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(c => (
-                <tr
-                  key={c.id}
-                  onClick={() => setSelectedCommit(c)}
-                  style={{ cursor: 'pointer', background: selectedCommit?.id === c.id ? '#1e293b' : 'transparent' }}
-                >
-                  <td className="mono" title={c.id}>{shortHash(c.id, 12)}</td>
-                  <td><span className="tag">{c.branch}</span></td>
-                  <td className="mono">
-                    {(c.parents || []).map(p => shortHash(p, 8)).join(', ') || '-'}
-                  </td>
-                  <td>{c.author}</td>
-                  <td>{c.message}</td>
-                  <td>{c.nodeCount}</td>
-                  <td>{c.edgeCount}</td>
-                  <td>{formatTimestamp(c.timestamp)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         )}
       </div>
 
@@ -133,7 +91,7 @@ export default function Commits({ server }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div style={{ flex: 1 }}>
               <h2 style={{ margin: '0 0 8px' }}>
-                <span className="mono" style={{ color: BRANCH_COLORS[branches.indexOf(selectedCommit.branch) % BRANCH_COLORS.length] }}>
+                <span className="mono" style={{ color: branchColor(branches, selectedCommit.branch) }}>
                   {shortHash(selectedCommit.id, 12)}
                 </span>
                 {' '}提交详情
@@ -189,218 +147,357 @@ export default function Commits({ server }) {
   );
 }
 
+function branchColor(branches, branch) {
+  const idx = branches.indexOf(branch);
+  return BRANCH_COLORS[idx % BRANCH_COLORS.length];
+}
+
 /**
- * Git 风格的提交图可视化
- * 类似 git log --graph 的渲染，每行显示一个 commit，
- * 分支用不同颜色的竖线表示，merge commit 用菱形表示。
+ * 横向流程图式提交图（GitKraken / GitHub 网络图风格）
+ *
+ *  - 时间轴从左到右（最新在最右）
+ *  - 每个分支是水平 lane
+ *  - commit 节点是圆形/菱形
+ *  - merge commit 用曲线箭头连接到主分支
+ *  - 分支名称显示在最右侧
  */
-function CommitGraph({ commits, branches, selected, onSelect }) {
-  const LANE_WIDTH = 18;
-  const ROW_HEIGHT = 40;
-  const NODE_RADIUS = 5;
-  const LEFT_PAD = 20;
+function CommitFlowGraph({ commits, branches, selected, onSelect }) {
+  // 时间倒序：最新在最左
+  const ordered = useMemo(() =>
+    [...commits].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)),
+    [commits]
+  );
 
-  // 1. 给每个 commit 分配 lane
-  const layout = useMemo(() => layoutCommits(commits, branches), [commits, branches]);
+  const COL_WIDTH = 130;       // 每个 commit 列宽
+  const LANE_HEIGHT = 70;      // 每个分支行高
+  const NODE_RADIUS = 7;       // commit 节点半径
+  const LEFT_PAD = 30;
+  const TOP_PAD = 50;          // 给分支标签留空间
+  const RIGHT_PAD = 140;       // 给分支名留空间
 
-  // 2. 计算需要显示的总 lane 数
-  const totalLanes = layout.maxLane + 1;
-  const graphWidth = LEFT_PAD * 2 + totalLanes * LANE_WIDTH;
-  const graphHeight = commits.length * ROW_HEIGHT + 20;
+  // 1. 计算 lane 布局：从主分支开始，其他分支独立一行
+  const branchLanes = useMemo(() => {
+    const lanes = new Map(); // branch -> lane index
+    // main 总是第一个 lane（如果有）
+    const sortedBranches = [...branches].sort((a, b) => {
+      if (a === 'main') return -1;
+      if (b === 'main') return 1;
+      return branches.indexOf(a) - branches.indexOf(b);
+    });
+    sortedBranches.forEach((b, i) => lanes.set(b, i));
+    return { lanes, totalLanes: sortedBranches.length };
+  }, [branches]);
 
-  // 3. 分支颜色映射
-  const branchColor = (branch) => {
-    const idx = branches.indexOf(branch);
-    return BRANCH_COLORS[idx % BRANCH_COLORS.length];
-  };
+  // 2. 每个 commit 的坐标
+  const positions = useMemo(() => {
+    const map = new Map();
+    ordered.forEach((c, i) => {
+      const lane = branchLanes.lanes.get(c.branch) || 0;
+      map.set(c.id, {
+        col: i,
+        x: LEFT_PAD + i * COL_WIDTH + COL_WIDTH / 2,
+        y: TOP_PAD + lane * LANE_HEIGHT + LANE_HEIGHT / 2,
+        lane,
+        branch: c.branch
+      });
+    });
+    return map;
+  }, [ordered, branchLanes]);
 
-  // 4. 构建连接线段
-  const lines = useMemo(() => {
-    const segs = [];
-    const idToIndex = new Map();
-    commits.forEach((c, i) => idToIndex.set(c.id, i));
-
-    for (let i = 0; i < commits.length; i++) {
-      const c = commits[i];
-      const lane = layout.lanes.get(c.id) || 0;
-      const x = LEFT_PAD + lane * LANE_WIDTH + LANE_WIDTH / 2;
-      const cy = i * ROW_HEIGHT + ROW_HEIGHT / 2 + 10;
-
-      // 向上连接到父节点
+  // 3. 构建连线：commit -> parent（箭头从 child 指向 parent）
+  const connections = useMemo(() => {
+    const lines = [];
+    for (const c of ordered) {
+      const from = positions.get(c.id);
+      if (!from) continue;
       const parents = c.parents || [];
-      if (parents.length === 0 && i < commits.length - 1) {
-        // 根节点，向下画虚线
-        segs.push({
-          type: 'continue',
-          x1: x, y1: cy,
-          x2: x, y2: cy + ROW_HEIGHT / 2,
-          color: branchColor(c.branch)
+
+      parents.forEach((pid, idx) => {
+        const to = positions.get(pid);
+        if (!to) return;
+        // 箭头方向：从 child 指向 parent
+        // child 在左边（时间晚），parent 在右边（时间早）? 反过来 — 最新在最左，parent 应在右边
+        lines.push({
+          from, to, color: branchColor(branches, c.branch),
+          isMainParent: idx === 0,
+          isMerge: parents.length > 1
         });
-      }
-
-      parents.forEach((pid) => {
-        const parentIdx = idToIndex.get(pid);
-        if (parentIdx === undefined) return;
-        const parent = commits[parentIdx];
-        const parentLane = layout.lanes.get(pid) || 0;
-        const px = LEFT_PAD + parentLane * LANE_WIDTH + LANE_WIDTH / 2;
-        const py = parentIdx * ROW_HEIGHT + ROW_HEIGHT / 2 + 10;
-
-        if (lane === parentLane) {
-          // 同 lane 直连
-          segs.push({
-            type: 'straight',
-            x1: x, y1: cy,
-            x2: px, y2: py,
-            color: branchColor(c.branch)
-          });
-        } else {
-          // 跨 lane merge/branch：先竖直后水平再竖直
-          const midY = (cy + py) / 2;
-          segs.push({
-            type: 'turn',
-            points: [
-              { x, y: cy },
-              { x, y: midY },
-              { x: px, y: midY },
-              { x: px, y: py },
-            ],
-            color: branchColor(c.branch)
-          });
-        }
       });
     }
+    return lines;
+  }, [ordered, positions, branchLanes, branches]);
 
-    return segs;
-  }, [commits, layout, branches]);
+  const graphWidth = LEFT_PAD + ordered.length * COL_WIDTH + RIGHT_PAD;
+  const graphHeight = TOP_PAD + branchLanes.totalLanes * LANE_HEIGHT + 30;
 
   return (
-    <div className="commit-graph" style={{ overflowX: 'auto', maxWidth: '100%' }}>
-      <div style={{ position: 'relative', minWidth: graphWidth + 300 }}>
+    <div className="commit-flow-graph" style={{ overflowX: 'auto', overflowY: 'hidden', padding: '12px 0' }}>
+      <div style={{ minWidth: graphWidth, position: 'relative' }}>
+        {/* 时间轴箭头 + 分支轨道 */}
         <svg
           width={graphWidth}
           height={graphHeight}
-          style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
+          style={{ position: 'absolute', top: 0, left: 0 }}
         >
-          {lines.map((line, i) => {
-            if (line.type === 'straight') {
+          <defs>
+            <marker
+              id="arrowhead"
+              markerWidth="10" markerHeight="10"
+              refX="8" refY="3"
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L0,6 L9,3 z" fill="#475569" />
+            </marker>
+            <marker
+              id="arrowhead-active"
+              markerWidth="10" markerHeight="10"
+              refX="8" refY="3"
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L0,6 L9,3 z" fill="#60a5fa" />
+            </marker>
+          </defs>
+
+          {/* 分支轨道线（贯穿整个时间轴） */}
+          {[...branchLanes.lanes.entries()].map(([branch, laneIdx]) => {
+            const y = TOP_PAD + laneIdx * LANE_HEIGHT + LANE_HEIGHT / 2;
+            return (
+              <g key={branch}>
+                <line
+                  x1={LEFT_PAD - 10}
+                  y1={y}
+                  x2={LEFT_PAD + ordered.length * COL_WIDTH + 10}
+                  y2={y}
+                  stroke={branchColor(branches, branch)}
+                  strokeWidth={1.5}
+                  strokeDasharray="6,4"
+                  opacity={0.4}
+                />
+              </g>
+            );
+          })}
+
+          {/* 时间轴 */}
+          <line
+            x1={LEFT_PAD - 10}
+            y1={TOP_PAD - 20}
+            x2={LEFT_PAD + ordered.length * COL_WIDTH - 10}
+            y2={TOP_PAD - 20}
+            stroke="#475569"
+            strokeWidth={1}
+            markerEnd="url(#arrowhead)"
+          />
+          <text
+            x={LEFT_PAD - 5}
+            y={TOP_PAD - 25}
+            fontSize={11}
+            fill="#64748b"
+          >
+            旧
+          </text>
+
+          {/* 连线（child → parent） */}
+          {connections.map((conn, i) => {
+            const { from, to, color, isMerge, isMainParent } = conn;
+            const isActive = selected?.id === from.commit?.id || selected?.id === to.commit?.id;
+
+            // child 在左，parent 在右（最新在最左，时间向←）
+            const x1 = from.x - NODE_RADIUS - 2;
+            const y1 = from.y;
+            const x2 = to.x + NODE_RADIUS + 2;
+            const y2 = to.y;
+
+            // 同 lane: 直线
+            if (from.lane === to.lane) {
               return (
                 <line
                   key={i}
-                  x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2}
-                  stroke={line.color} strokeWidth={2}
+                  x1={x1} y1={y1} x2={x2} y2={y2}
+                  stroke={isActive ? '#60a5fa' : color}
+                  strokeWidth={isActive ? 2.5 : 2}
+                  markerEnd={isActive ? 'url(#arrowhead-active)' : 'url(#arrowhead)'}
                 />
               );
             }
-            if (line.type === 'turn') {
-              const d = `M ${line.points[0].x},${line.points[0].y} ` +
-                `L ${line.points[1].x},${line.points[1].y} ` +
-                `L ${line.points[2].x},${line.points[2].y} ` +
-                `L ${line.points[3].x},${line.points[3].y}`;
+
+            // 跨 lane: 贝塞尔曲线
+            const dx = x2 - x1;
+            const cp1x = x1 + dx * 0.3;
+            const cp1y = y1;
+            const cp2x = x2 - dx * 0.3;
+            const cp2y = y2;
+            const d = `M ${x1},${y1} C ${cp1x},${cp1y} ${cp2x},${cp2y} ${x2},${y2}`;
+
+            return (
+              <path
+                key={i}
+                d={d}
+                stroke={isActive ? '#60a5fa' : color}
+                strokeWidth={isActive ? 2.5 : (isMerge && !isMainParent ? 1.5 : 2)}
+                strokeDasharray={isMerge && !isMainParent ? '4,3' : '0'}
+                fill="none"
+                opacity={isMerge && !isMainParent ? 0.6 : 1}
+                markerEnd={isActive ? 'url(#arrowhead-active)' : 'url(#arrowhead)'}
+              />
+            );
+          })}
+
+          {/* commit 节点 */}
+          {ordered.map((c) => {
+            const pos = positions.get(c.id);
+            if (!pos) return null;
+            const isMerge = (c.parents || []).length > 1;
+            const isSelected = selected?.id === c.id;
+            const color = branchColor(branches, c.branch);
+            const r = isSelected ? NODE_RADIUS + 2 : NODE_RADIUS;
+
+            if (isMerge) {
+              // merge commit: 菱形
               return (
-                <path
-                  key={i}
-                  d={d}
-                  stroke={line.color}
-                  strokeWidth={2}
-                  fill="none"
-                />
+                <g key={c.id}>
+                  <polygon
+                    points={`${pos.x},${pos.y - r} ${pos.x + r},${pos.y} ${pos.x},${pos.y + r} ${pos.x - r},${pos.y}`}
+                    fill={color}
+                    stroke={isSelected ? '#fff' : '#0b1220'}
+                    strokeWidth={isSelected ? 2 : 1.5}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => onSelect(isSelected ? null : c)}
+                  />
+                  {isSelected && (
+                    <circle cx={pos.x} cy={pos.y} r={r + 4}
+                      fill="none" stroke={color} strokeWidth={1} opacity={0.5} />
+                  )}
+                </g>
               );
             }
-            if (line.type === 'continue') {
-              return (
+            return (
+              <g key={c.id}>
+                <circle
+                  cx={pos.x} cy={pos.y} r={r}
+                  fill={color}
+                  stroke={isSelected ? '#fff' : '#0b1220'}
+                  strokeWidth={isSelected ? 2 : 1.5}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => onSelect(isSelected ? null : c)}
+                />
+                {isSelected && (
+                  <circle cx={pos.x} cy={pos.y} r={r + 4}
+                    fill="none" stroke={color} strokeWidth={1} opacity={0.5} />
+                )}
+              </g>
+            );
+          })}
+
+          {/* 分支标签（在最右侧） */}
+          {[...branchLanes.lanes.entries()].map(([branch, laneIdx]) => {
+            const y = TOP_PAD + laneIdx * LANE_HEIGHT + LANE_HEIGHT / 2;
+            const x = LEFT_PAD + ordered.length * COL_WIDTH + 10;
+            const color = branchColor(branches, branch);
+            const branchCommits = ordered.filter(c => c.branch === branch);
+            const head = branchCommits[0]; // 最新
+
+            return (
+              <g key={branch}>
                 <line
-                  key={i}
-                  x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2}
-                  stroke={line.color} strokeWidth={2} strokeDasharray="3,3"
+                  x1={x - 10} y1={y}
+                  x2={x + 10} y2={y}
+                  stroke={color} strokeWidth={2}
                 />
-              );
-            }
-            return null;
+                <rect
+                  x={x + 12} y={y - 11}
+                  width={Math.max(60, branch.length * 8 + 16)}
+                  height={22}
+                  rx={4}
+                  fill={color + '20'}
+                  stroke={color}
+                  strokeWidth={1.5}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => head && onSelect(head)}
+                />
+                <text
+                  x={x + 22} y={y + 4}
+                  fontSize={12}
+                  fill={color}
+                  fontFamily="'SFMono-Regular', Menlo, Consolas, monospace"
+                  fontWeight={600}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => head && onSelect(head)}
+                >
+                  {branch}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* 分支名 lane 标签（在最左侧） */}
+          {[...branchLanes.lanes.entries()].map(([branch, laneIdx]) => {
+            const y = TOP_PAD + laneIdx * LANE_HEIGHT + LANE_HEIGHT / 2;
+            const color = branchColor(branches, branch);
+            return (
+              <text
+                key={`${branch}-label`}
+                x={5}
+                y={y + 4}
+                fontSize={11}
+                fill={color}
+                fontFamily="'SFMono-Regular', Menlo, Consolas, monospace"
+              >
+                {branch}
+              </text>
+            );
           })}
         </svg>
 
-        {/* commit 行 */}
-        <div>
-          {commits.map((c, i) => {
-            const lane = layout.lanes.get(c.id) || 0;
-            const isMerge = (c.parents || []).length > 1;
+        {/* commit 信息覆盖层（绝对定位在节点上方） */}
+        <div style={{ position: 'relative', pointerEvents: 'none' }}>
+          {ordered.map((c, i) => {
+            const pos = positions.get(c.id);
+            if (!pos) return null;
             const isSelected = selected?.id === c.id;
-            const cy = i * ROW_HEIGHT + ROW_HEIGHT / 2 + 10;
-            const cx = LEFT_PAD + lane * LANE_WIDTH + LANE_WIDTH / 2;
-
             return (
               <div
                 key={c.id}
                 onClick={() => onSelect(isSelected ? null : c)}
                 style={{
-                  position: 'relative',
-                  display: 'flex',
-                  alignItems: 'center',
-                  height: ROW_HEIGHT,
+                  position: 'absolute',
+                  left: pos.x - COL_WIDTH / 2 + 12,
+                  top: pos.y - 26,
+                  width: COL_WIDTH - 14,
+                  fontSize: 11,
+                  color: isSelected ? '#f8fafc' : '#cbd5e1',
+                  pointerEvents: 'auto',
                   cursor: 'pointer',
-                  background: isSelected ? '#1e293b' : 'transparent',
-                  borderRadius: 4,
-                  padding: '0 8px',
-                  transition: 'background 0.1s',
+                  textAlign: 'left',
                 }}
               >
-                {/* commit 节点圆圈 */}
-                <svg
-                  width={graphWidth}
-                  height={ROW_HEIGHT}
-                  style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
-                >
-                  {/* 节点 */}
-                  {isMerge ? (
-                    <polygon
-                      points={`${cx},${cy - NODE_RADIUS} ${cx + NODE_RADIUS},${cy} ${cx},${cy + NODE_RADIUS} ${cx - NODE_RADIUS},${cy}`}
-                      fill={branchColor(c.branch)}
-                      stroke="#0b1220"
-                      strokeWidth={2}
-                    />
-                  ) : (
-                    <circle
-                      cx={cx} cy={cy} r={NODE_RADIUS}
-                      fill={branchColor(c.branch)}
-                      stroke="#0b1220"
-                      strokeWidth={2}
-                    />
-                  )}
-                  {/* 分支标签（hover 显示） */}
-                  <title>{c.branch}</title>
-                </svg>
-
-                {/* commit 信息 */}
                 <div
+                  className="mono"
                   style={{
-                    marginLeft: graphWidth - cx + 8,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    fontSize: 13,
-                    overflow: 'hidden',
+                    fontSize: 10,
+                    color: branchColor(branches, c.branch),
+                    fontWeight: 600,
                     whiteSpace: 'nowrap',
-                  }}
-                >
-                  <code
-                    className="mono"
-                    style={{ color: branchColor(c.branch), fontWeight: 600 }}
-                    title={c.id}
-                  >
-                    {shortHash(c.id, 8)}
-                  </code>
-                  <span style={{
-                    color: isMerge ? '#fbbf24' : '#e2e8f0',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
-                    flex: 1,
-                  }}>
-                    {c.message}
-                  </span>
-                  <span className="muted" style={{ fontSize: 11 }}>
-                    {formatTimestamp(c.timestamp)}
-                  </span>
+                  }}
+                  title={c.id}
+                >
+                  {shortHash(c.id, 7)}
+                </div>
+                <div
+                  style={{
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}
+                  title={c.message}
+                >
+                  {c.message}
+                </div>
+                <div style={{ fontSize: 9, color: '#64748b', whiteSpace: 'nowrap' }}>
+                  {formatTimestamp(c.timestamp)}
                 </div>
               </div>
             );
@@ -413,69 +510,17 @@ function CommitGraph({ commits, branches, selected, onSelect }) {
         {branches.map(b => (
           <div key={b} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
             <span style={{
-              display: 'inline-block', width: 12, height: 12,
-              borderRadius: '50%', background: branchColor(b),
+              display: 'inline-block', width: 14, height: 3,
+              background: branchColor(branches, b),
             }} />
             <span className="mono">{b}</span>
-            <span className="muted">({commits.filter(c => c.branch === b).length} commits)</span>
+            <span className="muted">({ordered.filter(c => c.branch === b).length} commits)</span>
           </div>
         ))}
+        <div style={{ marginLeft: 'auto', fontSize: 11, color: '#64748b' }}>
+          💡 点击 commit 或分支标签查看详情 · 时间轴 ←
+        </div>
       </div>
     </div>
   );
-}
-
-/**
- * 为每个 commit 分配 lane（类似 git log 的 lane 分配算法）
- * 优先复用现有 lane，否则分配新 lane。
- */
-function layoutCommits(commits, branches) {
-  // commits 已是时间倒序（最新在前）
-  const lanes = new Map(); // commitId -> lane index
-  const activeLanes = []; // 当前活跃的 lane 列表
-  let maxLane = 0;
-
-  for (const c of commits) {
-    const parents = c.parents || [];
-
-    // 优先在已有 lane 上找（如果这个 commit 的 ID 是某个 lane 的 head）
-    let assigned = false;
-    for (let i = 0; i < activeLanes.length; i++) {
-      if (activeLanes[i] && activeLanes[i].commitId === c.id) {
-        lanes.set(c.id, i);
-        maxLane = Math.max(maxLane, i);
-        // 处理 parents
-        if (parents.length === 0) {
-          activeLanes[i] = null;
-        } else if (parents.length === 1) {
-          activeLanes[i] = { commitId: parents[0], branch: c.branch };
-        } else {
-          // merge commit：第一个 parent 留在当前 lane，其余记录到第一个 lane
-          activeLanes[i] = { commitId: parents[0], branch: c.branch };
-        }
-        assigned = true;
-        break;
-      }
-    }
-
-    if (!assigned) {
-      // 找空闲 lane
-      let freeLane = activeLanes.findIndex(l => l === null);
-      if (freeLane === -1) {
-        freeLane = activeLanes.length;
-        activeLanes.push(null);
-      }
-      lanes.set(c.id, freeLane);
-      maxLane = Math.max(maxLane, freeLane);
-      if (parents.length === 0) {
-        activeLanes[freeLane] = null;
-      } else if (parents.length === 1) {
-        activeLanes[freeLane] = { commitId: parents[0], branch: c.branch };
-      } else {
-        activeLanes[freeLane] = { commitId: parents[0], branch: c.branch };
-      }
-    }
-  }
-
-  return { lanes, maxLane };
 }
