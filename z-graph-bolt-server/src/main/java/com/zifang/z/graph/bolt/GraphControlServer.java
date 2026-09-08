@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 本地 Graphd 控制面服务骨架。
@@ -41,11 +43,17 @@ public final class GraphControlServer {
     private final GraphVersionStore repository;
     private final GraphMetaService metaService;
     private final GraphQueryService queryService;
+    private final String apiToken;  // 可选 API Token (null=不验证)
+    private final int rateLimit;    // 每 IP 每分钟最大请求数 (0=不限)
+    private final ConcurrentHashMap<String, long[]> rateBuckets = new ConcurrentHashMap<>();
 
     public GraphControlServer(int port, GraphVersionStore repository) throws IOException {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.metaService = new GraphMetaService(repository);
         this.queryService = new GraphQueryService(repository);
+        // 读取安全配置
+        this.apiToken = System.getenv().getOrDefault("Z_GRAPH_API_TOKEN", null);
+        this.rateLimit = Integer.parseInt(System.getenv().getOrDefault("Z_GRAPH_RATE_LIMIT", "0"));
         this.server = HttpServer.create(new InetSocketAddress(port), 128);
         // 注册所有端点,通过日志过滤器包装
         server.createContext("/health", logAndHandle(this::handleHealth));
@@ -61,7 +69,7 @@ public final class GraphControlServer {
         server.createContext("/options", logAndHandle(exchange -> writeNoContent(exchange)));
     }
 
-    /** 日志过滤器:记录每个请求的方法、路径、状态码和耗时。 */
+    /** 日志过滤器:记录每个请求的方法、路径、状态码和耗时,并执行认证和限流。 */
     private HttpHandler logAndHandle(HttpHandler handler) {
         return exchange -> {
             long start = System.currentTimeMillis();
@@ -70,10 +78,56 @@ public final class GraphControlServer {
             String query = exchange.getRequestURI().getRawQuery();
             String clientIp = exchange.getRemoteAddress() != null
                     ? exchange.getRemoteAddress().getAddress().getHostAddress() : "-";
+
+            // 安全响应头
+            applySecurityHeaders(exchange);
+
+            // OPTIONS 预检不需要认证/限流
+            if ("OPTIONS".equalsIgnoreCase(method)) {
+                handler.handle(exchange);
+                return;
+            }
+
+            // API Token 认证（/health 和 /options 豁免）
+            if (apiToken != null && !path.equals("/health")) {
+                String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
+                String tokenFromQuery = queryParameters(exchange.getRequestURI()).get("token");
+                String provided = null;
+                if (authHeader != null && authHeader.startsWith("Bearer ")) {
+                    provided = authHeader.substring(7);
+                } else if (tokenFromQuery != null) {
+                    provided = tokenFromQuery;
+                }
+                if (!apiToken.equals(provided)) {
+                    logAccess(method, path, query, clientIp, 401, 0);
+                    writeJson(exchange, 401, Map.of("error", "Unauthorized: invalid or missing API token"));
+                    return;
+                }
+            }
+
+            // 速率限制（/health 豁免）
+            if (rateLimit > 0 && !path.equals("/health")) {
+                long now = System.currentTimeMillis();
+                long windowStart = now - 60_000; // 1 分钟窗口
+                long[] bucket = rateBuckets.compute(clientIp, (k, v) -> {
+                    if (v == null || v[0] < windowStart) return new long[]{now, 1};
+                    v[1]++;
+                    return v;
+                });
+                if (bucket[1] > rateLimit) {
+                    logAccess(method, path, query, clientIp, 429, 0);
+                    exchange.getResponseHeaders().set("Retry-After", "60");
+                    writeJson(exchange, 429, Map.of(
+                            "error", "Rate limit exceeded",
+                            "limit", rateLimit,
+                            "retryAfterSeconds", 60));
+                    return;
+                }
+            }
+
             try {
                 handler.handle(exchange);
             } catch (Exception e) {
-                // 未捕获异常:记录并返回 500
                 logError(method, path, clientIp, 500, System.currentTimeMillis() - start, e);
                 try {
                     writeJson(exchange, 500, Map.of("error", "Internal server error"));
@@ -82,11 +136,18 @@ public final class GraphControlServer {
             }
             int status = exchange.getResponseCode();
             long elapsed = System.currentTimeMillis() - start;
-            // /health 不记录(太频繁),错误和慢查询必须记录
             if (!"/health".equals(path) || status >= 400 || elapsed > 100) {
                 logAccess(method, path, query, clientIp, status, elapsed);
             }
         };
+    }
+
+    /** 添加安全响应头。 */
+    private static void applySecurityHeaders(HttpExchange exchange) {
+        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        exchange.getResponseHeaders().set("X-Frame-Options", "DENY");
+        exchange.getResponseHeaders().set("X-XSS-Protection", "1; mode=block");
+        exchange.getResponseHeaders().set("Referrer-Policy", "strict-origin-when-cross-origin");
     }
 
     private static void logAccess(String method, String path, String query, String clientIp, int status, long elapsed) {
