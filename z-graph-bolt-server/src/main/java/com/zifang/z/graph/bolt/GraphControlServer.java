@@ -1,6 +1,7 @@
 package com.zifang.z.graph.bolt;
 
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.core.CypherEngine;
@@ -46,17 +47,57 @@ public final class GraphControlServer {
         this.metaService = new GraphMetaService(repository);
         this.queryService = new GraphQueryService(repository);
         this.server = HttpServer.create(new InetSocketAddress(port), 128);
-        server.createContext("/health", this::handleHealth);
-        server.createContext("/meta/branches", this::handleBranches);
-        server.createContext("/meta/commits", this::handleCommits);
-        server.createContext("/meta/schema", this::handleSchema);
-        server.createContext("/meta/stats", this::handleStats);
-        server.createContext("/meta/export", this::handleExport);
-        server.createContext("/meta/import", this::handleImport);
-        server.createContext("/query/batch", this::handleBatch);
-        server.createContext("/query", this::handleQuery);
-        // OPTIONS 预检 + CORS 头:允许浏览器前端直接访问此控制面
-        server.createContext("/options", exchange -> writeNoContent(exchange));
+        // 注册所有端点,通过日志过滤器包装
+        server.createContext("/health", logAndHandle(this::handleHealth));
+        server.createContext("/meta/branches", logAndHandle(this::handleBranches));
+        server.createContext("/meta/commits", logAndHandle(this::handleCommits));
+        server.createContext("/meta/schema", logAndHandle(this::handleSchema));
+        server.createContext("/meta/stats", logAndHandle(this::handleStats));
+        server.createContext("/meta/export", logAndHandle(this::handleExport));
+        server.createContext("/meta/import", logAndHandle(this::handleImport));
+        server.createContext("/query/batch", logAndHandle(this::handleBatch));
+        server.createContext("/query", logAndHandle(this::handleQuery));
+        // OPTIONS 预检 + CORS 头
+        server.createContext("/options", logAndHandle(exchange -> writeNoContent(exchange)));
+    }
+
+    /** 日志过滤器:记录每个请求的方法、路径、状态码和耗时。 */
+    private HttpHandler logAndHandle(HttpHandler handler) {
+        return exchange -> {
+            long start = System.currentTimeMillis();
+            String method = exchange.getRequestMethod();
+            String path = exchange.getRequestURI().getPath();
+            String query = exchange.getRequestURI().getRawQuery();
+            String clientIp = exchange.getRemoteAddress() != null
+                    ? exchange.getRemoteAddress().getAddress().getHostAddress() : "-";
+            try {
+                handler.handle(exchange);
+            } catch (Exception e) {
+                // 未捕获异常:记录并返回 500
+                logError(method, path, clientIp, 500, System.currentTimeMillis() - start, e);
+                try {
+                    writeJson(exchange, 500, Map.of("error", "Internal server error"));
+                } catch (Exception ignored) { }
+                return;
+            }
+            int status = exchange.getResponseCode();
+            long elapsed = System.currentTimeMillis() - start;
+            // /health 不记录(太频繁),错误和慢查询必须记录
+            if (!"/health".equals(path) || status >= 400 || elapsed > 100) {
+                logAccess(method, path, query, clientIp, status, elapsed);
+            }
+        };
+    }
+
+    private static void logAccess(String method, String path, String query, String clientIp, int status, long elapsed) {
+        String full = query != null ? path + "?" + query : path;
+        System.out.println(String.format("[INFO] %s %s %s %d %dms %s",
+                clientIp, method, full, status, elapsed, Thread.currentThread().getName()));
+    }
+
+    private static void logError(String method, String path, String clientIp, int status, long elapsed, Exception e) {
+        System.err.println(String.format("[ERROR] %s %s %s %d %dms %s: %s",
+                clientIp, method, path, status, elapsed, e.getClass().getSimpleName(), e.getMessage()));
     }
 
     /**
