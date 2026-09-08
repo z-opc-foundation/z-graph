@@ -46,6 +46,12 @@ public final class GraphControlServer {
     private final String apiToken;  // 可选 API Token (null=不验证)
     private final int rateLimit;    // 每 IP 每分钟最大请求数 (0=不限)
     private final ConcurrentHashMap<String, long[]> rateBuckets = new ConcurrentHashMap<>();
+    // 运行指标
+    private final long startTimeMs = System.currentTimeMillis();
+    private final AtomicInteger totalRequests = new AtomicInteger();
+    private final AtomicInteger errorResponses = new AtomicInteger();
+    private final AtomicInteger rateLimitedRequests = new AtomicInteger();
+    private final AtomicInteger authFailures = new AtomicInteger();
 
     public GraphControlServer(int port, GraphVersionStore repository) throws IOException {
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -61,6 +67,7 @@ public final class GraphControlServer {
         server.createContext("/meta/commits", logAndHandle(this::handleCommits));
         server.createContext("/meta/schema", logAndHandle(this::handleSchema));
         server.createContext("/meta/stats", logAndHandle(this::handleStats));
+        server.createContext("/meta/metrics", logAndHandle(this::handleMetrics));
         server.createContext("/meta/export", logAndHandle(this::handleExport));
         server.createContext("/meta/import", logAndHandle(this::handleImport));
         server.createContext("/query/batch", logAndHandle(this::handleBatch));
@@ -81,6 +88,7 @@ public final class GraphControlServer {
 
             // 安全响应头
             applySecurityHeaders(exchange);
+            totalRequests.incrementAndGet();
 
             // OPTIONS 预检不需要认证/限流
             if ("OPTIONS".equalsIgnoreCase(method)) {
@@ -99,6 +107,7 @@ public final class GraphControlServer {
                     provided = tokenFromQuery;
                 }
                 if (!apiToken.equals(provided)) {
+                    authFailures.incrementAndGet();
                     logAccess(method, path, query, clientIp, 401, 0);
                     writeJson(exchange, 401, Map.of("error", "Unauthorized: invalid or missing API token"));
                     return;
@@ -115,6 +124,7 @@ public final class GraphControlServer {
                     return v;
                 });
                 if (bucket[1] > rateLimit) {
+                    rateLimitedRequests.incrementAndGet();
                     logAccess(method, path, query, clientIp, 429, 0);
                     exchange.getResponseHeaders().set("Retry-After", "60");
                     writeJson(exchange, 429, Map.of(
@@ -128,6 +138,7 @@ public final class GraphControlServer {
             try {
                 handler.handle(exchange);
             } catch (Exception e) {
+                errorResponses.incrementAndGet();
                 logError(method, path, clientIp, 500, System.currentTimeMillis() - start, e);
                 try {
                     writeJson(exchange, 500, Map.of("error", "Internal server error"));
@@ -220,6 +231,54 @@ public final class GraphControlServer {
         body.put("edgeCount", head.getEdgeCount());
         applyCorsHeaders(exchange);
         writeJson(exchange, 200, body);
+    }
+
+    /**
+     * GET /meta/metrics — 服务运行指标（请求数、错误率、运行时间等）。
+     */
+    private void handleMetrics(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        long uptimeMs = System.currentTimeMillis() - startTimeMs;
+        long uptimeSec = uptimeMs / 1000;
+        int total = totalRequests.get();
+        int errors = errorResponses.get();
+        int rateLimited = rateLimitedRequests.get();
+        int authFails = authFailures.get();
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("uptimeMs", uptimeMs);
+        body.put("uptimeSeconds", uptimeSec);
+        body.put("uptimeFormatted", formatUptime(uptimeSec));
+        body.put("totalRequests", total);
+        body.put("errorResponses", errors);
+        body.put("errorRate", total > 0 ? String.format("%.2f%%", (errors * 100.0 / total)) : "0%");
+        body.put("rateLimitedRequests", rateLimited);
+        body.put("authFailures", authFails);
+        body.put("apiTokenEnabled", apiToken != null);
+        body.put("rateLimitPerMinute", rateLimit);
+        body.put("activeRateBuckets", rateBuckets.size());
+
+        // JVM 内存
+        Runtime runtime = Runtime.getRuntime();
+        Map<String, Long> memory = new LinkedHashMap<>();
+        memory.put("maxBytes", runtime.maxMemory());
+        memory.put("totalBytes", runtime.totalMemory());
+        memory.put("freeBytes", runtime.freeMemory());
+        memory.put("usedBytes", runtime.totalMemory() - runtime.freeMemory());
+        body.put("jvmMemory", memory);
+        body.put("availableProcessors", runtime.availableProcessors());
+
+        writeJson(exchange, 200, body);
+    }
+
+    private static String formatUptime(long seconds) {
+        long days = seconds / 86400;
+        long hours = (seconds % 86400) / 3600;
+        long minutes = (seconds % 3600) / 60;
+        long secs = seconds % 60;
+        if (days > 0) return days + "d " + hours + "h " + minutes + "m";
+        if (hours > 0) return hours + "h " + minutes + "m " + secs + "s";
+        return minutes + "m " + secs + "s";
     }
 
     private void handleBranches(HttpExchange exchange) throws IOException {
