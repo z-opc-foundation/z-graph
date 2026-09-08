@@ -6,6 +6,7 @@ import Commits from './pages/Commits.jsx';
 import QueryPage from './pages/QueryPage.jsx';
 import Schema from './pages/Schema.jsx';
 import GraphView from './pages/GraphView.jsx';
+import ApiDocs from './pages/ApiDocs.jsx';
 
 const TABS = [
   { id: 'dashboard', label: '总览', component: Dashboard },
@@ -13,7 +14,8 @@ const TABS = [
   { id: 'branches', label: '分支', component: Branches },
   { id: 'commits', label: '提交历史', component: Commits },
   { id: 'query', label: 'Cypher 查询', component: QueryPage },
-  { id: 'schema', label: 'Schema', component: Schema }
+  { id: 'schema', label: 'Schema', component: Schema },
+  { id: 'api', label: 'API 文档', component: ApiDocs }
 ];
 
 export default function App() {
