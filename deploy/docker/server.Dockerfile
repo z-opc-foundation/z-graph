@@ -62,14 +62,12 @@ EXPOSE 7687 8090
 ENV Z_GRAPH_BOLT_PORT=7687 \
     Z_GRAPH_HTTP_PORT=8090 \
     Z_GRAPH_DATA_DIR=/var/lib/z-graph \
-    Z_GRAPH_CORS_ALLOWED_ORIGINS=*
+    Z_GRAPH_CORS_ALLOWED_ORIGINS=* \
+    JAVA_OPTS=""
 
 # 健康检查 — 通过 HTTP /health
-HEALTHCHECK --interval=15s --timeout=3s --start-period=15s --retries=5 \
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
     CMD wget -qO- http://127.0.0.1:8090/health >/dev/null 2>&1 || exit 1
 
-# 统一启动入口(Bolt + HTTP 控制面)
-ENTRYPOINT ["java", \
-    "-Dz.graph.dataDir=/var/lib/z-graph", \
-    "-cp", "/opt/z-graph/lib/*:/opt/z-graph/server.jar", \
-    "com.zifang.z.graph.bolt.ZGraphServer"]
+# 统一启动入口(Bolt + HTTP 控制面),支持 JAVA_OPTS 环境变量注入 JVM 参数
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -Dz.graph.dataDir=/var/lib/z-graph -cp '/opt/z-graph/lib/*:/opt/z-graph/server.jar' com.zifang.z.graph.bolt.ZGraphServer"]
