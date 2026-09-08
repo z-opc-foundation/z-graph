@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { api, shortHash, formatTimestamp } from '../api.js';
 
 export default function Dashboard({ server }) {
@@ -7,6 +7,8 @@ export default function Dashboard({ server }) {
   const [schema, setSchema] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [metricsHistory, setMetricsHistory] = useState([]);
+  const prevMetrics = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,6 +34,33 @@ export default function Dashboard({ server }) {
     load();
   }, [server.head]);
 
+  // 定时采集指标用于图表
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const m = await api.metrics().catch(() => null);
+        if (cancelled || !m) return;
+        const now = Date.now();
+        let rps = 0;
+        if (prevMetrics.current) {
+          const dt = (now - prevMetrics.current.ts) / 1000;
+          if (dt > 0) {
+            rps = Math.round(((m.totalRequests - prevMetrics.current.total) / dt) * 10) / 10;
+          }
+        }
+        prevMetrics.current = { ts: now, total: m.totalRequests };
+        setMetricsHistory(prev => {
+          const next = [...prev, { ts: now, rps, requests: m.totalRequests, errors: m.errorResponses, memory: m.jvmMemory?.usedBytes || 0 }];
+          return next.slice(-60); // 保留最近 60 个采样点（5 分钟）
+        });
+      } catch { /* ignore */ }
+    }
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
   const recent = commits.slice(-5).reverse();
   const tags = schema?.tags || [];
   const edges = schema?.edges || [];
@@ -45,6 +74,30 @@ export default function Dashboard({ server }) {
         <KPI label="分支数" value={branches.length} icon="B" color="#a78bfa" />
         <KPI label="总提交" value={commits.length} icon="C" color="#fbbf24" />
       </div>
+
+      {/* 实时指标图表 */}
+      {metricsHistory.length > 1 && (
+        <div className="card">
+          <h2>实时指标</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <MetricsChart
+              data={metricsHistory}
+              dataKey="rps"
+              title="请求速率 (req/s)"
+              color="#60a5fa"
+              unit="req/s"
+            />
+            <MetricsChart
+              data={metricsHistory}
+              dataKey="memory"
+              title="JVM 内存"
+              color="#a78bfa"
+              unit="MB"
+              format={v => Math.round(v / 1024 / 1024)}
+            />
+          </div>
+        </div>
+      )}
 
       <div className="row-2">
         {/* 左: Schema 概览 */}
@@ -171,6 +224,58 @@ function ActionCard({ title, desc, color }) {
     <div className="action-card" style={{ borderTopColor: color }}>
       <div className="action-title">{title}</div>
       <div className="action-desc mono">{desc}</div>
+    </div>
+  );
+}
+
+function MetricsChart({ data, dataKey, title, color, unit, format }) {
+  if (!data || data.length < 2) return null;
+
+  const W = 400, H = 120, PAD = 30;
+  const values = data.map(d => format ? format(d[dataKey]) : d[dataKey]);
+  const maxVal = Math.max(...values, 1);
+  const minVal = 0;
+  const range = maxVal - minVal || 1;
+
+  const points = values.map((v, i) => {
+    const x = PAD + (i / (values.length - 1)) * (W - PAD * 2);
+    const y = H - PAD - ((v - minVal) / range) * (H - PAD * 2);
+    return { x, y, v };
+  });
+
+  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+  const areaD = pathD + ` L${points[points.length - 1].x},${H - PAD} L${points[0].x},${H - PAD} Z`;
+  const current = values[values.length - 1];
+
+  // Y 轴刻度（3 个）
+  const yTicks = [0, 0.5, 1].map(f => ({
+    value: Math.round(minVal + f * range),
+    y: H - PAD - f * (H - PAD * 2)
+  }));
+
+  return (
+    <div className="metrics-chart">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+        <span style={{ fontSize: 13, color: '#94a3b8' }}>{title}</span>
+        <span className="mono" style={{ fontSize: 18, fontWeight: 600, color }}>
+          {current}{unit ? ' ' + unit : ''}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: H }}>
+        {/* 网格线 */}
+        {yTicks.map((t, i) => (
+          <g key={i}>
+            <line x1={PAD} y1={t.y} x2={W - PAD} y2={t.y} stroke="#1e293b" strokeWidth="1" />
+            <text x={PAD - 4} y={t.y + 4} textAnchor="end" fontSize="9" fill="#475569">{t.value}</text>
+          </g>
+        ))}
+        {/* 面积填充 */}
+        <path d={areaD} fill={color} fillOpacity="0.1" />
+        {/* 折线 */}
+        <path d={pathD} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
+        {/* 当前值圆点 */}
+        <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3" fill={color} />
+      </svg>
     </div>
   );
 }
