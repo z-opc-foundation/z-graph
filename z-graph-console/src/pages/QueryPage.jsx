@@ -123,6 +123,41 @@ export default function QueryPage({ server }) {
     return <pre>{JSON.stringify(data, null, 2)}</pre>;
   }
 
+  function exportCSV() {
+    if (!result || !Array.isArray(result) || result.length === 0) return;
+    const columns = Array.from(result.reduce((set, row) => {
+      if (row && typeof row === 'object') Object.keys(row).forEach(k => set.add(k));
+      return set;
+    }, new Set()));
+    const csvRows = [columns.join(',')];
+    for (const row of result) {
+      csvRows.push(columns.map(c => {
+        const v = row[c];
+        if (v == null) return '';
+        const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n')
+          ? '"' + s.replace(/"/g, '""') + '"' : s;
+      }).join(','));
+    }
+    downloadFile(csvRows.join('\n'), 'z-graph-query.csv', 'text/csv;charset=utf-8');
+  }
+
+  function exportJSON() {
+    if (!result) return;
+    const json = JSON.stringify(result, null, 2);
+    downloadFile(json, 'z-graph-query.json', 'application/json;charset=utf-8');
+  }
+
+  function downloadFile(content, filename, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <>
       <div className="card">
@@ -191,13 +226,21 @@ export default function QueryPage({ server }) {
       </div>
 
       <div className="card">
-        <h2>
-          结果
-          {elapsed && <span className="tag ok" style={{ marginLeft: 8, fontSize: 11 }}>{elapsed}</span>}
-          {result && Array.isArray(result) && (
-            <span className="muted" style={{ marginLeft: 8, fontSize: 13 }}>{result.length} 行</span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 style={{ margin: 0 }}>
+            结果
+            {elapsed && <span className="tag ok" style={{ marginLeft: 8, fontSize: 11 }}>{elapsed}</span>}
+            {result && Array.isArray(result) && (
+              <span className="muted" style={{ marginLeft: 8, fontSize: 13 }}>{result.length} 行</span>
+            )}
+          </h2>
+          {result && Array.isArray(result) && result.length > 0 && (
+            <div className="toolbar">
+              <button onClick={exportCSV}>📥 CSV</button>
+              <button onClick={exportJSON}>📥 JSON</button>
+            </div>
           )}
-        </h2>
+        </div>
         {error && <div className="results"><pre className="error">{error}</pre></div>}
         {!error && !result && <div className="empty">尚未执行</div>}
         {!error && result && <div className="results">{loadResult(result)}</div>}

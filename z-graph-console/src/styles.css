@@ -430,3 +430,49 @@ td.mono, code.mono { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; 
   font-size: 11px;
   color: #64748b;
 }
+
+/* 日志查看器 */
+.log-table-wrap {
+  max-height: 600px;
+  overflow-y: auto;
+}
+.log-table {
+  font-size: 12px;
+  table-layout: fixed;
+}
+.log-table th {
+  position: sticky;
+  top: 0;
+  background: #0b1220;
+  z-index: 1;
+  padding: 8px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.log-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid #111827;
+}
+.log-row {
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.log-row:hover { background: #111827; }
+.log-row.selected { background: #1e293b; }
+.log-method {
+  font-weight: 600;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.log-status {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+.log-status-ok { background: #064e3b; color: #86efac; }
+.log-status-warn { background: #78350f; color: #fde68a; }
+.log-status-error { background: #7f1d1d; color: #fca5a5; }

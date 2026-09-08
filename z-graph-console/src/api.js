@@ -56,6 +56,17 @@ export const api = {
   stats: (branch = 'main') => simpleRequest('/meta/stats?branch=' + encodeURIComponent(branch)),
   metrics: () => simpleRequest('/meta/metrics'),
 
+  // 请求日志
+  logs: (params = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set('limit', params.limit);
+    if (params.offset) qs.set('offset', params.offset);
+    if (params.method) qs.set('method', params.method);
+    if (params.status) qs.set('status', params.status);
+    if (params.path) qs.set('path', params.path);
+    return simpleRequest('/meta/logs' + (qs.toString() ? '?' + qs.toString() : ''));
+  },
+
   // 导出 / 导入
   exportData: (branch = 'main') => request('/meta/export?branch=' + encodeURIComponent(branch)),
 

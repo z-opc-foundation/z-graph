@@ -52,6 +52,10 @@ public final class GraphControlServer {
     private final AtomicInteger errorResponses = new AtomicInteger();
     private final AtomicInteger rateLimitedRequests = new AtomicInteger();
     private final AtomicInteger authFailures = new AtomicInteger();
+    // 请求日志环形缓冲（最近 500 条）
+    private static final int LOG_BUFFER_SIZE = 500;
+    private final Map<String, Object>[] logBuffer = new LinkedHashMap[LOG_BUFFER_SIZE];
+    private final AtomicInteger logIndex = new AtomicInteger();
 
     public GraphControlServer(int port, GraphVersionStore repository) throws IOException {
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -68,6 +72,7 @@ public final class GraphControlServer {
         server.createContext("/meta/schema", logAndHandle(this::handleSchema));
         server.createContext("/meta/stats", logAndHandle(this::handleStats));
         server.createContext("/meta/metrics", logAndHandle(this::handleMetrics));
+        server.createContext("/meta/logs", logAndHandle(this::handleLogs));
         server.createContext("/meta/export", logAndHandle(this::handleExport));
         server.createContext("/meta/import", logAndHandle(this::handleImport));
         server.createContext("/query/batch", logAndHandle(this::handleBatch));
@@ -162,15 +167,30 @@ public final class GraphControlServer {
         exchange.getResponseHeaders().set("Referrer-Policy", "strict-origin-when-cross-origin");
     }
 
-    private static void logAccess(String method, String path, String query, String clientIp, int status, long elapsed) {
+    private void logAccess(String method, String path, String query, String clientIp, int status, long elapsed) {
         String full = query != null ? path + "?" + query : path;
         System.out.println(String.format("[INFO] %s %s %s %d %dms %s",
                 clientIp, method, full, status, elapsed, Thread.currentThread().getName()));
+        storeLogEntry(method, full, clientIp, status, elapsed);
     }
 
     private static void logError(String method, String path, String clientIp, int status, long elapsed, Exception e) {
         System.err.println(String.format("[ERROR] %s %s %s %d %dms %s: %s",
                 clientIp, method, path, status, elapsed, e.getClass().getSimpleName(), e.getMessage()));
+    }
+
+    /** 将请求日志条目写入环形缓冲。 */
+    private void storeLogEntry(String method, String path, String clientIp, int status, long elapsed) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("timestamp", System.currentTimeMillis());
+        entry.put("method", method);
+        entry.put("path", path);
+        entry.put("clientIp", clientIp);
+        entry.put("status", status);
+        entry.put("elapsedMs", elapsed);
+        entry.put("thread", Thread.currentThread().getName());
+        int idx = logIndex.getAndIncrement() % LOG_BUFFER_SIZE;
+        logBuffer[idx] = entry;
     }
 
     /**
@@ -280,6 +300,56 @@ public final class GraphControlServer {
         if (days > 0) return days + "d " + hours + "h " + minutes + "m";
         if (hours > 0) return hours + "h " + minutes + "m " + secs + "s";
         return minutes + "m " + secs + "s";
+    }
+
+    /**
+     * GET /meta/logs — 返回最近的请求日志（环形缓冲）。
+     * 参数: ?limit=100&offset=0&method=POST&status=4xx&path=/query
+     */
+    @SuppressWarnings("unchecked")
+    private void handleLogs(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        Map<String, String> params = queryParameters(exchange.getRequestURI());
+        int limit = Math.min(Math.max(parseIntOrDefault(params.get("limit"), 100), 1), LOG_BUFFER_SIZE);
+        int offset = Math.max(parseIntOrDefault(params.get("offset"), 0), 0);
+        String methodFilter = params.get("method");
+        String statusFilter = params.get("status");
+        String pathFilter = params.get("path");
+
+        // 收集有效条目（最新的在前）
+        int written = logIndex.get();
+        List<Map<String, Object>> entries = new ArrayList<>();
+        for (int i = written - 1 - offset; i >= written - offset - limit && i >= 0; i--) {
+            Map<String, Object> entry = logBuffer[i % LOG_BUFFER_SIZE];
+            if (entry == null) continue;
+            // 过滤
+            if (methodFilter != null && !methodFilter.equalsIgnoreCase((String) entry.get("method"))) continue;
+            if (pathFilter != null && !((String) entry.get("path")).contains(pathFilter)) continue;
+            if (statusFilter != null) {
+                int s = (int) entry.get("status");
+                if ("4xx".equals(statusFilter) && (s < 400 || s >= 500)) continue;
+                if ("5xx".equals(statusFilter) && (s < 500 || s >= 600)) continue;
+                if ("2xx".equals(statusFilter) && (s < 200 || s >= 300)) continue;
+                try {
+                    int exact = Integer.parseInt(statusFilter);
+                    if (s != exact) continue;
+                } catch (NumberFormatException ignored) { }
+            }
+            entries.add(entry);
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("total", written);
+        body.put("bufferSize", LOG_BUFFER_SIZE);
+        body.put("offset", offset);
+        body.put("limit", limit);
+        body.put("entries", entries);
+        writeJson(exchange, 200, body);
+    }
+
+    private static int parseIntOrDefault(String s, int def) {
+        if (s == null || s.isBlank()) return def;
+        try { return Integer.parseInt(s); } catch (NumberFormatException e) { return def; }
     }
 
     private void handleBranches(HttpExchange exchange) throws IOException {

@@ -70,6 +70,18 @@ const ENDPOINTS = [
     response: '{ uptimeMs, totalRequests, errorResponses, errorRate, jvmMemory, ... }'
   },
   {
+    method: 'GET', path: '/meta/logs', name: '请求日志',
+    desc: '返回最近的请求日志（环形缓冲区，最多 500 条），支持过滤。',
+    params: [
+      { name: 'limit', type: 'number', required: false, example: '100' },
+      { name: 'offset', type: 'number', required: false, example: '0' },
+      { name: 'method', type: 'string', required: false, example: 'GET' },
+      { name: 'status', type: 'string', required: false, example: '4xx' },
+      { name: 'path', type: 'string', required: false, example: '/query' }
+    ],
+    response: '{ total, bufferSize, offset, limit, entries: [{ timestamp, method, path, status, elapsedMs, clientIp }] }'
+  },
+  {
     method: 'GET', path: '/meta/export', name: '导出图数据',
     desc: '导出当前分支的完整图数据（节点 + 边 + schema）。',
     params: [

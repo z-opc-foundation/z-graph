@@ -7,6 +7,7 @@ import QueryPage from './pages/QueryPage.jsx';
 import Schema from './pages/Schema.jsx';
 import GraphView from './pages/GraphView.jsx';
 import ApiDocs from './pages/ApiDocs.jsx';
+import LogViewer from './pages/LogViewer.jsx';
 
 const TABS = [
   { id: 'dashboard', label: '总览', component: Dashboard },
@@ -15,6 +16,7 @@ const TABS = [
   { id: 'commits', label: '提交历史', component: Commits },
   { id: 'query', label: 'Cypher 查询', component: QueryPage },
   { id: 'schema', label: 'Schema', component: Schema },
+  { id: 'logs', label: '请求日志', component: LogViewer },
   { id: 'api', label: 'API 文档', component: ApiDocs }
 ];
 
