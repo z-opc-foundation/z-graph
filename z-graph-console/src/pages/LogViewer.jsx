@@ -17,7 +17,7 @@ export default function LogViewer() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [filter, setFilter] = useState({ method: '', status: '', path: '' });
+  const [filter, setFilter] = useState({ method: '', status: '', path: '', requestId: '' });
   const [selectedEntry, setSelectedEntry] = useState(null);
 
   const fetchLogs = useCallback(async () => {
@@ -26,6 +26,7 @@ export default function LogViewer() {
       if (filter.method) params.method = filter.method;
       if (filter.status) params.status = filter.status;
       if (filter.path) params.path = filter.path;
+      if (filter.requestId) params.requestId = filter.requestId;
       params.limit = 200;
       const data = await api.logs(params);
       setLogs(data);
@@ -102,6 +103,12 @@ export default function LogViewer() {
             onChange={e => setFilter(f => ({ ...f, path: e.target.value }))}
             style={{ width: 200 }}
           />
+          <input
+            placeholder="Request ID…"
+            value={filter.requestId}
+            onChange={e => setFilter(f => ({ ...f, requestId: e.target.value }))}
+            style={{ width: 160 }}
+          />
           {logs && (
             <span style={{ fontSize: 12, color: '#64748b' }}>
               共 {logs.total} 条记录，显示 {logs.entries?.length || 0} 条
@@ -121,10 +128,11 @@ export default function LogViewer() {
               <thead>
                 <tr>
                   <th style={{ width: 110 }}>时间</th>
-                  <th style={{ width: 60 }}>方法</th>
-                  <th style={{ width: 50 }}>状态</th>
+                  <th style={{ width: 90 }}>Request ID</th>
+                  <th style={{ width: 50 }}>方法</th>
+                  <th style={{ width: 45 }}>状态</th>
                   <th>路径</th>
-                  <th style={{ width: 70 }}>耗时</th>
+                  <th style={{ width: 60 }}>耗时</th>
                   <th style={{ width: 100 }}>客户端</th>
                 </tr>
               </thead>
@@ -137,6 +145,11 @@ export default function LogViewer() {
                   >
                     <td className="mono" style={{ fontSize: 11, color: '#64748b' }}>
                       {formatTime(entry.timestamp)}
+                    </td>
+                    <td className="mono" style={{ fontSize: 10, color: '#64748b', cursor: 'pointer' }}
+                        title={entry.requestId}
+                        onClick={e => { e.stopPropagation(); setFilter(f => ({ ...f, requestId: entry.requestId })); }}>
+                      {entry.requestId ? entry.requestId.substring(0, 12) + '…' : '-'}
                     </td>
                     <td>
                       <span
@@ -163,7 +176,7 @@ export default function LogViewer() {
                   </tr>
                 ))}
                 {logs.entries.length === 0 && (
-                  <tr><td colSpan={6} style={{ textAlign: 'center', padding: 30, color: '#64748b' }}>暂无日志记录</td></tr>
+                  <tr><td colSpan={7} style={{ textAlign: 'center', padding: 30, color: '#64748b' }}>暂无日志记录</td></tr>
                 )}
               </tbody>
             </table>

@@ -11,6 +11,7 @@ import com.zifang.z.graph.core.GraphVersionStore;
 import com.zifang.z.graph.core.GraphWriteTransaction;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -27,6 +28,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * 本地 Graphd 控制面服务骨架。
@@ -92,8 +94,16 @@ public final class GraphControlServer {
             String clientIp = exchange.getRemoteAddress() != null
                     ? exchange.getRemoteAddress().getAddress().getHostAddress() : "-";
 
-            // 安全响应头
+            // 生成或复用 X-Request-ID
+            String requestId = exchange.getRequestHeaders().getFirst("X-Request-ID");
+            if (requestId == null || requestId.isBlank()) {
+                requestId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+            }
+            final String reqId = requestId;
+
+            // 安全响应头 + 请求追踪 ID
             applySecurityHeaders(exchange);
+            exchange.getResponseHeaders().set("X-Request-ID", reqId);
             totalRequests.incrementAndGet();
 
             // OPTIONS 预检不需要认证/限流
@@ -114,7 +124,7 @@ public final class GraphControlServer {
                 }
                 if (!apiToken.equals(provided)) {
                     authFailures.incrementAndGet();
-                    logAccess(method, path, query, clientIp, 401, 0);
+                    logAccess(method, path, query, clientIp, 401, 0, reqId);
                     writeJson(exchange, 401, Map.of("error", "Unauthorized: invalid or missing API token"));
                     return;
                 }
@@ -131,7 +141,7 @@ public final class GraphControlServer {
                 });
                 if (bucket[1] > rateLimit) {
                     rateLimitedRequests.incrementAndGet();
-                    logAccess(method, path, query, clientIp, 429, 0);
+                    logAccess(method, path, query, clientIp, 429, 0, reqId);
                     exchange.getResponseHeaders().set("Retry-After", "60");
                     writeJson(exchange, 429, Map.of(
                             "error", "Rate limit exceeded",
@@ -154,7 +164,7 @@ public final class GraphControlServer {
             int status = exchange.getResponseCode();
             long elapsed = System.currentTimeMillis() - start;
             if (!"/health".equals(path) || status >= 400 || elapsed > 100) {
-                logAccess(method, path, query, clientIp, status, elapsed);
+                logAccess(method, path, query, clientIp, status, elapsed, reqId);
             }
         };
     }
@@ -167,11 +177,11 @@ public final class GraphControlServer {
         exchange.getResponseHeaders().set("Referrer-Policy", "strict-origin-when-cross-origin");
     }
 
-    private void logAccess(String method, String path, String query, String clientIp, int status, long elapsed) {
+    private void logAccess(String method, String path, String query, String clientIp, int status, long elapsed, String requestId) {
         String full = query != null ? path + "?" + query : path;
-        System.out.println(String.format("[INFO] %s %s %s %d %dms %s",
-                clientIp, method, full, status, elapsed, Thread.currentThread().getName()));
-        storeLogEntry(method, full, clientIp, status, elapsed);
+        System.out.println(String.format("[INFO] %s %s %s %s %d %dms %s",
+                clientIp, method, full, requestId, status, elapsed, Thread.currentThread().getName()));
+        storeLogEntry(method, full, clientIp, status, elapsed, requestId);
     }
 
     private static void logError(String method, String path, String clientIp, int status, long elapsed, Exception e) {
@@ -180,9 +190,10 @@ public final class GraphControlServer {
     }
 
     /** 将请求日志条目写入环形缓冲。 */
-    private void storeLogEntry(String method, String path, String clientIp, int status, long elapsed) {
+    private void storeLogEntry(String method, String path, String clientIp, int status, long elapsed, String requestId) {
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("timestamp", System.currentTimeMillis());
+        entry.put("requestId", requestId);
         entry.put("method", method);
         entry.put("path", path);
         entry.put("clientIp", clientIp);
@@ -233,6 +244,13 @@ public final class GraphControlServer {
 
     public void start() {
         server.start();
+        // 优雅关闭：收到 SIGTERM/SIGINT 时等待现有请求完成
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("[INFO] 收到关闭信号,开始优雅关闭 (等待 5 秒)...");
+            server.stop(5);
+            System.out.println("[INFO] HTTP 控制面已关闭");
+        }));
+        System.out.println("[INFO] HTTP 控制面启动于端口 " + server.getAddress().getPort());
     }
 
     public void stop() {
@@ -315,6 +333,7 @@ public final class GraphControlServer {
         String methodFilter = params.get("method");
         String statusFilter = params.get("status");
         String pathFilter = params.get("path");
+        String requestIdFilter = params.get("requestId");
 
         // 收集有效条目（最新的在前）
         int written = logIndex.get();
@@ -325,6 +344,7 @@ public final class GraphControlServer {
             // 过滤
             if (methodFilter != null && !methodFilter.equalsIgnoreCase((String) entry.get("method"))) continue;
             if (pathFilter != null && !((String) entry.get("path")).contains(pathFilter)) continue;
+            if (requestIdFilter != null && !requestIdFilter.equals(entry.get("requestId"))) continue;
             if (statusFilter != null) {
                 int s = (int) entry.get("status");
                 if ("4xx".equals(statusFilter) && (s < 400 || s >= 500)) continue;
@@ -773,11 +793,29 @@ public final class GraphControlServer {
     }
 
     private static void writeJson(HttpExchange exchange, int status, Object body) throws IOException {
-        byte[] bytes = toJson(body).getBytes(StandardCharsets.UTF_8);
+        byte[] raw = toJson(body).getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
-        exchange.sendResponseHeaders(status, bytes.length);
-        try (var output = exchange.getResponseBody()) {
-            output.write(bytes);
+
+        // 检查客户端是否支持 GZIP
+        String acceptEncoding = exchange.getRequestHeaders().getFirst("Accept-Encoding");
+        boolean useGzip = acceptEncoding != null && acceptEncoding.contains("gzip") && raw.length > 256;
+
+        if (useGzip) {
+            exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(raw.length / 2);
+            try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
+                gzip.write(raw);
+            }
+            byte[] compressed = baos.toByteArray();
+            exchange.sendResponseHeaders(status, compressed.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(compressed);
+            }
+        } else {
+            exchange.sendResponseHeaders(status, raw.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(raw);
+            }
         }
     }
 
