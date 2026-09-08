@@ -343,3 +343,16 @@ td.mono, code.mono { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; 
   color: #94a3b8;
   margin-top: 4px;
 }
+
+/* Cypher 语法高亮 */
+.hl-keyword { color: #c084fc; font-weight: 600; }
+.hl-string { color: #86efac; }
+.hl-number { color: #fbbf24; }
+.hl-comment { color: #64748b; font-style: italic; }
+.hl-builtin { color: #67e8f9; }
+.hl-function { color: #93c5fd; }
+.hl-op { color: #f87171; }
+
+.cypher-editor-wrap {
+  margin-top: 12px;
+}

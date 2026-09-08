@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api } from '../api.js';
+import CypherEditor from '../components/CypherEditor.jsx';
 
 const PRESETS = {
   '节点与边': `CREATE (a:Person {name: 'Alice', age: 30}),
@@ -178,16 +179,13 @@ export default function QueryPage({ server }) {
               </select>}
         </div>
 
-        <textarea
+        <CypherEditor
           value={cypher}
-          onChange={e => setCypher(e.target.value)}
-          spellCheck={false}
-          style={{ width: '100%', marginTop: 12 }}
-          rows={10}
-          placeholder="MATCH (n:Person) RETURN n LIMIT 10"
+          onChange={setCypher}
           onKeyDown={e => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
           }}
+          rows={10}
         />
         <div className="help">支持 ; 分隔多语句; Ctrl+Enter 快捷执行;写查询在 main 上产生新 commit。</div>
       </div>
