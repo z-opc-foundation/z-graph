@@ -7,7 +7,7 @@
 - **Meta 层**：`GraphMetaService`、`GraphCommit`、分支 head、祖先关系、三方 merge 冲突检测、`StaleHeadException` 并发控制共同组成轻量元数据服务。
 - **协议层**：`z-graph-protocol` 和 `z-graph-bolt-server` 提供 Bolt 4.4 chunk/PackStream 子集及 Netty 服务端；`GraphControlServer` 提供独立的 Meta/Query HTTP 控制面。
 
-## HTTP API 端点（12 个）
+## HTTP API 端点（14 个）
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
@@ -20,11 +20,12 @@
 | `/meta/schema` | GET | Schema 信息（TAG/EDGE/INDEX） |
 | `/meta/stats` | GET | 统计摘要（节点数、边数、标签分布） |
 | `/meta/metrics` | GET | 运行指标（请求数、错误率、JVM 内存、uptime） |
+| `/meta/logs` | GET | 请求日志（环形缓冲 500 条，支持 method/status/path/requestId 过滤） |
 | `/meta/export` | GET | 导出图数据 JSON |
 | `/meta/import` | POST | 导入节点数据 |
 | `/options` | OPTIONS | CORS 预检 |
 
-所有查询响应包含 `X-Response-Time` 头。
+所有查询响应包含 `X-Response-Time` 和 `X-Request-ID` 头。支持 GZIP 响应压缩（>256 字节自动压缩）。
 
 ## 安全特性
 
@@ -32,7 +33,10 @@
 - **速率限制**：`Z_GRAPH_RATE_LIMIT` 设置每 IP 每分钟最大请求数（滑动窗口），超限返回 429 + `Retry-After`
 - **安全响应头**：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`X-XSS-Protection`、`Referrer-Policy`
 - **CORS**：默认 `*`，可通过 `Z_GRAPH_CORS_ALLOWED_ORIGINS` 收紧
-- **请求日志**：nginx 风格 access log（IP、方法、路径、状态码、耗时）
+- **请求追踪**：每个请求自动生成 `X-Request-ID`，支持客户端传入复用
+- **GZIP 压缩**：服务端自动检测 `Accept-Encoding: gzip`，>256 字节时压缩响应
+- **优雅关闭**：收到 SIGTERM/SIGINT 时等待 5 秒完成现有请求
+- **请求日志**：nginx 风格 access log + 环形缓冲区（最近 500 条）
 
 ## 已对齐 NebulaGraph 的能力
 
@@ -85,23 +89,31 @@ mvn -pl z-graph-bolt-server exec:java \
   -Dexec.jvmArgs="-Dz.graph.dataDir=/tmp/z-graph-data"
 ```
 
-## 前端控制台（7 个页面）
+## 前端控制台（8 个页面）
 
 `z-graph-console/` 是 React + Vite 单页应用：
 
 | 页面 | 功能 |
 |------|------|
-| 总览 | KPI 卡片 + Schema 概览 + 快捷操作卡片 |
+| 总览 | KPI 卡片 + 实时指标 SVG 图表（请求速率 + JVM 内存） + Schema 概览 + 快捷操作 |
 | 图视图 | SVG 力导向布局可视化（节点着色、边箭头、点击交互、图例） |
 | 分支 | 分支列表与管理 |
 | 提交历史 | 完整 commit 记录 |
-| Cypher 查询 | 语法高亮编辑器 + 查询计时 + 历史（localStorage）+ Ctrl+Enter 快捷键 |
+| Cypher 查询 | 语法高亮 + 自动补全（50+ 建议） + 查询计时 + 历史 + CSV/JSON 导出 |
 | Schema | DDL 快捷操作（12 个按钮）+ Schema 浏览 |
-| API 文档 | 12 个端点交互式文档（参数表 + 交互测试） |
+| 请求日志 | 实时自动刷新 + 过滤器（method/status/path/requestId）+ 详情面板 |
+| API 文档 | 14 个端点交互式文档（参数表 + 交互测试） |
 
 开发：`cd z-graph-console && npm install && npm run dev`
 
 打包：`npm run build`（产物 `dist/`，由 `frontend.Dockerfile` 拷贝进 Nginx）
+
+### Cypher 编辑器特性
+
+- **语法高亮**：关键字（紫色）、字符串（绿色）、数字（黄色）、注释（灰色）、内置过程（青色）、操作符（红色）
+- **自动补全**：输入 1+ 字符时弹出建议（Tab/Enter 选择，↑↓ 导航，Esc 关闭）
+- **建议分类**：keyword / builtin / function / pattern / ddl，带中文描述
+- **快捷键**：Ctrl+Enter 执行查询
 
 ## 部署 — 三种镜像
 
@@ -127,9 +139,16 @@ docker compose -f deploy/docker/docker-compose.yml --profile cluster up -d
 ### Docker 生产配置
 
 - **资源限制**：server 2 CPU / 1GB 内存，frontend 0.5 CPU / 128MB
-- **JVM 调优**：`JAVA_OPTS` 环境变量支持（`-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0`）
+- **JVM 调优**：`JAVA_OPTS` 环境变量支持（`-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC`）
 - **日志轮转**：json-file 驱动，10MB × 3 文件
 - **健康检查**：10s 间隔 wget `/health`
+- **优雅关闭**：SIGTERM 等待 5 秒完成现有请求
+
+### Nginx 优化
+
+- **GZIP 压缩**：JS/CSS/JSON/SVG 压缩比 60-73%
+- **静态资源缓存**：`/assets/*` 1 年 `immutable` 缓存
+- **安全头**：X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, Referrer-Policy
 
 ### Kubernetes
 
@@ -153,6 +172,11 @@ kubectl port-forward -n z-graph svc/z-graph-frontend 8080:80
 ## Git 提交历史
 
 ```
+bceed58 feat: Nginx GZIP + 静态缓存 + Dashboard 实时图表 + Cypher 自动补全
+95d86b7 feat: X-Request-ID 追踪 + GZIP 响应压缩 + 优雅关闭
+e604058 feat: 请求日志环形缓冲 + 日志查看器 + 查询结果导出
+1abf198 feat: 侧边栏实时服务器指标（运行时间、请求数、错误率、JVM 内存）
+569b924 docs: README 全面更新 — 覆盖 12 个 API + 安全 + 前端 + 部署
 28680cb feat: 交互式 API 文档页面
 8aa3aa9 feat: 查询执行计划端点 /query/explain
 bf9a85a feat: Cypher 语法高亮编辑器
