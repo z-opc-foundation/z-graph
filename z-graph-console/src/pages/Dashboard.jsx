@@ -4,6 +4,7 @@ import { api, shortHash, formatTimestamp } from '../api.js';
 export default function Dashboard({ server }) {
   const [branches, setBranches] = useState([]);
   const [commits, setCommits] = useState([]);
+  const [schema, setSchema] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -12,10 +13,15 @@ export default function Dashboard({ server }) {
     async function load() {
       try {
         setLoading(true);
-        const [b, c] = await Promise.all([api.branches(), api.commits()]);
+        const [b, c, s] = await Promise.all([
+          api.branches().catch(() => []),
+          api.commits().catch(() => []),
+          api.schema().catch(() => null)
+        ]);
         if (cancelled) return;
         setBranches(Array.isArray(b) ? b : (b && b.Name ? [b] : []));
         setCommits(Array.isArray(c) ? c : []);
+        setSchema(s);
         setError(null);
       } catch (e) {
         if (!cancelled) setError(e.message);
@@ -27,18 +33,97 @@ export default function Dashboard({ server }) {
   }, [server.head]);
 
   const recent = commits.slice(-5).reverse();
+  const tags = schema?.tags || [];
+  const edges = schema?.edges || [];
+  const indexes = schema?.indexes || [];
 
   return (
     <>
       <div className="kpi-grid">
-        <KPI label="节点数" value={server.nodeCount} delta={`head ${shortHash(server.head)}`} />
-        <KPI label="边数" value={server.edgeCount} />
-        <KPI label="分支数" value={branches.length} delta={branches.join(', ') || '-'} />
-        <KPI label="总提交" value={commits.length} />
+        <KPI label="节点数" value={server.nodeCount} icon="N" color="#60a5fa" />
+        <KPI label="边数" value={server.edgeCount} icon="E" color="#34d399" />
+        <KPI label="分支数" value={branches.length} icon="B" color="#a78bfa" />
+        <KPI label="总提交" value={commits.length} icon="C" color="#fbbf24" />
       </div>
 
+      <div className="row-2">
+        {/* 左: Schema 概览 */}
+        <div className="card">
+          <h2>Schema 概览</h2>
+          {loading && <div className="muted">加载中…</div>}
+          {!loading && tags.length === 0 && edges.length === 0 && (
+            <div className="empty">暂无 Schema,请先 CREATE TAG / CREATE EDGE</div>
+          )}
+          {tags.length > 0 && (
+            <>
+              <h3 style={{ marginTop: 12 }}>TAG ({tags.length})</h3>
+              <div className="chip-list">
+                {tags.map((t, i) => (
+                  <span key={i} className="chip tag-chip">{t.Name || t.name || JSON.stringify(t)}</span>
+                ))}
+              </div>
+            </>
+          )}
+          {edges.length > 0 && (
+            <>
+              <h3 style={{ marginTop: 12 }}>EDGE ({edges.length})</h3>
+              <div className="chip-list">
+                {edges.map((e, i) => (
+                  <span key={i} className="chip edge-chip">{e.Name || e.name || JSON.stringify(e)}</span>
+                ))}
+              </div>
+            </>
+          )}
+          {indexes.length > 0 && (
+            <>
+              <h3 style={{ marginTop: 12 }}>INDEX ({indexes.length})</h3>
+              <table>
+                <thead><tr><th>名称</th><th>类型</th><th>标签</th></tr></thead>
+                <tbody>
+                  {indexes.map((idx, i) => (
+                    <tr key={i}>
+                      <td className="mono">{idx.Name || idx.name || '-'}</td>
+                      <td>{idx.Type || idx.type || '-'}</td>
+                      <td>{idx.Label || idx.label || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+
+        {/* 右: 快捷操作 */}
+        <div className="card">
+          <h2>快捷操作</h2>
+          <div className="action-grid">
+            <ActionCard
+              title="创建节点"
+              desc="CREATE (n:Person {name:'Tom'})"
+              color="#60a5fa"
+            />
+            <ActionCard
+              title="查询数据"
+              desc="MATCH (n) RETURN n LIMIT 10"
+              color="#34d399"
+            />
+            <ActionCard
+              title="Schema 管理"
+              desc="CREATE TAG / CREATE EDGE"
+              color="#a78bfa"
+            />
+            <ActionCard
+              title="版本管理"
+              desc="CALL db.branches() / commits"
+              color="#fbbf24"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* 最近提交 */}
       <div className="card">
-        <h2>最近 5 次提交</h2>
+        <h2>最近提交</h2>
         {loading && <div className="muted">加载中…</div>}
         {error && <div className="error">{error}</div>}
         {!loading && recent.length === 0 && <div className="empty">还没有任何 commit</div>}
@@ -46,7 +131,7 @@ export default function Dashboard({ server }) {
           <table>
             <thead>
               <tr>
-                <th>Commit</th><th>分支</th><th>作者</th><th>说明</th><th>时间</th>
+                <th>Commit</th><th>分支</th><th>作者</th><th>说明</th><th>节点</th><th>边</th><th>时间</th>
               </tr>
             </thead>
             <tbody>
@@ -56,6 +141,8 @@ export default function Dashboard({ server }) {
                   <td><span className="tag">{c.branch}</span></td>
                   <td>{c.author}</td>
                   <td>{c.message}</td>
+                  <td>{c.nodeCount}</td>
+                  <td>{c.edgeCount}</td>
                   <td>{formatTimestamp(c.timestamp)}</td>
                 </tr>
               ))}
@@ -63,35 +150,27 @@ export default function Dashboard({ server }) {
           </table>
         )}
       </div>
-
-      <div className="card">
-        <h2>快速查询</h2>
-        <div className="muted">试试这些示例,直接在 Cypher 查询页执行:</div>
-        <pre className="results" style={{ marginTop: 8 }}>{`-- 查看所有 tag / edge type
-SHOW TAGS;
-SHOW EDGES;
-SHOW STATS;
-
--- 取出所有 Person
-MATCH (n:Person) RETURN n.name AS name, n.age AS age LIMIT 50;
-
--- 反向关系
-MATCH (a)<-[:KNOWS]-(b) RETURN a.name AS friendOf, b.name AS who LIMIT 50;
-
--- 变长路径
-MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN a.name AS from, b.name AS to;
-`}</pre>
-      </div>
     </>
   );
 }
 
-function KPI({ label, value, delta }) {
+function KPI({ label, value, icon, color }) {
   return (
     <div className="kpi">
-      <div className="label">{label}</div>
-      <div className="value">{value}</div>
-      {delta ? <div className="delta">{delta}</div> : null}
+      <div className="kpi-icon" style={{ background: color + '20', color }}>{icon}</div>
+      <div className="kpi-content">
+        <div className="kpi-value">{value ?? '-'}</div>
+        <div className="kpi-label">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function ActionCard({ title, desc, color }) {
+  return (
+    <div className="action-card" style={{ borderTopColor: color }}>
+      <div className="action-title">{title}</div>
+      <div className="action-desc mono">{desc}</div>
     </div>
   );
 }

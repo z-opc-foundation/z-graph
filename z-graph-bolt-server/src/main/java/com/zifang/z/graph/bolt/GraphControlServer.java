@@ -9,7 +9,10 @@ import com.zifang.z.graph.core.GraphQueryService;
 import com.zifang.z.graph.core.GraphVersionStore;
 import com.zifang.z.graph.core.GraphWriteTransaction;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -45,6 +48,8 @@ public final class GraphControlServer {
         server.createContext("/health", this::handleHealth);
         server.createContext("/meta/branches", this::handleBranches);
         server.createContext("/meta/commits", this::handleCommits);
+        server.createContext("/meta/schema", this::handleSchema);
+        server.createContext("/meta/stats", this::handleStats);
         server.createContext("/query", this::handleQuery);
         // OPTIONS 预检 + CORS 头:允许浏览器前端直接访问此控制面
         server.createContext("/options", exchange -> writeNoContent(exchange));
@@ -134,16 +139,82 @@ public final class GraphControlServer {
         writeJson(exchange, 200, commits);
     }
 
+    /**
+     * GET /meta/schema — 返回当前分支的 schema 信息（TAG / EDGE 定义）。
+     */
+    private void handleSchema(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        Map<String, String> params = queryParameters(exchange.getRequestURI());
+        String branch = params.getOrDefault("branch", "main");
+        try {
+            var graphCheckout = repository.checkoutBranch(branch);
+            var store = graphCheckout.getStore();
+            // 用 SHOW TAGS / SHOW EDGES 查询 schema
+            List<Map<String, Object>> tags = new CypherEngine(store, repository)
+                    .execute("SHOW TAGS", Map.of());
+            List<Map<String, Object>> edges = new CypherEngine(store, repository)
+                    .execute("SHOW EDGES", Map.of());
+            List<Map<String, Object>> indexes = new CypherEngine(store, repository)
+                    .execute("SHOW INDEXES", Map.of());
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("branch", branch);
+            result.put("tags", tags);
+            result.put("edges", edges);
+            result.put("indexes", indexes);
+            writeJson(exchange, 200, result);
+        } catch (Exception e) {
+            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /meta/stats — 返回当前分支的统计摘要（节点数、边数、标签分布等）。
+     */
+    private void handleStats(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        Map<String, String> params = queryParameters(exchange.getRequestURI());
+        String branch = params.getOrDefault("branch", "main");
+        try {
+            var graphCheckout = repository.checkoutBranch(branch);
+            var store = graphCheckout.getStore();
+            List<Map<String, Object>> stats = new CypherEngine(store, repository)
+                    .execute("CALL db.stats()", Map.of());
+            GraphCommit head = metaService.head(branch);
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("branch", branch);
+            result.put("head", head.getId());
+            result.put("nodeCount", head.getNodeCount());
+            result.put("edgeCount", head.getEdgeCount());
+            result.put("stats", stats);
+            writeJson(exchange, 200, result);
+        } catch (Exception e) {
+            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+        }
+    }
+
     private void handleQuery(HttpExchange exchange) throws IOException {
         applyCorsHeaders(exchange);
-        Map<String, String> parameters = queryParameters(exchange.getRequestURI());
-        String cypher = parameters.get("cypher");
+        // 允许 GET (?cypher=...) 和 POST (JSON body: {"cypher":"...","branch":"...","commit":"..."})
+        String cypher;
+        String branch;
+        String commit;
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            String body = readBody(exchange);
+            Map<String, String> json = parseJsonStringMap(body);
+            cypher = json.get("cypher");
+            branch = json.getOrDefault("branch", "main");
+            commit = json.get("commit");
+        } else {
+            Map<String, String> parameters = queryParameters(exchange.getRequestURI());
+            cypher = parameters.get("cypher");
+            branch = parameters.getOrDefault("branch", "main");
+            commit = parameters.get("commit");
+        }
+
         if (cypher == null || cypher.isBlank()) {
-            writeJson(exchange, 400, Map.of("error", "Missing query parameter: cypher"));
+            writeJson(exchange, 400, Map.of("error", "Missing 'cypher' in request"));
             return;
         }
-        String branch = parameters.getOrDefault("branch", "main");
-        String commit = parameters.get("commit");
 
         String upper = cypher.trim().toUpperCase();
         boolean mutating = upper.startsWith("CREATE")
@@ -223,5 +294,71 @@ public final class GraphControlServer {
                 .replace("\"", "\\\"")
                 .replace("\n", "\\n")
                 .replace("\r", "\\r");
+    }
+
+    /** 读取 HTTP 请求体全部内容。 */
+    private static String readBody(HttpExchange exchange) throws IOException {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8))) {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line);
+            }
+            return sb.toString();
+        }
+    }
+
+    /** 从简单 JSON 字符串中提取 key-value（支持嵌套引号内的逗号）。 */
+    private static Map<String, String> parseJsonStringMap(String json) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (json == null || json.isBlank()) return result;
+        // 状态机解析:跳过引号内的逗号
+        String trimmed = json.strip();
+        if (trimmed.startsWith("{")) trimmed = trimmed.substring(1);
+        if (trimmed.endsWith("}")) trimmed = trimmed.substring(0, trimmed.length() - 1);
+
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        char quoteChar = 0;
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (inQuotes) {
+                if (c == '\\') {
+                    current.append(c);
+                    if (i + 1 < trimmed.length()) {
+                        current.append(trimmed.charAt(++i));
+                    }
+                } else if (c == quoteChar) {
+                    inQuotes = false;
+                    current.append(c);
+                } else {
+                    current.append(c);
+                }
+            } else {
+                if (c == '"' || c == '\'') {
+                    inQuotes = true;
+                    quoteChar = c;
+                    current.append(c);
+                } else if (c == ',') {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                } else {
+                    current.append(c);
+                }
+            }
+        }
+        if (current.length() > 0) tokens.add(current.toString());
+
+        for (String token : tokens) {
+            String[] kv = token.split(":", 2);
+            if (kv.length == 2) {
+                String key = kv[0].trim().replaceAll("^\"|\"$", "");
+                String value = kv[1].trim().replaceAll("^\"|\"$", "");
+                result.put(key, value);
+            }
+        }
+        return result;
     }
 }

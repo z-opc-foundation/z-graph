@@ -47,16 +47,17 @@ LABEL org.opencontainers.image.title="z-graph-all-in-one" \
       org.opencontainers.image.description="z-graph 单实例:后端 + 前端一起部署" \
       org.opencontainers.image.source="https://github.com/z-opc-foundation/z-graph"
 
-# 安装 nginx 与 envsubst 用于端口反向代理
+# 安装 nginx 与 tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        nginx wget gettext-base tini && \
+        nginx wget tini && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --system zgraph && useradd --system --gid zgraph --uid 10001 zgraph
 
 # 数据持久化目录
 RUN mkdir -p /var/lib/z-graph /var/log/z-graph /var/lib/nginx /var/log/nginx /run/nginx && \
     chown -R zgraph:zgraph /var/lib/z-graph /var/log/z-graph && \
-    chown -R www-data:www-data /var/lib/nginx /var/log/nginx /run/nginx
+    chown -R www-data:www-data /var/lib/nginx /var/log/nginx /run/nginx && \
+    rm -f /usr/share/nginx/html/index.html 2>/dev/null; true
 
 WORKDIR /opt/z-graph
 
@@ -67,18 +68,22 @@ COPY --from=server-build /workspace/z-graph-bolt-server/target/lib/             
 # 前端静态资源
 COPY --from=frontend-build /workspace/z-graph-console/dist /opt/z-graph/console
 
-# Nginx 配置 + 入口脚本
-COPY deploy/nginx/frontend.conf /etc/nginx/templates/default.conf.template
+# Nginx 主配置(静态,由 root 在构建阶段写入)
+RUN printf 'user www-data;\nworker_processes auto;\npid /run/nginx.pid;\nevents { worker_connections 1024; }\nhttp {\n    include /etc/nginx/mime.types;\n    default_type application/octet-stream;\n    sendfile on;\n    keepalive_timeout 65;\n    access_log /dev/stdout;\n    error_log /dev/stderr;\n    include /etc/nginx/conf.d/*.conf;\n}\n' > /etc/nginx/nginx.conf
+
+# Nginx 站点配置(静态)
+RUN printf 'upstream z_graph_api {\n    server 127.0.0.1:8090;\n    keepalive 16;\n}\nserver {\n    listen 3000;\n    server_name _;\n    root /usr/share/nginx/html;\n    index index.html;\n    location / { try_files $uri $uri/ /index.html; add_header Cache-Control no-cache; }\n    location /api/ { proxy_pass http://z_graph_api/; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_http_version 1.1; proxy_set_header Connection ""; proxy_read_timeout 60s; }\n    location = /healthz { access_log off; return 200 "ok\\n"; }\n}\n' > /etc/nginx/conf.d/default.conf
+
+# 入口脚本
 COPY deploy/docker/all-in-one-entrypoint.sh /usr/local/bin/all-in-one-entrypoint.sh
 RUN chmod +x /usr/local/bin/all-in-one-entrypoint.sh
 
-USER zgraph
-EXPOSE 80 7687 8090
+# all-in-one 单机部署以 root 运行(nginx 需要 master 进程为 root)
+EXPOSE 3000 7687 8090
 
 ENV Z_GRAPH_BOLT_PORT=7687 \
     Z_GRAPH_HTTP_PORT=8090 \
     Z_GRAPH_DATA_DIR=/var/lib/z-graph \
-    Z_GRAPH_API_UPSTREAM=127.0.0.1:8090 \
     Z_GRAPH_CORS_ALLOWED_ORIGINS=*
 
 # 顶层入口:tini 转发信号给 nginx + z-graph-server

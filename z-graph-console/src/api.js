@@ -4,7 +4,7 @@
  * 生产部署时可改成绝对地址,例如 http://z-graph-server:8090。
  */
 
-const DEFAULT_BASE = (typeof window !== 'undefined' && window.__Z_GRAPH_API__)
+let _baseUrl = (typeof window !== 'undefined' && window.__Z_GRAPH_API__)
     || (import.meta.env && import.meta.env.VITE_API_BASE)
     || '/api';
 
@@ -14,7 +14,7 @@ function joinUrl(base, path) {
 }
 
 async function request(path, options = {}) {
-  const url = joinUrl(DEFAULT_BASE, path);
+  const url = joinUrl(_baseUrl, path);
   const response = await fetch(url, {
     headers: { 'Accept': 'application/json', ...(options.headers || {}) },
     ...options
@@ -30,15 +30,36 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  baseUrl: () => DEFAULT_BASE,
+  baseUrl: () => _baseUrl,
+  setBaseUrl: (value) => { _baseUrl = value; if (typeof window !== 'undefined') window.__Z_GRAPH_API__ = value; },
+
+  // 健康检查
   health: () => request('/health'),
+
+  // 元数据
   branches: () => request('/meta/branches'),
   commits: () => request('/meta/commits'),
-  query: (cypher, branch = 'main', commit = null) => {
-    const params = new URLSearchParams();
-    params.set('cypher', cypher);
-    if (commit) params.set('commit', commit); else params.set('branch', branch);
-    return request('/query?' + params.toString());
+  schema: (branch = 'main') => request('/meta/schema?branch=' + encodeURIComponent(branch)),
+  stats: (branch = 'main') => request('/meta/stats?branch=' + encodeURIComponent(branch)),
+
+  // 查询 — 优先 POST (无 URL 长度限制),回退到 GET
+  query: async (cypher, branch = 'main', commit = null) => {
+    try {
+      return await request('/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cypher, branch, commit })
+      });
+    } catch (e) {
+      // 如果服务端不支持 POST,回退 GET
+      if (e.message && e.message.includes('405')) {
+        const params = new URLSearchParams();
+        params.set('cypher', cypher);
+        if (commit) params.set('commit', commit); else params.set('branch', branch);
+        return request('/query?' + params.toString());
+      }
+      throw e;
+    }
   }
 };
 

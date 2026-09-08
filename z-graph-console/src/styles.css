@@ -139,10 +139,91 @@ input:focus, select:focus, textarea:focus {
   border: 1px solid #1e293b;
   border-radius: 8px;
   padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
-.kpi .label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
-.kpi .value { font-size: 24px; font-weight: 600; margin-top: 6px; color: #f8fafc; }
-.kpi .delta { font-size: 12px; margin-top: 4px; color: #94a3b8; }
+.kpi-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.kpi-content { display: flex; flex-direction: column; }
+.kpi-value { font-size: 24px; font-weight: 600; color: #f8fafc; }
+.kpi-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* 两列布局 */
+.row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 960px) {
+  .row-2 { grid-template-columns: 1fr; }
+}
+
+/* 快捷操作卡片 */
+.action-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+.action-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-top: 3px solid;
+  border-radius: 6px;
+  padding: 12px;
+  cursor: default;
+}
+.action-title { font-size: 14px; font-weight: 600; color: #f8fafc; }
+.action-desc { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+
+/* 芯片列表 */
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.chip:hover { background: #334155; }
+.chip.tag-chip { border-color: #3b82f6; color: #93c5fd; }
+.chip.edge-chip { border-color: #34d399; color: #6ee7b7; }
+.chip.ddl-chip { border-color: #a78bfa; color: #c4b5fd; }
+.chip.ddl-chip:hover { background: #3b2f6b; }
+
+/* 结果区预格式化 */
+pre.error {
+  color: #fca5a5;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+pre.results {
+  color: #93c5fd;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
