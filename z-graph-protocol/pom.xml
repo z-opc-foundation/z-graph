@@ -6,15 +6,47 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.zifang</groupId>
-        <artifactId>z-graph-parent</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <groupId>io.github.yuku123</groupId>
+            <artifactId>z-graph</artifactId>
+        <version>1.0.1</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
+    <groupId>io.github.yuku123</groupId>
+    <version>1.0.1</version>
 
     <artifactId>z-graph-protocol</artifactId>
     <name>z-graph-protocol</name>
     <description>z-graph 标准协议兼容层(Bolt 4.4 二进制帧 / OpenCypher 结构体)</description>
+
+    <url>https://github.com/yuku123/z-graph</url>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>yuku123</id>
+            <name>yuku123</name>
+            <email>1340947819@qq.com</email>
+            <organization>z-team</organization>
+            <organizationUrl>https://github.com/yuku123</organizationUrl>
+            <timezone>+08:00</timezone>
+            <roles>
+                <role>owner</role>
+            </roles>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/yuku123/z-graph.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/yuku123/z-graph.git</developerConnection>
+        <url>https://github.com/yuku123/z-graph</url>
+        <tag>HEAD</tag>
+    </scm>
+
+
 
     <dependencies>
         <dependency>
@@ -24,6 +56,7 @@
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
+            <version>${log4j2.version}</version>
         </dependency>
     </dependencies>
 </project>

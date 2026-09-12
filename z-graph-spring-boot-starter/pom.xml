@@ -6,20 +6,53 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.zifang</groupId>
-        <artifactId>z-graph-parent</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <groupId>io.github.yuku123</groupId>
+            <artifactId>z-graph</artifactId>
+        <version>1.0.1</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
+    <groupId>io.github.yuku123</groupId>
+    <version>1.0.1</version>
 
     <artifactId>z-graph-spring-boot-starter</artifactId>
     <name>z-graph-spring-boot-starter</name>
     <description>z-graph Bolt 服务和版本仓库的 Spring Boot 集成入口（待接入自动配置）</description>
 
+    <url>https://github.com/yuku123/z-graph</url>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>yuku123</id>
+            <name>yuku123</name>
+            <email>1340947819@qq.com</email>
+            <organization>z-team</organization>
+            <organizationUrl>https://github.com/yuku123</organizationUrl>
+            <timezone>+08:00</timezone>
+            <roles>
+                <role>owner</role>
+            </roles>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/yuku123/z-graph.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/yuku123/z-graph.git</developerConnection>
+        <url>https://github.com/yuku123/z-graph</url>
+        <tag>HEAD</tag>
+    </scm>
+
+
+
     <dependencies>
         <dependency>
-            <groupId>com.zifang</groupId>
+            <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-bolt-server</artifactId>
+            <version>1.0.1</version>
         </dependency>
     </dependencies>
 </project>

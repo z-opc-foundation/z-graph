@@ -6,28 +6,63 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.zifang</groupId>
-        <artifactId>z-graph-parent</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <groupId>io.github.yuku123</groupId>
+            <artifactId>z-graph</artifactId>
+        <version>1.0.1</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
+    <groupId>io.github.yuku123</groupId>
+    <version>1.0.1</version>
 
     <artifactId>z-graph-bolt-server</artifactId>
     <name>z-graph-bolt-server</name>
     <description>z-graph Bolt 4.4 协议服务端(Netty)：共享版本仓库、参数查询和连接级事务</description>
 
+    <url>https://github.com/yuku123/z-graph</url>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>yuku123</id>
+            <name>yuku123</name>
+            <email>1340947819@qq.com</email>
+            <organization>z-team</organization>
+            <organizationUrl>https://github.com/yuku123</organizationUrl>
+            <timezone>+08:00</timezone>
+            <roles>
+                <role>owner</role>
+            </roles>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/yuku123/z-graph.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/yuku123/z-graph.git</developerConnection>
+        <url>https://github.com/yuku123/z-graph</url>
+        <tag>HEAD</tag>
+    </scm>
+
+
+
     <dependencies>
         <dependency>
-            <groupId>com.zifang</groupId>
+            <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-api</artifactId>
+            <version>1.0.1</version>
         </dependency>
         <dependency>
-            <groupId>com.zifang</groupId>
+            <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-protocol</artifactId>
+            <version>1.0.1</version>
         </dependency>
         <dependency>
-            <groupId>com.zifang</groupId>
+            <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-core</artifactId>
+            <version>1.0.1</version>
         </dependency>
         <dependency>
             <groupId>io.netty</groupId>
@@ -36,16 +71,19 @@
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
+            <version>${log4j2.version}</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
             <scope>runtime</scope>
         </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
