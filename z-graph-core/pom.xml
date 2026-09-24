@@ -8,11 +8,11 @@
     <parent>
         <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph</artifactId>
-        <version>1.0.1</version>
+        <version>1.0.2</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <groupId>io.github.yuku123</groupId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
 
     <artifactId>z-graph-core</artifactId>
     <name>z-graph-core</name>
@@ -52,12 +52,12 @@
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-api</artifactId>
-            <version>1.0.1</version>
+            <version>1.0.2</version>
         </dependency>
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-protocol</artifactId>
-            <version>1.0.1</version>
+            <version>1.0.2</version>
         </dependency>
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
