@@ -8,11 +8,11 @@
     <parent>
         <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph</artifactId>
-        <version>1.0.2</version>
+        <version>1.0.3</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <groupId>io.github.yuku123</groupId>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
 
     <artifactId>z-graph-protocol</artifactId>
     <name>z-graph-protocol</name>

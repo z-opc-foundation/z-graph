@@ -7,7 +7,7 @@
 
     <groupId>io.github.yuku123</groupId>
     <artifactId>z-graph</artifactId>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
     <packaging>pom</packaging>
     <name>z-graph</name>
     <description>独立图数据库工程：参考 NebulaGraph 的 Query、Storage、Meta 分层与 Bolt/OpenCypher 兼容能力    </description>

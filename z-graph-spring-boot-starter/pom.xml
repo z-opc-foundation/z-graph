@@ -8,11 +8,11 @@
     <parent>
         <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph</artifactId>
-        <version>1.0.2</version>
+        <version>1.0.3</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <groupId>io.github.yuku123</groupId>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
 
     <artifactId>z-graph-spring-boot-starter</artifactId>
     <name>z-graph-spring-boot-starter</name>
@@ -52,7 +52,7 @@
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-bolt-server</artifactId>
-            <version>1.0.2</version>
+            <version>1.0.3</version>
         </dependency>
     </dependencies>
 </project>
