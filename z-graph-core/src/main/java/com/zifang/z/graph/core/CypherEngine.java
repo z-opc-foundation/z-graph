@@ -388,6 +388,7 @@ public class CypherEngine {
         // 3. 如果有 SET，执行更新
         if (setClause != null && !setClause.trim().isEmpty()) {
             executeSet(setClause.trim(), bindings);
+            refreshBindings(bindings);
         }
 
         // 4. 如果有 DELETE，执行删除
@@ -579,16 +580,45 @@ public class CypherEngine {
 
                 Object value = resolveValue(rhs);
                 Object target = b.variables.get(varName);
+                // 必须走 store 的更新入口：物化视图交出的是只读快照，
+                // 就地改句柄会让 SET 静默丢失，甚至改脏共享的历史视图。
                 if (target instanceof Node node) {
-                    node.set(propName, value);
+                    store.updateNode(node.getId(), singlePropertyPatch(propName, value));
                 } else if (target instanceof Edge edge) {
-                    edge.set(propName, value);
+                    store.updateEdge(edge.getId(), singlePropertyPatch(propName, value));
                 }
             }
         }
     }
 
     // ==================== 模式解析 ====================
+
+    /** SET 允许写入 null，因此不能用 Map.of。 */
+    private static Map<String, Object> singlePropertyPatch(String propName, Object value) {
+        Map<String, Object> patch = new LinkedHashMap<>();
+        patch.put(propName, value);
+        return patch;
+    }
+
+    /**
+     * SET 走 store 的更新入口后会产出新的实体副本（写事务是 copy-on-write 的，
+     * 物化视图本身不可变），bindings 里握着的仍是改前的句柄。投影前按 id 重新取一次，
+     * 否则 MATCH ... SET ... RETURN 会返回更新前的值。
+     */
+    private void refreshBindings(List<MatchBinding> bindings) {
+        for (MatchBinding binding : bindings) {
+            for (Map.Entry<String, Object> entry : binding.variables.entrySet()) {
+                Object value = entry.getValue();
+                if (value instanceof Node node) {
+                    Node fresh = store.getNode(node.getId());
+                    if (fresh != null) entry.setValue(fresh);
+                } else if (value instanceof Edge edge) {
+                    Edge fresh = store.getEdge(edge.getId());
+                    if (fresh != null) entry.setValue(fresh);
+                }
+            }
+        }
+    }
 
     private List<MatchBinding> resolvePattern(String pattern) {
         pattern = pattern.trim();

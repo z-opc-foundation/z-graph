@@ -13,19 +13,23 @@ import java.util.Set;
 
 /**
  * 一个分支上的隔离写工作区。提交前的变更只存在于当前事务，不会污染已有 commit。
+ *
+ * <p>工作区是 {@link VersionOverlayStore}：读穿过上一个 commit 的不可物化视图，
+ * 写只登记本事务触碰过的实体。因此开事务不再复制整图，提交时登记出来的增量
+ * 就是这个 commit 的全部数据。</p>
  */
 public final class GraphWriteTransaction implements GraphStore {
 
     private final GraphVersionStore repository;
     private final String branch;
     private final String baseCommitId;
-    private final InMemoryGraphStore workingStore;
+    private final VersionOverlayStore workingStore;
     private boolean closed;
 
     GraphWriteTransaction(GraphVersionStore repository,
                           String branch,
                           String baseCommitId,
-                          InMemoryGraphStore workingStore) {
+                          VersionOverlayStore workingStore) {
         this.repository = repository;
         this.branch = branch;
         this.baseCommitId = baseCommitId;
@@ -44,9 +48,17 @@ public final class GraphWriteTransaction implements GraphStore {
         return closed;
     }
 
+    /** 本事务到目前为止登记的变更量，用于观测和测试断言。 */
+    public GraphDelta pendingDelta() {
+        ensureOpen();
+        return workingStore.pendingDelta();
+    }
+
     public GraphCommit commit(String author, String message) {
         ensureOpen();
-        GraphCommit commit = repository.commit(branch, baseCommitId, workingStore, author, message);
+        GraphDelta delta = workingStore.pendingDelta();
+        GraphCommit commit = repository.commit(branch, baseCommitId, delta.freeze(),
+                workingStore.getNodeCount(), workingStore.getEdgeCount(), author, message, workingStore);
         closed = true;
         return commit;
     }
@@ -65,7 +77,7 @@ public final class GraphWriteTransaction implements GraphStore {
     @Override
     public Node addNode(String label, Map<String, Object> properties) {
         ensureOpen();
-        return workingStore.addNode(repository.allocateNodeId(), label, properties);
+        return workingStore.addNode(label, properties);
     }
 
     @Override
@@ -108,7 +120,7 @@ public final class GraphWriteTransaction implements GraphStore {
     @Override
     public Edge addEdge(String type, long startNodeId, long endNodeId, Map<String, Object> properties) {
         ensureOpen();
-        return workingStore.addEdge(repository.allocateEdgeId(), type, startNodeId, endNodeId, properties);
+        return workingStore.addEdge(type, startNodeId, endNodeId, properties);
     }
 
     @Override
@@ -178,6 +190,30 @@ public final class GraphWriteTransaction implements GraphStore {
         return workingStore.findNodesByProperty(label, propertyKey, propertyValue);
     }
 
+    @Override
+    public List<Node> getAllNodes() {
+        ensureOpen();
+        return workingStore.getAllNodes();
+    }
+
+    @Override
+    public List<Edge> getAllEdges() {
+        ensureOpen();
+        return workingStore.getAllEdges();
+    }
+
+    @Override
+    public List<Long> getAllNodeIds() {
+        ensureOpen();
+        return workingStore.getAllNodeIds();
+    }
+
+    @Override
+    public List<Long> getAllEdgeIds() {
+        ensureOpen();
+        return workingStore.getAllEdgeIds();
+    }
+
     public boolean createPropertyIndex(String label, String propertyKey) {
         ensureOpen();
         return workingStore.createPropertyIndex(label, propertyKey);
@@ -186,6 +222,16 @@ public final class GraphWriteTransaction implements GraphStore {
     public boolean dropPropertyIndex(String label, String propertyKey) {
         ensureOpen();
         return workingStore.dropPropertyIndex(label, propertyKey);
+    }
+
+    public boolean hasPropertyIndex(String label, String propertyKey) {
+        ensureOpen();
+        return workingStore.hasPropertyIndex(label, propertyKey);
+    }
+
+    public List<List<String>> getPropertyIndexes() {
+        ensureOpen();
+        return workingStore.getPropertyIndexes();
     }
 
     @Override
@@ -234,18 +280,6 @@ public final class GraphWriteTransaction implements GraphStore {
     public List<String> listEdgeTypes() {
         ensureOpen();
         return workingStore.listEdgeTypes();
-    }
-
-    @Override
-    public List<Node> getAllNodes() {
-        ensureOpen();
-        return workingStore.getAllNodes();
-    }
-
-    @Override
-    public List<Edge> getAllEdges() {
-        ensureOpen();
-        return workingStore.getAllEdges();
     }
 
     private void ensureOpen() {

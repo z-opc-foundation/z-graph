@@ -18,8 +18,11 @@ import java.util.stream.Collectors;
  * - labelIndex: ConcurrentHashMap<label, Set<nodeId>>（标签倒排索引）
  * - typeIndex: ConcurrentHashMap<edgeType, Set<edgeId>>（边类型索引）
  * <p>
- * 所有操作线程安全（ConcurrentHashMap + AtomicLong）。
- * POC 阶段为纯内存，后续 T2 加 LSM-tree/WAL 持久化。
+ * 所有操作线程安全（ConcurrentHashMap + AtomicLong）。属性倒排索引按单次变更增量维护，
+ * 不再每次 addNode/updateNode 全量重建，批量装载因此是 O(N) 而不是 O(N²)。
+ * <p>
+ * 本类同时充当 {@link GraphVersionStore} 物化出来的 commit 视图：物化视图只允许通过
+ * {@link #applyDelta} 整体演进，禁止就地改写，否则已经发出去的 checkout 会被追溯修改。
  */
 public class InMemoryGraphStore implements GraphStore {
 
@@ -62,20 +65,7 @@ public class InMemoryGraphStore implements GraphStore {
     public Node addNode(long id, Collection<String> labels, Map<String, Object> properties) {
         Collection<String> safeLabels = labels != null ? labels : List.of();
         validateTagSchemas(safeLabels, properties);
-        Node node = new Node(id, safeLabels, deepCopyMap(properties));
-        Node previous = nodes.put(id, node);
-        if (previous != null) {
-            for (String oldLabel : previous.getLabels()) {
-                labelIndex.computeIfPresent(oldLabel, (k, v) -> { v.remove(id); return v; });
-            }
-        }
-        nextNodeId.accumulateAndGet(id + 1, Math::max);
-        // 更新标签索引
-        for (String l : node.getLabels()) {
-            labelIndex.computeIfAbsent(l, k -> ConcurrentHashMap.newKeySet()).add(id);
-        }
-        rebuildPropertyIndexes();
-        return node;
+        return installNode(new Node(id, safeLabels, deepCopyMap(properties)));
     }
 
     @Override
@@ -87,8 +77,14 @@ public class InMemoryGraphStore implements GraphStore {
     public void updateNode(long id, Map<String, Object> properties) {
         Node node = nodes.get(id);
         if (node != null && properties != null) {
+            boolean indexed = !propertyIndexDefinitions.isEmpty();
+            if (indexed) {
+                removeFromIndexes(node);
+            }
             node.getProperties().putAll(properties);
-            rebuildPropertyIndexes();
+            if (indexed) {
+                addToIndexes(node);
+            }
         }
     }
 
@@ -97,32 +93,21 @@ public class InMemoryGraphStore implements GraphStore {
         Node removed = nodes.remove(id);
         if (removed == null) { return false; }
 
+        forgetNodeFromIndexesAndLabels(removed);
+
         // 移除所有关联边
         List<Long> outList = outEdges.remove(id);
         List<Long> inList = inEdges.remove(id);
         if (outList != null) {
             for (long eid : outList) {
-                Edge e = edges.remove(eid);
-                if (e != null) {
-                    inEdges.computeIfPresent(e.getEndNodeId(), (k, v) -> { v.remove(eid); return v; });
-                    typeIndex.computeIfPresent(e.getType(), (k, v) -> { v.remove(eid); return v; });
-                }
+                forgetEdgeOnly(eid);
             }
         }
         if (inList != null) {
             for (long eid : inList) {
-                Edge e = edges.remove(eid);
-                if (e != null) {
-                    outEdges.computeIfPresent(e.getStartNodeId(), (k, v) -> { v.remove(eid); return v; });
-                    typeIndex.computeIfPresent(e.getType(), (k, v) -> { v.remove(eid); return v; });
-                }
+                forgetEdgeOnly(eid);
             }
         }
-        // 移除标签索引
-        for (String label : removed.getLabels()) {
-            labelIndex.computeIfPresent(label, (k, v) -> { v.remove(id); return v; });
-        }
-        rebuildPropertyIndexes();
         return true;
     }
 
@@ -149,18 +134,7 @@ public class InMemoryGraphStore implements GraphStore {
                     "Edge references non-existent node: start=" + startNodeId + ", end=" + endNodeId);
         }
         validateEdgeTypeSchema(type, properties);
-        Edge edge = new Edge(id, type, startNodeId, endNodeId, deepCopyMap(properties));
-        Edge previous = edges.put(id, edge);
-        if (previous != null) {
-            outEdges.computeIfPresent(previous.getStartNodeId(), (k, v) -> { v.remove(id); return v; });
-            inEdges.computeIfPresent(previous.getEndNodeId(), (k, v) -> { v.remove(id); return v; });
-            typeIndex.computeIfPresent(previous.getType(), (k, v) -> { v.remove(id); return v; });
-        }
-        nextEdgeId.accumulateAndGet(id + 1, Math::max);
-        outEdges.computeIfAbsent(startNodeId, k -> Collections.synchronizedList(new ArrayList<>())).add(id);
-        inEdges.computeIfAbsent(endNodeId, k -> Collections.synchronizedList(new ArrayList<>())).add(id);
-        typeIndex.computeIfAbsent(type, k -> ConcurrentHashMap.newKeySet()).add(id);
-        return edge;
+        return installEdge(new Edge(id, type, startNodeId, endNodeId, deepCopyMap(properties)));
     }
 
     @Override
@@ -176,12 +150,9 @@ public class InMemoryGraphStore implements GraphStore {
 
     @Override
     public boolean removeEdge(long id) {
-        Edge removed = edges.remove(id);
+        Edge removed = edges.get(id);
         if (removed == null) { return false; }
-
-        outEdges.computeIfPresent(removed.getStartNodeId(), (k, v) -> { v.remove(id); return v; });
-        inEdges.computeIfPresent(removed.getEndNodeId(), (k, v) -> { v.remove(id); return v; });
-        typeIndex.computeIfPresent(removed.getType(), (k, v) -> { v.remove(id); return v; });
+        forgetEdgeOnly(id);
         return true;
     }
 
@@ -269,7 +240,7 @@ public class InMemoryGraphStore implements GraphStore {
         IndexDefinition definition = new IndexDefinition(label, propertyKey);
         if (!propertyIndexDefinitions.add(definition)) return false;
         propertyIndexes.putIfAbsent(definition, new ConcurrentHashMap<>());
-        rebuildPropertyIndexes();
+        rebuildPropertyIndex(definition);
         return true;
     }
 
@@ -283,20 +254,47 @@ public class InMemoryGraphStore implements GraphStore {
         return propertyIndexDefinitions.contains(new IndexDefinition(label, propertyKey));
     }
 
-    private void rebuildPropertyIndexes() {
-        for (IndexDefinition definition : propertyIndexDefinitions) {
-            ConcurrentHashMap<Object, Set<Long>> index = propertyIndexes.computeIfAbsent(
-                    definition, ignored -> new ConcurrentHashMap<>());
-            index.clear();
-            Set<Long> candidates = labelIndex.getOrDefault(definition.label(), Set.of());
-            for (Long nodeId : candidates) {
-                Node node = nodes.get(nodeId);
-                if (node == null) continue;
-                Object value = node.get(definition.propertyKey());
-                if (value != null) {
-                    index.computeIfAbsent(value, ignored -> ConcurrentHashMap.newKeySet()).add(nodeId);
-                }
+    /** 索引当前覆盖的标签+属性键集合，供版本层复制索引定义。 */
+    Set<IndexDefinition> indexDefinitions() {
+        return Set.copyOf(propertyIndexDefinitions);
+    }
+
+    private void rebuildPropertyIndex(IndexDefinition definition) {
+        ConcurrentHashMap<Object, Set<Long>> index =
+                propertyIndexes.computeIfAbsent(definition, ignored -> new ConcurrentHashMap<>());
+        index.clear();
+        for (Long nodeId : labelIndex.getOrDefault(definition.label(), Set.of())) {
+            Node node = nodes.get(nodeId);
+            if (node == null) continue;
+            Object value = node.get(definition.propertyKey());
+            if (value != null) {
+                index.computeIfAbsent(value, ignored -> ConcurrentHashMap.newKeySet()).add(nodeId);
             }
+        }
+    }
+
+    private void addToIndexes(Node node) {
+        for (IndexDefinition definition : propertyIndexDefinitions) {
+            if (!node.hasLabel(definition.label())) continue;
+            Object value = node.get(definition.propertyKey());
+            if (value == null) continue;
+            propertyIndexes.computeIfAbsent(definition, ignored -> new ConcurrentHashMap<>())
+                    .computeIfAbsent(value, ignored -> ConcurrentHashMap.newKeySet())
+                    .add(node.getId());
+        }
+    }
+
+    private void removeFromIndexes(Node node) {
+        for (IndexDefinition definition : propertyIndexDefinitions) {
+            if (!node.hasLabel(definition.label())) continue;
+            Object value = node.get(definition.propertyKey());
+            if (value == null) continue;
+            ConcurrentHashMap<Object, Set<Long>> index = propertyIndexes.get(definition);
+            if (index == null) continue;
+            index.computeIfPresent(value, (k, ids) -> {
+                ids.remove(node.getId());
+                return ids.isEmpty() ? null : ids;
+            });
         }
     }
 
@@ -320,22 +318,177 @@ public class InMemoryGraphStore implements GraphStore {
     /** 创建与当前图完全隔离的深拷贝，用于提交快照和分支工作区。 */
     public InMemoryGraphStore copy() {
         InMemoryGraphStore copy = new InMemoryGraphStore();
-        for (Node node : getAllNodes()) {
-            copy.addNode(node.getId(), node.getLabels(), node.getProperties());
+        copy.installSchemaFrom(this);
+        for (Node node : nodes.values()) {
+            copy.installNode(new Node(node.getId(), node.getLabels(), deepCopyMap(node.getProperties())));
         }
-        for (Edge edge : getAllEdges()) {
-            copy.addEdge(edge.getId(), edge.getType(), edge.getStartNodeId(), edge.getEndNodeId(), edge.getProperties());
+        for (Edge edge : edges.values()) {
+            copy.installEdge(new Edge(edge.getId(), edge.getType(), edge.getStartNodeId(), edge.getEndNodeId(),
+                    deepCopyMap(edge.getProperties())));
         }
-        for (IndexDefinition definition : propertyIndexDefinitions) {
-            copy.createPropertyIndex(definition.label(), definition.propertyKey());
-        }
-        for (TagSchema schema : tagSchemas.values()) {
-            copy.createTag(schema);
-        }
-        for (EdgeTypeSchema schema : edgeTypeSchemas.values()) {
-            copy.createEdgeType(schema);
+        for (IndexDefinition definition : copy.propertyIndexDefinitions) {
+            copy.rebuildPropertyIndex(definition);
         }
         return copy;
+    }
+
+    // ==================== 版本层原语 ====================
+    // 下面这组方法绕过 schema 校验并保证索引/邻接表一致，只服务于 GraphDelta 的回放和
+    // 反序列化：delta 里的内容来自已经校验过的状态，重放时再校验既昂贵又会挡住删除语义。
+
+    Node installNode(Node node) {
+        Node previous = nodes.put(node.getId(), node);
+        if (previous != null) {
+            for (String oldLabel : previous.getLabels()) {
+                if (!node.hasLabel(oldLabel)) {
+                    labelIndex.computeIfPresent(oldLabel, (k, v) -> { v.remove(node.getId()); return v; });
+                }
+            }
+            if (!propertyIndexDefinitions.isEmpty()) {
+                removeFromIndexes(previous);
+            }
+        }
+        nextNodeId.accumulateAndGet(node.getId() + 1, Math::max);
+        for (String label : node.getLabels()) {
+            labelIndex.computeIfAbsent(label, k -> ConcurrentHashMap.newKeySet()).add(node.getId());
+        }
+        if (!propertyIndexDefinitions.isEmpty()) {
+            addToIndexes(node);
+        }
+        return node;
+    }
+
+    Edge installEdge(Edge edge) {
+        Edge previous = edges.put(edge.getId(), edge);
+        if (previous != null) {
+            outEdges.computeIfPresent(previous.getStartNodeId(), (k, v) -> { v.remove(edge.getId()); return v; });
+            inEdges.computeIfPresent(previous.getEndNodeId(), (k, v) -> { v.remove(edge.getId()); return v; });
+            typeIndex.computeIfPresent(previous.getType(), (k, v) -> { v.remove(edge.getId()); return v; });
+        }
+        nextEdgeId.accumulateAndGet(edge.getId() + 1, Math::max);
+        outEdges.computeIfAbsent(edge.getStartNodeId(), k -> Collections.synchronizedList(new ArrayList<>())).add(edge.getId());
+        inEdges.computeIfAbsent(edge.getEndNodeId(), k -> Collections.synchronizedList(new ArrayList<>())).add(edge.getId());
+        typeIndex.computeIfAbsent(edge.getType(), k -> ConcurrentHashMap.newKeySet()).add(edge.getId());
+        return edge;
+    }
+
+    /** 只摘除节点自身（索引 + 邻接表骨架），不级联删边；级联已经记录在 delta 里。 */
+    void forgetNodeOnly(long id) {
+        Node removed = nodes.remove(id);
+        if (removed != null) {
+            forgetNodeFromIndexesAndLabels(removed);
+        }
+        outEdges.remove(id);
+        inEdges.remove(id);
+    }
+
+    void forgetEdgeOnly(long id) {
+        Edge removed = edges.remove(id);
+        if (removed == null) return;
+        outEdges.computeIfPresent(removed.getStartNodeId(), (k, v) -> { v.remove(id); return v; });
+        inEdges.computeIfPresent(removed.getEndNodeId(), (k, v) -> { v.remove(id); return v; });
+        typeIndex.computeIfPresent(removed.getType(), (k, v) -> {
+            v.remove(id);
+            return v.isEmpty() ? null : v;
+        });
+    }
+
+    private void forgetNodeFromIndexesAndLabels(Node removed) {
+        if (!propertyIndexDefinitions.isEmpty()) {
+            removeFromIndexes(removed);
+        }
+        for (String label : removed.getLabels()) {
+            labelIndex.computeIfPresent(label, (k, v) -> {
+                v.remove(removed.getId());
+                return v.isEmpty() ? null : v;
+            });
+        }
+    }
+
+    void putTagSchema(TagSchema schema) {
+        tagSchemas.put(schema.getName(), schema);
+    }
+
+    void removeTagSchema(String tagName) {
+        tagSchemas.remove(tagName);
+    }
+
+    void putEdgeTypeSchema(EdgeTypeSchema schema) {
+        edgeTypeSchemas.put(schema.getName(), schema);
+    }
+
+    void removeEdgeTypeSchema(String edgeTypeName) {
+        edgeTypeSchemas.remove(edgeTypeName);
+    }
+
+    /** 只登记索引定义，值倒排由调用方在整图回放完成后统一重建。 */
+    void registerIndexDefinition(String label, String propertyKey) {
+        propertyIndexDefinitions.add(new IndexDefinition(label, propertyKey));
+    }
+
+    void unregisterIndexDefinition(String label, String propertyKey) {
+        IndexDefinition definition = new IndexDefinition(label, propertyKey);
+        propertyIndexDefinitions.remove(definition);
+        propertyIndexes.remove(definition);
+    }
+
+    Map<String, TagSchema> tagSchemaView() { return tagSchemas; }
+
+    Map<String, EdgeTypeSchema> edgeTypeSchemaView() { return edgeTypeSchemas; }
+
+    /** 直接暴露实体表，仅供同包的增量计算和编解码使用；调用方不得就地改写。 */
+    Map<Long, Node> nodeMap() { return nodes; }
+
+    Map<Long, Edge> edgeMap() { return edges; }
+
+    /**
+     * 就地回放一个增量。仅供物化过程中的临时视图和仓库加载使用，
+     * 已经对外发布过的视图不允许再调用。
+     */
+    void applyDelta(GraphDelta delta) {
+        for (long id : delta.nodeDeletes()) {
+            forgetNodeOnly(id);
+        }
+        for (long id : delta.edgeDeletes()) {
+            forgetEdgeOnly(id);
+        }
+        for (String tagName : delta.tagDeletes()) {
+            removeTagSchema(tagName);
+        }
+        for (String edgeTypeName : delta.edgeTypeDeletes()) {
+            removeEdgeTypeSchema(edgeTypeName);
+        }
+        for (GraphDelta.IndexKey key : delta.indexDeletes()) {
+            unregisterIndexDefinition(key.label(), key.propertyKey());
+        }
+        for (TagSchema schema : delta.tagUpserts()) {
+            putTagSchema(schema);
+        }
+        for (EdgeTypeSchema schema : delta.edgeTypeUpserts()) {
+            putEdgeTypeSchema(schema);
+        }
+        for (Node node : delta.nodeUpserts()) {
+            installNode(new Node(node.getId(), node.getLabels(), deepCopyMap(node.getProperties())));
+        }
+        for (Edge edge : delta.edgeUpserts()) {
+            installEdge(new Edge(edge.getId(), edge.getType(), edge.getStartNodeId(), edge.getEndNodeId(),
+                    deepCopyMap(edge.getProperties())));
+        }
+        Set<IndexDefinition> touchedIndexes = new LinkedHashSet<>();
+        for (GraphDelta.IndexKey key : delta.indexUpserts()) {
+            if (propertyIndexDefinitions.add(new IndexDefinition(key.label(), key.propertyKey()))) {
+                touchedIndexes.add(new IndexDefinition(key.label(), key.propertyKey()));
+            }
+        }
+        for (IndexDefinition definition : touchedIndexes) {
+            rebuildPropertyIndex(definition);
+        }
+    }
+
+    private void installSchemaFrom(InMemoryGraphStore source) {
+        tagSchemas.putAll(source.tagSchemas);
+        edgeTypeSchemas.putAll(source.edgeTypeSchemas);
+        propertyIndexDefinitions.addAll(source.propertyIndexDefinitions);
     }
 
     private void validateTagSchemas(Collection<String> labels, Map<String, Object> properties) {
@@ -421,7 +574,7 @@ public class InMemoryGraphStore implements GraphStore {
         return edgeTypeSchemas.keySet().stream().sorted().toList();
     }
 
-    private record IndexDefinition(String label, String propertyKey) {
+    record IndexDefinition(String label, String propertyKey) {
     }
 
     static Map<String, Object> deepCopyMap(Map<String, Object> source) {
