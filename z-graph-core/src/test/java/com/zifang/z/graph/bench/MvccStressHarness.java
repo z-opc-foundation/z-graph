@@ -58,6 +58,9 @@ public final class MvccStressHarness {
         int concurrentOps = 50;
         int persistCommits = 500;
         int persistGraphNodes = 20_000;
+        int[] budgetCurveSizes = {50_000, 200_000};
+        int budgetCommits = 300;
+        int budgetProbes = 8;
     }
 
     private final Config config;
@@ -90,6 +93,9 @@ public final class MvccStressHarness {
             config.concurrentOps = 25;
             config.persistCommits = 120;
             config.persistGraphNodes = 2_000;
+            config.budgetCurveSizes = new int[]{5_000, 20_000};
+            config.budgetCommits = 60;
+            config.budgetProbes = 4;
         }
         Path workdir = argValue(args, "--workdir", Path.of(System.getProperty("java.io.tmpdir"), "zgraph-stress"));
         Files.createDirectories(workdir);
@@ -132,6 +138,7 @@ public final class MvccStressHarness {
         concurrency();
         persistence();
         versionGc();
+        viewBudgetOnLargeGraph();
         System.out.printf("%n全部场景耗时 %.1fs%n", (System.nanoTime() - t0) / 1e9);
 
         System.out.println("\n=== VERDICTS ===");
@@ -689,6 +696,76 @@ public final class MvccStressHarness {
                         && repository.listBranches().size() == 1,
                 String.format("回收 %d/%d commit，释放 %d 条版本记录，保留分支视图与分支指针正确",
                         collected, branches * 40, released));
+    }
+
+    // ==================== S8 默认视图预算在大图上的兑现 ====================
+
+    /**
+     * 默认档按"实体数"给驻留视图封顶（{@code DEFAULT_MAX_RETAINED_ENTITIES}），而一份 200k 节点
+     * 图的平铺视图计费就在同一个量级 —— 也就是说图一大，默认档实际只留得下一两份视图，之后每次
+     * 打开历史 commit 都要现场沿父链回放。这里量的就是"首次打开"和"紧接着再打开同一份"的差：
+     * 预算真的绑定时时差≈淘汰的代价，时差接近 1 则说明预算没 bind，列名因此刻意写成 first/repeat
+     * 而不是 cold/warm。同时确认预算打满只会变慢、不会读错内容——"任意 commit 可查视图"是
+     * 这块的承诺，缓存策略不该把它降级成近似能力。
+     */
+    private void viewBudgetOnLargeGraph() throws Exception {
+        System.out.printf("%n--- S8 默认视图预算 vs 大图历史读 (实体预算 %s, 微秒) ---%n",
+                format(GraphVersionStore.DEFAULT_MAX_RETAINED_ENTITIES));
+        System.out.printf("  %10s %8s %12s %10s %8s %16s %16s%n",
+                "nodes", "views", "billed", "heap", "binds", "first p50/p99", "repeat p50/p99");
+        long mismatchesBefore = travelMismatches;
+        boolean largestBinds = false;
+        for (int nodes : config.budgetCurveSizes) {
+            GraphVersionStore repository = new GraphVersionStore();   // 默认档：一个参数都不调
+            loadGraph(repository, nodes, 1_000);
+            List<String> chain = new ArrayList<>();
+            for (int i = 0; i < config.budgetCommits; i++) {
+                GraphWriteTransaction write = repository.beginWrite("main");
+                write.addNode("Audit", Map.of("name", "none", "seq", i, "blob", "z" + (i % 89)));
+                chain.add(write.commit("budget", "step " + i).getId());
+            }
+            long[] first = new long[config.budgetProbes];
+            long[] repeat = new long[config.budgetProbes];
+            for (int p = 0; p < config.budgetProbes; p++) {
+                int index = (int) ((long) (p + 1) * chain.size() / config.budgetProbes) - 1;
+                String commitId = chain.get(Math.max(0, index));
+                long expectedNodes = nodes + index + 1L;
+                long startedFirst = System.nanoTime();
+                long[] probeFirst = openAndCount(repository, commitId);
+                first[p] = (System.nanoTime() - startedFirst) / 1_000;
+                long startedRepeat = System.nanoTime();
+                long[] probeRepeat = openAndCount(repository, commitId);
+                repeat[p] = (System.nanoTime() - startedRepeat) / 1_000;
+                if (probeFirst[0] != expectedNodes || probeRepeat[0] != expectedNodes) {
+                    travelMismatches++;
+                }
+            }
+            long[] firstStats = percentile(first);
+            long[] repeatStats = percentile(repeat);
+            long views = stat(repository, "materializedViews");
+            long billed = stat(repository, "retainedViewEntities");
+            long budget = stat(repository, "maxRetainedEntities");
+            boolean binds = billed >= budget / 2;
+            largestBinds = binds;
+            System.out.printf("  %10s %8d %12s %10s %8s %16s %16s%n", format(nodes), views,
+                    format(billed), human(usedHeap()), binds ? "yes" : "no",
+                    firstStats[0] + "/" + firstStats[1], repeatStats[0] + "/" + repeatStats[1]);
+            record("s8_view_budget", "nodes" + nodes, "firstReadP99Micros", firstStats[1]);
+            record("s8_view_budget", "nodes" + nodes, "repeatReadP99Micros", repeatStats[1]);
+            record("s8_view_budget", "nodes" + nodes, "materializedViews", views);
+            record("s8_view_budget", "nodes" + nodes, "retainedViewEntities", billed);
+            record("s8_view_budget", "nodes" + nodes, "budgetBinds", binds ? 1 : 0);
+        }
+        verdict("s8_budget_is_perf_only", travelMismatches == mismatchesBefore,
+                String.format("首读+复读各 %d 次，视图内容不符 %d 次（预算打满只该变慢，不该读错）",
+                        config.budgetCurveSizes.length * config.budgetProbes * 2,
+                        travelMismatches - mismatchesBefore));
+        // 这一条是"默认档 200k 实体 ≈ 一份大图"这个校准前提本身成立与否。判红不是引擎坏了，
+        // 而是说明预算对当前规模根本宽松，S8 那两个首读/复读数就没有淘汰代价可言。
+        verdict("s8_default_budget_binds", largestBinds,
+                String.format("最大规模 (%s 节点) 上驻留视图计费应 >= 预算一半 %s，否则默认档没在淘汰视图",
+                        format(config.budgetCurveSizes[config.budgetCurveSizes.length - 1]),
+                        format(GraphVersionStore.DEFAULT_MAX_RETAINED_ENTITIES / 2)));
     }
 
     // ==================== 公共工具 ====================
