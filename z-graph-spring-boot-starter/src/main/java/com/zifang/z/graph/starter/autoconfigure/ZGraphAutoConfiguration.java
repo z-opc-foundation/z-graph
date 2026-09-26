@@ -42,13 +42,13 @@ public class ZGraphAutoConfiguration {
                 : new GraphVersionStore(Path.of(dataDir));
         store.withCheckpointInterval(props.getCheckpointInterval())
                 .withMaxRetainedViews(props.getMaxRetainedViews())
-                .withMaxRetainedEntities(props.getMaxRetainedEntities())
+                .withRetainedWholeGraphViews(props.getRetainedWholeGraphViews())
                 .withViewLayerLimit(props.getViewLayerLimit());
         log.info("z-graph 版本仓库就绪: dataDir={}, checkpointInterval={}, maxRetainedViews={}, "
-                        + "maxRetainedEntities={}, viewLayerLimit={}",
+                        + "retainedWholeGraphViews={}, viewLayerLimit={}",
                 dataDir == null || dataDir.isBlank() ? "(in-memory)" : dataDir,
                 props.getCheckpointInterval(), props.getMaxRetainedViews(),
-                props.getMaxRetainedEntities(), props.getViewLayerLimit());
+                props.getRetainedWholeGraphViews(), props.getViewLayerLimit());
         return store;
     }
 

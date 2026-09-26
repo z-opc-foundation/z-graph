@@ -20,7 +20,9 @@ import java.util.TreeSet;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -249,7 +251,11 @@ class MvccVersioningTest {
 
     @Test
     void longDeltaChainsReplayToTheSameViewAsFrequentCheckpoints() {
-        GraphVersionStore frequent = new GraphVersionStore().withCheckpointInterval(1);
+        // 这一支要当"全都留在缓存里"的对照臂，所以把驻留份数开到盖过链长；
+        // 默认档只留 4 份整图，两支都会靠回放，比较就失去意义了。
+        GraphVersionStore frequent = new GraphVersionStore()
+                .withCheckpointInterval(1)
+                .withRetainedWholeGraphViews(128);
         GraphVersionStore sparse = new GraphVersionStore().withCheckpointInterval(1000)
                 .withEagerCheckpoints(false)
                 .withMaxRetainedViews(1);
@@ -340,11 +346,11 @@ class MvccVersioningTest {
     }
 
     @Test
-    void entityBudgetEvictsColdViewsWithoutBreakingHistoricalReads() {
-        // 检查点间隔取 1：每次提交都摊平成整图副本，实体预算才有东西可淘汰
+    void viewBudgetScalesWithGraphSizeAndStillEvictsColdViews() {
+        // 检查点间隔取 1：每次提交都摊平成整图副本，预算才有东西可淘汰
         // （套叠的薄层只按本层增量计费，本来就很便宜）。
         GraphVersionStore repository = new GraphVersionStore()
-                .withMaxRetainedEntities(1_200)
+                .withRetainedWholeGraphViews(2)
                 .withCheckpointInterval(1)
                 .withEagerCheckpoints(false);
         GraphCommit seeded = seed(repository, 300);
@@ -357,16 +363,45 @@ class MvccVersioningTest {
             chain.add(write.commit("mem", "bump " + i).getId());
         }
 
-        // 只按数量封顶的话这里会驻留 21 份 300 节点的整图；实体预算必须把它压住。
-        long retained = stat(repository.versionStats(), "retainedViewEntities");
-        assertTrue(retained <= 1_200, "驻留实体 " + retained + " 未受预算约束");
-        assertTrue(stat(repository.versionStats(), "materializedViews") < 21);
+        // 只按数量封顶的话这里会驻留 21 份 300 节点的整图；预算必须把它压住。
+        Map<String, Object> stats = repository.versionStats();
+        assertEquals(300, stat(stats, "wholeGraphWidth"));
+        assertEquals(600, stat(stats, "retainedViewEntityBudget"));
+        assertTrue(stat(stats, "retainedViewEntities") <= 600,
+                "驻留实体 " + stat(stats, "retainedViewEntities") + " 未受 2 份整图的预算约束");
+        assertTrue(stat(stats, "materializedViews") < 21);
+        // 换份数 ⇒ 预算同步换算：证明这个数真是按图规模算出来的，不是另一处硬编码常量。
+        repository.withRetainedWholeGraphViews(5);
+        assertEquals(1_500, stat(repository.versionStats(), "retainedViewEntityBudget"));
         // 淘汰只影响快慢：淘汰掉的 commit 仍然要能回放成当时的视图。
         assertEquals(500, repository.checkout(chain.get(1)).getStore().getNode(target).get("age"));
         assertEquals(519, repository.checkout(chain.get(20)).getStore().getNode(target).get("age"));
         assertEquals(300, repository.checkout(chain.get(0)).getStore().getNodeCount());
         // head 视图不参与淘汰，否则下一次 beginWrite 又要回放整图。
         assertEquals(519, repository.beginWrite("main").getNode(target).get("age"));
+    }
+
+    @Test
+    void defaultBudgetKeepsAHistoricalViewResidentAcrossOtherReads() {
+        // 1.0.4 及以前的默认预算是"20 万实体"这个绝对常量，比一张 20 万节点的图的视图还小，
+        // 于是刚物化的历史视图会在同一次 registerView 里被自己挤掉，复读毫无收益（S8 实测）。
+        // 按份数定预算之后，读别的 commit 不该把刚物化的那份挤出去。
+        GraphVersionStore repository = new GraphVersionStore();
+        GraphCommit seeded = seed(repository, 400);
+        List<String> chain = new ArrayList<>();
+        chain.add(seeded.getId());
+        for (int i = 0; i < 12; i++) {
+            GraphWriteTransaction write = repository.beginWrite("main");
+            write.addNode("Audit", Map.of("name", "a" + i));
+            chain.add(write.commit("mem", "step " + i).getId());
+        }
+
+        InMemoryGraphStore early = repository.materializeView(chain.get(2));
+        repository.materializeView(chain.get(7));
+        // 阳性对照：不同 commit 必然是不同实例，否则下面那句 assertSame 会因为"永远同一个"而假绿。
+        assertNotSame(early, repository.materializeView(chain.get(11)));
+        assertSame(early, repository.materializeView(chain.get(2)),
+                "默认档下读别的 commit 就把这份历史视图淘掉了，等于预算小于一份整图");
     }
 
     @Test

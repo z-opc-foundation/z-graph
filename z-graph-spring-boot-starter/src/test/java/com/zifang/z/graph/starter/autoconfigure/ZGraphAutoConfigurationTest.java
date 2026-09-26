@@ -94,8 +94,8 @@ class ZGraphAutoConfigurationTest {
                             number(stats, "checkpointInterval"), "starter 自己抄了一份默认值，没走库里的常量");
                     assertEquals(GraphVersionStore.DEFAULT_MAX_RETAINED_VIEWS,
                             number(stats, "maxRetainedViews"));
-                    assertEquals(GraphVersionStore.DEFAULT_MAX_RETAINED_ENTITIES,
-                            number(stats, "maxRetainedEntities"));
+                    assertEquals(GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS,
+                            number(stats, "retainedWholeGraphViews"));
                     assertEquals(GraphVersionStore.DEFAULT_VIEW_LAYER_LIMIT,
                             number(stats, "viewLayerLimit"));
                 });
@@ -103,13 +103,13 @@ class ZGraphAutoConfigurationTest {
         runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0",
                         "z.graph.checkpoint-interval=3",
                         "z.graph.max-retained-views=5",
-                        "z.graph.max-retained-entities=777",
+                        "z.graph.retained-whole-graph-views=7",
                         "z.graph.view-layer-limit=9")
                 .run(ctx -> {
                     Map<String, Object> stats = ctx.getBean(GraphVersionStore.class).versionStats();
                     assertEquals(3, number(stats, "checkpointInterval"));
                     assertEquals(5, number(stats, "maxRetainedViews"));
-                    assertEquals(777, number(stats, "maxRetainedEntities"));
+                    assertEquals(7, number(stats, "retainedWholeGraphViews"));
                     assertEquals(9, number(stats, "viewLayerLimit"));
                 });
     }

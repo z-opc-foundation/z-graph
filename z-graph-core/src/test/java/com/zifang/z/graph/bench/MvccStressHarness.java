@@ -272,7 +272,7 @@ public final class MvccStressHarness {
             txSamples[i] = (ended - started) / 1_000;
             commitSamples[i] = (ended - beforeCommit) / 1_000;
         }
-        GraphVersionStore snapshot = oldDesignMode(graphNodes, 4);
+        GraphVersionStore snapshot = oldDesignMode(4);
         loadGraph(snapshot, graphNodes, 500);
         long[] snapshotSamples = new long[config.commitCurveProbes];
         for (int i = 0; i < config.commitCurveProbes; i++) {
@@ -357,12 +357,12 @@ public final class MvccStressHarness {
      * O(图规模) 复制；但驻留量按 {@code residentCopies} 份整图封顶，否则加载阶段就会
      * 按提交数线性复制整图而 OOM，量不到提交延迟。内存维度由 S4 用无上限的同一配置去量。
      */
-    private static GraphVersionStore oldDesignMode(int graphNodes, int residentCopies) {
+    private static GraphVersionStore oldDesignMode(int residentCopies) {
         return new GraphVersionStore()
                 .withCheckpointInterval(1)
                 .withViewLayerLimit(1)
                 .withMaxRetainedViews(Integer.MAX_VALUE)
-                .withMaxRetainedEntities((long) graphNodes * Math.max(1, residentCopies));
+                .withRetainedWholeGraphViews(Math.max(1, residentCopies));
     }
 
     // ==================== S4 内存占用 ====================
@@ -390,19 +390,19 @@ public final class MvccStressHarness {
         record("s4_memory", "delta", "bytesPerCommit", perCommitDelta);
         record("s4_memory", "delta", "retainedDeltaEntities", stat(delta, "retainedDeltaEntities"));
         record("s4_memory", "delta", "retainedViewEntities", stat(delta, "retainedViewEntities"));
-        // 视图缓存必须按实体数收口：只按数量封顶时，50k 节点图驻留 64 份视图就是几十 GB。
+        // 视图缓存必须按整图份数收口：只按数量封顶时，50k 节点图驻留 64 份视图就是几十 GB。
         long billedViews = stat(delta, "retainedViewEntities");
-        long viewBudget = stat(delta, "maxRetainedEntities");
+        long viewBudget = stat(delta, "retainedViewEntityBudget");
         record("s4_memory", "delta", "maxViewLayers", stat(delta, "maxViewLayers"));
         verdict("s4_view_budget_binds", billedViews <= viewBudget,
                 String.format("驻留视图计费 %,d 实体，预算 %,d，最深 %d 层",
                         billedViews, viewBudget, stat(delta, "maxViewLayers")));
 
-        GraphVersionStore snapshot = oldDesignMode(config.memoryGraphNodes, 4);
+        GraphVersionStore snapshot = oldDesignMode(4);
         loadGraph(snapshot, config.memoryGraphNodes, 500);
         // 内存维度要按旧方案"每 commit 一份整图全都留着"来量：这里放开驻留上限，
         // OOM 本身就是结论，必须被抓下来记账而不是让进程死掉。
-        snapshot.withMaxRetainedEntities(Long.MAX_VALUE);
+        snapshot.withRetainedWholeGraphViews(Integer.MAX_VALUE);
         long snapshotBase = usedHeap();
         int retained = 0;
         long snapshotBytes;
@@ -701,20 +701,21 @@ public final class MvccStressHarness {
     // ==================== S8 默认视图预算在大图上的兑现 ====================
 
     /**
-     * 默认档按"实体数"给驻留视图封顶（{@code DEFAULT_MAX_RETAINED_ENTITIES}），而一份 200k 节点
-     * 图的平铺视图计费就在同一个量级 —— 也就是说图一大，默认档实际只留得下一两份视图，之后每次
-     * 打开历史 commit 都要现场沿父链回放。这里量的就是"首次打开"和"紧接着再打开同一份"的差：
-     * 预算真的绑定时时差≈淘汰的代价，时差接近 1 则说明预算没 bind，列名因此刻意写成 first/repeat
-     * 而不是 cold/warm。同时确认预算打满只会变慢、不会读错内容——"任意 commit 可查视图"是
-     * 这块的承诺，缓存策略不该把它降级成近似能力。
+     * 默认档的驻留预算按"整图份数"换算（{@code DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS}），
+     * 1.0.4 及以前是一个 200k 实体的绝对常量——那比一份 200k 节点视图的计费还小，结果图一大
+     * 就只剩分支 head 那份豁免视图，历史 commit 每次都要现场沿父链回放，"复读"和"首读"一样贵
+     * （实测 656ms vs 650ms，等于缓存不存在）。这里钉三件事：
+     * 预算确实随图规模换算、大图上复读必须显著便宜于首读、打满预算只会变慢不会读错。
      */
     private void viewBudgetOnLargeGraph() throws Exception {
-        System.out.printf("%n--- S8 默认视图预算 vs 大图历史读 (实体预算 %s, 微秒) ---%n",
-                format(GraphVersionStore.DEFAULT_MAX_RETAINED_ENTITIES));
-        System.out.printf("  %10s %8s %12s %10s %8s %16s %16s%n",
-                "nodes", "views", "billed", "heap", "binds", "first p50/p99", "repeat p50/p99");
+        System.out.printf("%n--- S8 默认视图预算 vs 大图历史读 (%d 份整图, 微秒) ---%n",
+                GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS);
+        System.out.printf("  %10s %8s %14s %14s %10s %16s %16s%n",
+                "nodes", "views", "billed", "budget", "heap", "first p50/p99", "repeat p50/p99");
         long mismatchesBefore = travelMismatches;
-        boolean largestBinds = false;
+        long largestFirstP50 = 0;
+        long largestRepeatP50 = 0;
+        boolean budgetScales = true;
         for (int nodes : config.budgetCurveSizes) {
             GraphVersionStore repository = new GraphVersionStore();   // 默认档：一个参数都不调
             loadGraph(repository, nodes, 1_000);
@@ -744,28 +745,35 @@ public final class MvccStressHarness {
             long[] repeatStats = percentile(repeat);
             long views = stat(repository, "materializedViews");
             long billed = stat(repository, "retainedViewEntities");
-            long budget = stat(repository, "maxRetainedEntities");
-            boolean binds = billed >= budget / 2;
-            largestBinds = binds;
-            System.out.printf("  %10s %8d %12s %10s %8s %16s %16s%n", format(nodes), views,
-                    format(billed), human(usedHeap()), binds ? "yes" : "no",
+            long width = stat(repository, "wholeGraphWidth");
+            long budget = stat(repository, "retainedViewEntityBudget");
+            // 预算必须等于"整图规模 × 份数"：读回一个常量就说明又退回按绝对实体数封顶了。
+            budgetScales &= budget == width * GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS;
+            largestFirstP50 = firstStats[0];
+            largestRepeatP50 = repeatStats[0];
+            System.out.printf("  %10s %8d %14s %14s %10s %16s %16s%n", format(nodes), views,
+                    format(billed), format(budget), human(usedHeap()),
                     firstStats[0] + "/" + firstStats[1], repeatStats[0] + "/" + repeatStats[1]);
+            record("s8_view_budget", "nodes" + nodes, "firstReadP50Micros", firstStats[0]);
+            record("s8_view_budget", "nodes" + nodes, "repeatReadP50Micros", repeatStats[0]);
             record("s8_view_budget", "nodes" + nodes, "firstReadP99Micros", firstStats[1]);
             record("s8_view_budget", "nodes" + nodes, "repeatReadP99Micros", repeatStats[1]);
             record("s8_view_budget", "nodes" + nodes, "materializedViews", views);
             record("s8_view_budget", "nodes" + nodes, "retainedViewEntities", billed);
-            record("s8_view_budget", "nodes" + nodes, "budgetBinds", binds ? 1 : 0);
+            record("s8_view_budget", "nodes" + nodes, "retainedViewEntityBudget", budget);
         }
         verdict("s8_budget_is_perf_only", travelMismatches == mismatchesBefore,
                 String.format("首读+复读各 %d 次，视图内容不符 %d 次（预算打满只该变慢，不该读错）",
                         config.budgetCurveSizes.length * config.budgetProbes * 2,
                         travelMismatches - mismatchesBefore));
-        // 这一条是"默认档 200k 实体 ≈ 一份大图"这个校准前提本身成立与否。判红不是引擎坏了，
-        // 而是说明预算对当前规模根本宽松，S8 那两个首读/复读数就没有淘汰代价可言。
-        verdict("s8_default_budget_binds", largestBinds,
-                String.format("最大规模 (%s 节点) 上驻留视图计费应 >= 预算一半 %s，否则默认档没在淘汰视图",
-                        format(config.budgetCurveSizes[config.budgetCurveSizes.length - 1]),
-                        format(GraphVersionStore.DEFAULT_MAX_RETAINED_ENTITIES / 2)));
+        verdict("s8_budget_scales_with_graph_size", budgetScales,
+                String.format("每个规模上 retainedViewEntityBudget 都必须等于整图规模 × %d 份",
+                        GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS));
+        // 这一条才是 1.0.4 那个缺陷的回归闸：默认档下大图的历史复读必须真吃到缓存。
+        verdict("s8_repeat_read_uses_cache", largestRepeatP50 * 2 <= largestFirstP50,
+                String.format("最大规模上复读 p50 %s µs 应不高于首读 p50 %s µs 的一半，"
+                                + "否则预算又小到留不住任何历史视图",
+                        format(largestRepeatP50), format(largestFirstP50)));
     }
 
     // ==================== 公共工具 ====================

@@ -51,8 +51,8 @@ import java.util.stream.Collectors;
  * <p>物化视图一旦发布就不再改写：后续提交只会产生新视图，所以已经交出去的
  * checkout 不会被追溯修改。提交后直接把写事务的覆盖层认领为该 commit 的视图，
  * 读要穿透每一层，所以套叠到 {@code viewLayerLimit} 层或到达检查点深度时才摊平一次。
- * 缓存视图受 {@code maxRetainedViews}（数量）和 {@code maxRetainedEntities}（实体数）
- * 双重上限约束，分支 head 的视图不参与淘汰。</p>
+ * 缓存视图受 {@code maxRetainedViews}（数量）和 {@code retainedWholeGraphViews}（合计驻留
+ * 多少份整图）双重上限约束，分支 head 的视图不参与淘汰。</p>
  */
 public final class GraphVersionStore {
 
@@ -61,11 +61,14 @@ public final class GraphVersionStore {
     /** LRU 里最多驻留多少个物化视图（分支 head 不计入该上限）。 */
     public static final int DEFAULT_MAX_RETAINED_VIEWS = 64;
     /**
-     * 缓存视图合计最多承载多少个实体（平铺视图按整图规模计费，套叠的覆盖层只按本层增量计费）。
-     * 视图数量对内存没有意义：一张 20 万节点的图驻留 64 份视图是几十 GB，一张 64 个节点的图
-     * 才是小事，所以数量上限之外还要按实体数封顶。
+     * 缓存视图合计最多驻留多少"份整图"（平铺视图按整图规模计费，套叠的覆盖层只按本层增量计费）。
+     *
+     * <p>预算不能写成实体数常量：预算一旦小于一份整图，淘汰就退化成"只留着各分支 head 那份豁免的
+     * 视图"，历史读永远命中不了缓存——1.0.4 的 S8 实测就是这样（20 万节点的图计费 300,299 实体，
+     * 而当时的默认预算是 200,000，首读 656ms、复读 650ms，复读相对首读零收益）。按份数定预算
+     * 才对图规模自适应：图越大，留的视图越少；20 万节点的图留 4 份约 120 万实体。</p>
      */
-    public static final long DEFAULT_MAX_RETAINED_ENTITIES = 200_000L;
+    public static final int DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS = 4;
     /**
      * head 视图最多套叠多少层覆盖层。提交后直接把写事务的覆盖层当作新 commit 的视图，
      * 省掉一次整图复制；但读要穿透每一层，超过该层数就摊平一次。
@@ -90,7 +93,7 @@ public final class GraphVersionStore {
 
     private int checkpointInterval = DEFAULT_CHECKPOINT_INTERVAL;
     private int maxRetainedViews = DEFAULT_MAX_RETAINED_VIEWS;
-    private long maxRetainedEntities = DEFAULT_MAX_RETAINED_ENTITIES;
+    private int retainedWholeGraphViews = DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS;
     private int viewLayerLimit = DEFAULT_VIEW_LAYER_LIMIT;
     private boolean eagerCheckpoints = true;
 
@@ -132,9 +135,12 @@ public final class GraphVersionStore {
         return this;
     }
 
-    /** 设置缓存视图合计可承载的实体数上限；越小越省内存、历史读回放越长。 */
-    public synchronized GraphVersionStore withMaxRetainedEntities(long maxEntities) {
-        this.maxRetainedEntities = Math.max(1, maxEntities);
+    /**
+     * 设置缓存视图合计可驻留多少"份整图"（含各分支 head 那份豁免视图）。
+     * 预算随图规模换算，所以小图多留几份、大图自动少留；越小越省内存、历史读回放越长。
+     */
+    public synchronized GraphVersionStore withRetainedWholeGraphViews(int views) {
+        this.retainedWholeGraphViews = Math.max(1, views);
         return this;
     }
 
@@ -156,6 +162,10 @@ public final class GraphVersionStore {
 
     public synchronized int getMaxRetainedViews() {
         return maxRetainedViews;
+    }
+
+    public synchronized int getRetainedWholeGraphViews() {
+        return retainedWholeGraphViews;
     }
 
     // ==================== 提交图 ====================
@@ -296,19 +306,29 @@ public final class GraphVersionStore {
         // 因此实际驻留约为「预算 + 每个分支一份整图」。
         List<String> candidates = new ArrayList<>();
         long retained = 0;
+        long wholeGraphWidth = 0;
         for (Map.Entry<String, GraphStore> entry : views.entrySet()) {
-            retained += entityWidth(entry.getValue());
+            GraphStore view = entry.getValue();
+            retained += entityWidth(view);
+            // 覆盖层按增量计费，但 getNodeCount/getEdgeCount 给的是"这份视图看到的世界"的全量，
+            // 两者一起用会让预算基准随套叠层数漂走，所以统一取全量计数。
+            wholeGraphWidth = Math.max(wholeGraphWidth, view.getNodeCount() + view.getEdgeCount());
             if (!branches.containsValue(entry.getKey())) candidates.add(entry.getKey());
         }
         // views 是 accessOrder 链表，遍历顺序即"最久未用在前"。
         int excessByCount = candidates.size() - maxRetainedViews;
-        long excessByEntities = retained - maxRetainedEntities;
+        long excessByEntities = retained - entityBudget(wholeGraphWidth);
         int index = 0;
         while (index < candidates.size() && (index < excessByCount || excessByEntities > 0)) {
             String victim = candidates.get(index++);
             excessByEntities -= entityWidth(views.get(victim));
             views.remove(victim);
         }
+    }
+
+    /** 驻留预算：整图规模 × 约定份数。仓库还空着时基准为 0，此时任何视图都还没资格被淘。 */
+    private long entityBudget(long wholeGraphWidth) {
+        return wholeGraphWidth == 0 ? 0 : wholeGraphWidth * retainedWholeGraphViews;
     }
 
     private static long entityWidth(GraphStore view) {
@@ -399,18 +419,22 @@ public final class GraphVersionStore {
         stats.put("retainedDeltaDeletes", deltaDeletes);
         stats.put("materializedViews", (long) views.size());
         long retainedViewEntities = 0;
+        long wholeGraphWidth = 0;
         int maxViewLayers = 0;
         for (GraphStore view : views.values()) {
             retainedViewEntities += entityWidth(view);
+            wholeGraphWidth = Math.max(wholeGraphWidth, view.getNodeCount() + view.getEdgeCount());
             if (view instanceof VersionOverlayStore layered) {
                 maxViewLayers = Math.max(maxViewLayers, layered.viewDepth());
             }
         }
         stats.put("retainedViewEntities", retainedViewEntities);
+        stats.put("wholeGraphWidth", wholeGraphWidth);
+        stats.put("retainedViewEntityBudget", entityBudget(wholeGraphWidth));
         stats.put("maxViewLayers", (long) maxViewLayers);
         stats.put("checkpointInterval", (long) checkpointInterval);
         stats.put("maxRetainedViews", (long) maxRetainedViews);
-        stats.put("maxRetainedEntities", maxRetainedEntities);
+        stats.put("retainedWholeGraphViews", (long) retainedWholeGraphViews);
         stats.put("viewLayerLimit", (long) viewLayerLimit);
         return stats;
     }

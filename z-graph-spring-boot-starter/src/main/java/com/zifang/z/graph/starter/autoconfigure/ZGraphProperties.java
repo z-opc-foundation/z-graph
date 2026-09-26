@@ -14,7 +14,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *     data-dir: /data/zgraph   # 留空 = 纯内存仓库（不落盘、不建目录）
  *     checkpoint-interval: 32
  *     max-retained-views: 64
- *     max-retained-entities: 200000
+ *     retained-whole-graph-views: 4
  *     view-layer-limit: 8
  * </pre>
  *
@@ -42,8 +42,8 @@ public class ZGraphProperties {
     /** 视图 LRU 条数上限（分支 head 视图豁免淘汰）。 */
     private int maxRetainedViews = GraphVersionStore.DEFAULT_MAX_RETAINED_VIEWS;
 
-    /** 视图 LRU 的实体预算上限。 */
-    private long maxRetainedEntities = GraphVersionStore.DEFAULT_MAX_RETAINED_ENTITIES;
+    /** 视图 LRU 合计可驻留多少份整图（预算随图规模换算）。 */
+    private int retainedWholeGraphViews = GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS;
 
     /** 单个视图最多套叠多少层 delta，超过就摊平。 */
     private int viewLayerLimit = GraphVersionStore.DEFAULT_VIEW_LAYER_LIMIT;
@@ -88,12 +88,12 @@ public class ZGraphProperties {
         this.maxRetainedViews = maxRetainedViews;
     }
 
-    public long getMaxRetainedEntities() {
-        return maxRetainedEntities;
+    public int getRetainedWholeGraphViews() {
+        return retainedWholeGraphViews;
     }
 
-    public void setMaxRetainedEntities(long maxRetainedEntities) {
-        this.maxRetainedEntities = maxRetainedEntities;
+    public void setRetainedWholeGraphViews(int retainedWholeGraphViews) {
+        this.retainedWholeGraphViews = retainedWholeGraphViews;
     }
 
     public int getViewLayerLimit() {
