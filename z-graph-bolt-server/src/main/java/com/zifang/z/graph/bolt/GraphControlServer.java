@@ -419,7 +419,7 @@ public final class GraphControlServer {
             result.put("indexes", indexes);
             writeJson(exchange, 200, result);
         } catch (Exception e) {
-            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
         }
     }
 
@@ -444,7 +444,7 @@ public final class GraphControlServer {
             result.put("stats", stats);
             writeJson(exchange, 200, result);
         } catch (Exception e) {
-            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
         }
     }
 
@@ -537,7 +537,7 @@ public final class GraphControlServer {
             applyCorsHeaders(exchange);
             writeJson(exchange, 200, result);
         } catch (Exception e) {
-            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
         }
     }
 
@@ -618,7 +618,7 @@ public final class GraphControlServer {
             exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
             writeJson(exchange, 200, Map.of("results", results, "elapsedMs", elapsed));
         } catch (Exception e) {
-            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
         }
     }
 
@@ -668,7 +668,7 @@ public final class GraphControlServer {
                     "attachment; filename=\"z-graph-export-" + branch + ".json\"");
             writeJson(exchange, 200, export);
         } catch (Exception e) {
-            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
         }
     }
 
@@ -711,7 +711,7 @@ public final class GraphControlServer {
                     "branch", branch,
                     "elapsedMs", elapsed));
         } catch (Exception e) {
-            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
         }
     }
 
@@ -774,7 +774,7 @@ public final class GraphControlServer {
         } catch (IllegalStateException conflict) {
             writeJson(exchange, 409, Map.of("error", "Stale head: " + conflict.getMessage()));
         } catch (Exception e) {
-            writeJson(exchange, 500, Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
         }
     }
 
@@ -790,6 +790,16 @@ public final class GraphControlServer {
             result.put(key, value);
         }
         return result;
+    }
+
+    /**
+     * 客户端自己能触发的失败不该记成服务端故障：引用（commit/分支）不存在 → 404，
+     * 参数写错 → 400，剩下的才是 500。判异常类型不判消息文本，免得 "Unknown" 措辞一改状态码就跟着漂。
+     */
+    private static int statusFor(Exception e) {
+        if (e instanceof GraphVersionStore.UnknownReferenceException) return 404;
+        if (e instanceof IllegalArgumentException) return 400;
+        return 500;
     }
 
     private static void writeJson(HttpExchange exchange, int status, Object body) throws IOException {

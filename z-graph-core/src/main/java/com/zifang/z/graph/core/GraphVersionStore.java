@@ -556,6 +556,14 @@ public final class GraphVersionStore {
         public StaleHeadException(String message) { super(message); }
     }
 
+    /**
+     * 引用（commit id 或分支名）在仓库里不存在。它与参数写错一样都是 {@link IllegalArgumentException}
+     * 的子类，好让既有 catch 继续生效；控制面据此把"资源不存在"和"服务端故障"分开（404 vs 500）。
+     */
+    public static class UnknownReferenceException extends IllegalArgumentException {
+        public UnknownReferenceException(String message) { super(message); }
+    }
+
     synchronized long allocateNodeId() {
         return nextNodeId++;
     }
@@ -1218,7 +1226,7 @@ public final class GraphVersionStore {
     private GraphCommit requireCommit(String id, String description) {
         GraphCommit commit = commits.get(id);
         if (commit == null) {
-            throw new IllegalArgumentException("Unknown " + description);
+            throw new UnknownReferenceException("Unknown " + description);
         }
         return commit;
     }
@@ -1226,7 +1234,7 @@ public final class GraphVersionStore {
     private String requireBranch(String branch) {
         validateBranchName(branch);
         if (!branches.containsKey(branch)) {
-            throw new IllegalArgumentException("Unknown branch: " + branch);
+            throw new UnknownReferenceException("Unknown branch: " + branch);
         }
         return branch;
     }
