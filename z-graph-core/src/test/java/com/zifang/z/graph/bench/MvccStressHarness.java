@@ -61,7 +61,18 @@ public final class MvccStressHarness {
         int[] budgetCurveSizes = {50_000, 200_000};
         int budgetCommits = 300;
         int budgetProbes = 8;
+        int preyGraphNodes = 10_000;
+        int preyCommits = 30;
     }
+
+    /**
+     * "打开历史视图"一步复读必须比首读便宜的倍数。实测默认档在 2 万~20 万节点上是
+     * 100~250 倍，而驻留 1 份整图时只有 1.4 倍（见 {@code s8_cache_probe_has_prey}），
+     * 20 倍落在两个量级的正中间：既不会因为机器慢而误判，也绝不可能放过"缓存其实不在"。
+     */
+    private static final int OPEN_CACHE_SPEEDUP_MIN = 20;
+    /** 冷开至少要花多少微秒，否则两边的比值是噪声里的空跑。 */
+    private static final int PREY_COLD_OPEN_MIN_MICROS = 100;
 
     private final Config config;
     private final Path workdir;
@@ -96,6 +107,7 @@ public final class MvccStressHarness {
             config.budgetCurveSizes = new int[]{5_000, 20_000};
             config.budgetCommits = 60;
             config.budgetProbes = 4;
+            config.preyGraphNodes = 2_000;
         }
         Path workdir = argValue(args, "--workdir", Path.of(System.getProperty("java.io.tmpdir"), "zgraph-stress"));
         Files.createDirectories(workdir);
@@ -705,16 +717,25 @@ public final class MvccStressHarness {
      * 1.0.4 及以前是一个 200k 实体的绝对常量——那比一份 200k 节点视图的计费还小，结果图一大
      * 就只剩分支 head 那份豁免视图，历史 commit 每次都要现场沿父链回放，"复读"和"首读"一样贵
      * （实测 656ms vs 650ms，等于缓存不存在）。这里钉三件事：
-     * 预算确实随图规模换算、大图上复读必须显著便宜于首读、打满预算只会变慢不会读错。
+     * 预算确实随图规模换算、复读真的命中驻留视图、打满预算只会变慢不会读错。
+     *
+     * <p>"命中缓存"只能量"打开视图"这一步，不能量整读：一次历史读里"沿父链回放/复制整图"只有
+     * 首读付，而"遍历整图读属性"两臂都要付，200k 节点上后者就占掉一半以上（250 实测整读首读
+     * 695ms、复读 386ms，比值只有 1.80x，卡在原先 2.0x 的线下——可那台机器上缓存明明在，
+     * 单独量 open 一步是 14ms→56µs）。用整读比值当尺，等于让遍历成本替缓存买单：机器越慢、
+     * 比值越靠近 1，跟留没留住视图无关。所以判据落在 open 一步的比值上，整读两臂只如实记账。
+     * 这道闸有没有牙齿，由 {@link #cacheProbeHasPrey()} 现场演示。
      */
     private void viewBudgetOnLargeGraph() throws Exception {
-        System.out.printf("%n--- S8 默认视图预算 vs 大图历史读 (%d 份整图, 微秒) ---%n",
-                GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS);
-        System.out.printf("  %10s %8s %14s %14s %10s %16s %16s%n",
-                "nodes", "views", "billed", "budget", "heap", "first p50/p99", "repeat p50/p99");
+        System.out.printf("%n--- S8 默认视图预算 vs 大图历史读 (微秒) ---%n");
+        System.out.printf("  %10s %8s %14s %14s %10s %16s %16s %16s %8s%n",
+                "nodes", "views", "billed", "budget", "heap", "整读 首/复", "整读复/首",
+                "open 首/复", "open 提速");
         long mismatchesBefore = travelMismatches;
         long largestFirstP50 = 0;
         long largestRepeatP50 = 0;
+        long largestOpenP50 = 0;
+        long largestRepeatOpenP50 = 0;
         boolean budgetScales = true;
         for (int nodes : config.budgetCurveSizes) {
             GraphVersionStore repository = new GraphVersionStore();   // 默认档：一个参数都不调
@@ -727,22 +748,32 @@ public final class MvccStressHarness {
             }
             long[] first = new long[config.budgetProbes];
             long[] repeat = new long[config.budgetProbes];
+            long[] open = new long[config.budgetProbes];
+            long[] repeatOpen = new long[config.budgetProbes];
             for (int p = 0; p < config.budgetProbes; p++) {
                 int index = (int) ((long) (p + 1) * chain.size() / config.budgetProbes) - 1;
                 String commitId = chain.get(Math.max(0, index));
                 long expectedNodes = nodes + index + 1L;
                 long startedFirst = System.nanoTime();
-                long[] probeFirst = openAndCount(repository, commitId);
-                first[p] = (System.nanoTime() - startedFirst) / 1_000;
+                var view = repository.checkout(commitId).getStore();
+                long openMicros = (System.nanoTime() - startedFirst) / 1_000;
+                long[] probeFirst = probeView(view);
                 long startedRepeat = System.nanoTime();
-                long[] probeRepeat = openAndCount(repository, commitId);
+                var again = repository.checkout(commitId).getStore();
+                long repeatOpenMicros = (System.nanoTime() - startedRepeat) / 1_000;
+                long[] probeRepeat = probeView(again);
+                first[p] = (System.nanoTime() - startedFirst) / 1_000;
                 repeat[p] = (System.nanoTime() - startedRepeat) / 1_000;
+                open[p] = openMicros;
+                repeatOpen[p] = repeatOpenMicros;
                 if (probeFirst[0] != expectedNodes || probeRepeat[0] != expectedNodes) {
                     travelMismatches++;
                 }
             }
             long[] firstStats = percentile(first);
             long[] repeatStats = percentile(repeat);
+            long[] openStats = percentile(open);
+            long[] repeatOpenStats = percentile(repeatOpen);
             long views = stat(repository, "materializedViews");
             long billed = stat(repository, "retainedViewEntities");
             long width = stat(repository, "wholeGraphWidth");
@@ -751,13 +782,19 @@ public final class MvccStressHarness {
             budgetScales &= budget == width * GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS;
             largestFirstP50 = firstStats[0];
             largestRepeatP50 = repeatStats[0];
-            System.out.printf("  %10s %8d %14s %14s %10s %16s %16s%n", format(nodes), views,
-                    format(billed), format(budget), human(usedHeap()),
-                    firstStats[0] + "/" + firstStats[1], repeatStats[0] + "/" + repeatStats[1]);
+            largestOpenP50 = openStats[0];
+            largestRepeatOpenP50 = repeatOpenStats[0];
+            System.out.printf("  %10s %8d %14s %14s %10s %16s %11.2fx %16s %7.0fx%n", format(nodes),
+                    views, format(billed), format(budget), human(usedHeap()),
+                    firstStats[0] + "/" + repeatStats[0], (double) firstStats[0] / repeatStats[0],
+                    openStats[0] + "/" + repeatOpenStats[0],
+                    (double) openStats[0] / repeatOpenStats[0]);
             record("s8_view_budget", "nodes" + nodes, "firstReadP50Micros", firstStats[0]);
             record("s8_view_budget", "nodes" + nodes, "repeatReadP50Micros", repeatStats[0]);
             record("s8_view_budget", "nodes" + nodes, "firstReadP99Micros", firstStats[1]);
             record("s8_view_budget", "nodes" + nodes, "repeatReadP99Micros", repeatStats[1]);
+            record("s8_view_budget", "nodes" + nodes, "openP50Micros", openStats[0]);
+            record("s8_view_budget", "nodes" + nodes, "repeatOpenP50Micros", repeatOpenStats[0]);
             record("s8_view_budget", "nodes" + nodes, "materializedViews", views);
             record("s8_view_budget", "nodes" + nodes, "retainedViewEntities", billed);
             record("s8_view_budget", "nodes" + nodes, "retainedViewEntityBudget", budget);
@@ -769,11 +806,67 @@ public final class MvccStressHarness {
         verdict("s8_budget_scales_with_graph_size", budgetScales,
                 String.format("每个规模上 retainedViewEntityBudget 都必须等于整图规模 × %d 份",
                         GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS));
-        // 这一条才是 1.0.4 那个缺陷的回归闸：默认档下大图的历史复读必须真吃到缓存。
-        verdict("s8_repeat_read_uses_cache", largestRepeatP50 * 2 <= largestFirstP50,
-                String.format("最大规模上复读 p50 %s µs 应不高于首读 p50 %s µs 的一半，"
-                                + "否则预算又小到留不住任何历史视图",
-                        format(largestRepeatP50), format(largestFirstP50)));
+        // 这一条才是 1.0.4 那个缺陷的回归闸：默认档下打开历史视图的第二次必须真的便宜下来。
+        double openSpeedup = (double) largestOpenP50 / largestRepeatOpenP50;
+        verdict("s8_repeat_read_uses_cache",
+                largestRepeatOpenP50 * OPEN_CACHE_SPEEDUP_MIN <= largestOpenP50,
+                String.format("最大规模上\"打开视图\"一步 首读 %s µs → 复读 %s µs，提速 %.0fx（需 >=%dx）；"
+                                + "整读 %s µs → %s µs 只有 %.2fx，因为\"遍历整图\"两臂都付，故只记账不当判据",
+                        format(largestOpenP50), format(largestRepeatOpenP50), openSpeedup,
+                        OPEN_CACHE_SPEEDUP_MIN, format(largestFirstP50), format(largestRepeatP50),
+                        (double) largestFirstP50 / largestRepeatP50));
+        cacheProbeHasPrey();
+    }
+
+    /**
+     * 阳性对照：上面那道闸必须有牙齿。把驻留压到 1 份整图——正是 1.0.4 在大图上退化成的形态
+     * （只剩一份豁免的分支 head 视图）——打开邻居提交就会挤掉目标视图，复读的"打开"成本回到
+     * 冷读量级，提速倍数掉到 {@code OPEN_CACHE_SPEEDUP_MIN} 以下。同一把尺，默认档过、1 份档红，
+     * 说明判据量的确实是驻留而不是机器快慢。另要求冷开本身够贵，否则两边都是微秒级、
+     * 比值再大也是空跑。
+     */
+    private void cacheProbeHasPrey() {
+        GraphVersionStore repository = new GraphVersionStore().withRetainedWholeGraphViews(1);
+        loadGraph(repository, config.preyGraphNodes, 1_000);
+        List<String> chain = new ArrayList<>();
+        for (int i = 0; i < config.preyCommits; i++) {
+            GraphWriteTransaction write = repository.beginWrite("main");
+            write.addNode("Audit", Map.of("name", "none", "seq", i, "blob", "prey"));
+            chain.add(write.commit("prey", "step " + i).getId());
+        }
+        String target = chain.get(chain.size() / 2);
+        String neighbour = chain.get(chain.size() - 1);
+        long coldStarted = System.nanoTime();
+        repository.checkout(target).getStore();
+        long coldOpen = (System.nanoTime() - coldStarted) / 1_000;
+        repository.checkout(neighbour).getStore();           // 1 份整图的预算装不下两份
+        long crowdedStarted = System.nanoTime();
+        repository.checkout(target).getStore();
+        long crowdedOpen = (System.nanoTime() - crowdedStarted) / 1_000;
+        System.out.printf("  阳性对照 (驻留 1 份整图, %,d 节点): 冷开 %,d µs → 被邻居挤占后复读 %,d µs"
+                        + "（提速 %.1fx，判据要求 >=%dx 才会红）%n",
+                config.preyGraphNodes, coldOpen, crowdedOpen,
+                (double) coldOpen / crowdedOpen, OPEN_CACHE_SPEEDUP_MIN);
+        record("s8_view_budget", "prey1copy", "coldOpenMicros", coldOpen);
+        record("s8_view_budget", "prey1copy", "crowdedOpenMicros", crowdedOpen);
+        verdict("s8_cache_probe_has_prey",
+                coldOpen >= PREY_COLD_OPEN_MIN_MICROS && crowdedOpen * OPEN_CACHE_SPEEDUP_MIN >= coldOpen,
+                String.format("驻留 1 份整图时复读必须不再便宜：冷开 %s µs、挤占后复读 %s µs（提速 %.1fx）。"
+                                + "若这里也达到 >=%dx，说明 s8_repeat_read_uses_cache 是空跑",
+                        format(coldOpen), format(crowdedOpen), (double) coldOpen / crowdedOpen,
+                        OPEN_CACHE_SPEEDUP_MIN));
+    }
+
+    /** 返回 {节点数, 属性校验和}：只读内容，不含"打开视图"那一步。 */
+    private long[] probeView(com.zifang.z.graph.api.GraphStore store) {
+        long count = 0;
+        long checksum = 0;
+        for (Node node : store.getAllNodes()) {
+            count++;
+            Object seq = node.get("seq");
+            checksum += seq instanceof Number ? ((Number) seq).longValue() : node.get("name").hashCode();
+        }
+        return new long[]{count, checksum};
     }
 
     // ==================== 公共工具 ====================
