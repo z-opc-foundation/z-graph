@@ -49,14 +49,18 @@
 
 
     <dependencies>
+        <!-- netty-all 不写 version：本仓 DM 那条 netty-all 已删，改由父链 z-boot-dependencies
+             import 的 io.netty:netty-bom 下发（面值 4.1.138.Final，与迁移前同一格）。 -->
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-all</artifactId>
         </dependency>
+        <!-- log4j-api 不写 version：由父链下发（z-boot-dependencies 按坐标直接钉 2.25.4，
+             与本仓迁移前的面值同一格）。原来这里写的是 property log4j2.version 的引用，
+             那一格已从仓根 properties 删除。 -->
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
-            <version>${log4j2.version}</version>
         </dependency>
     </dependencies>
 </project>

@@ -49,40 +49,26 @@
 
 
     <dependencies>
+        <!-- 自家坐标与下面三件一律不写 version：仓根 DM 把 z-graph* 钉在 ${project.version}
+             （继承来的 DM 会改写传递版本，fleet 那一格是 repo1 的发布件，所以自家这一格必须由
+             本仓压住），log4j-api 由父链下发 2.25.4，junit-jupiter 由仓根 DM 下发 ${junit.version}。 -->
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-api</artifactId>
-            <version>1.0.7</version>
         </dependency>
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-protocol</artifactId>
-            <version>1.0.7</version>
         </dependency>
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
-            <version>${log4j2.version}</version>
         </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.10.2</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
 </project>

@@ -5,6 +5,26 @@
                              http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!-- 消费入口统一走 z-boot-parent（1.0.19 起全组织口径）：一行 parent 白拿
+         ① 第三方地板 z-boot-dependencies:1.0.19（spring-boot / netty-bom / jackson-bom / log4j2 …）
+         ② 兄弟仓版本权威 z-boot-fleet:1.0.0（import 进来，覆盖每个兄弟仓的对外坐标）
+         ③ Java 8 构建口径（pluginManagement：compiler source/target 8 + -parameters、surefire 2.22.2 …）
+         以前这里没有 parent，6 个 pom 各自钉版本属性表 —— 正是"每个仓自己起名字"那笔账。
+         relativePath 必须留空：parent 不在磁盘上，在 repo1。
+         连带删掉了原本站在这里的 <build><pluginManagement>（maven-compiler-plugin 3.13.0 +
+         <release>17</release>、maven-surefire-plugin 3.2.5）与 core/bolt-server 两处只为继承该配置
+         而存在的插件声明。⚠ 那句 release 17 是真雷：JDK 8 下实测产物 major 52（插件日志仍写着
+         "[debug release 17]"，也就是这参数在 javac 8 上没落地，配置和产物说的是两件事），
+         但同一份 pom 在 JDK 17 上实测产出 major 61（现测：/tmp 里那份迁移前副本，
+         corretto-17 构建 ⇒ z-graph-api / z-graph-core 的 class 字节 6-7 = 0 61），
+         而 1.0.7 这个号的对外承诺就是 Java 8。删掉之后 parent 的 source/target 8 直接把口径钉死，
+         迁移后 5 个模块 target/classes 的**每一个** class 都是 major 52。 -->
+    <parent>
+        <groupId>io.github.yuku123</groupId>
+        <artifactId>z-boot-parent</artifactId>
+        <version>1.0.19</version>
+        <relativePath/>
+    </parent>
     <groupId>io.github.yuku123</groupId>
     <artifactId>z-graph</artifactId>
     <!-- ⚠ 1.0.6 在 Maven Central 上是**半成品**：那次 deploy 赶在 Java 8 移植的中途，
@@ -52,22 +72,41 @@
     </modules>
 
     <properties>
-        <java.version>1.8</java.version>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!-- 2026-09-28「同坐标单版本」：4.1.115.Final → 4.1.138.Final，与 z-boot-dependencies 1.0.18 的
-             netty-bom 同一口径（4.1.138 含 CVE 修复，4.1.x 内二进制兼容）。 -->
-        <netty.version>4.1.138.Final</netty.version>
-        <junit.version>5.10.2</junit.version>
+        <!-- 只留**父链没有、或本仓面值与父链刻意不同**的格。删掉的每一格都连带删掉了它在 6 个 pom 里
+             的全部引用（子模块的 <version> 一并删）—— 引用没删干净会在子模块 pom 上炸成
+             "'dependencies.dependency.version' … must be a valid version"。
+             删掉的四格（现 grep 全仓确认迁移后 0 处引用）：
+             · java.version=1.8 / maven.compiler.source=1.8 / maven.compiler.target=1.8 /
+               project.build.sourceEncoding=UTF-8：全仓 0 处引用，parent 下发同一口径
+               （source/target 8 ⇒ class-file 52，与迁移前实测的 52 同格）。
+             · netty.version=4.1.138.Final：地板 netty-bom 面值同为 4.1.138.Final（迁移后 tree 里
+               io.netty 30 件一件没动，见 commit body 的 diff 读数）。
+             · log4j2.version=2.25.4 与 log4j.version=2.25.4：同一个家族重复两格，地板把
+               log4j-api/core/jul/slf4j-impl 逐条**直接**钉在 2.25.4（与本仓面值相同）⇒ 两格都删。
+             · spring-boot.version=2.7.18（原来躺在 starter 模块自己的 properties 里）：地板面值同为 2.7.18。 -->
+        <!-- slf4j 是**有意的分歧**，不能删：地板那条 spring-boot-dependencies:2.7.18 的 import 把
+             org.slf4j:slf4j-api 展成 1.7.36，而本仓按 slf4j-api 2.x 编译运行
+             （bolt-server 运行期挂 slf4j-simple 2.0.13）。删掉这格＝静默降版本。
+             下面按坐标写的**直接**条目是顶住它的唯一形状（import 顶不住继承来的条目）。 -->
         <slf4j.version>2.0.13</slf4j.version>
-        <log4j2.version>2.25.4</log4j2.version>
-        <log4j.version>2.25.4</log4j.version>
+        <!-- junit 同样是有意分歧：地板 junit-bom 是 5.9.3，本仓 172 支测试按 5.10.2 跑通。
+             junit-platform.version 是这条 jupiter 线的配套版本（jupiter 5.10.2 ⇒ platform 1.10.2），
+             地板会把它压到 1.9.3，所以逐坐标钉住。抬 junit 是另一个决定，不在迁 pom 里顺手做。 -->
+        <junit.version>5.10.2</junit.version>
+        <junit-platform.version>1.10.2</junit-platform.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
-            
+            <!-- 自家 6 个 reactor 坐标逐条钉 ${project.version}。这一格不是装饰：继承来的 DM 会改写
+                 **传递依赖**的版本，而 fleet 里 z-graph 那一格钉的是 repo1 上的发布件（现值 1.0.7，
+                 与本仓 HEAD 同格 ⇒ 今天量出来是 no-op），一旦对外落后于仓内就会把旧兄弟字节码打进新包。
+                 写了这 6 条之后，子模块之间的依赖不再写字面 1.0.7，一律由本仓 DM 下发。 -->
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-graph</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>io.github.yuku123</groupId>
                 <artifactId>z-graph-api</artifactId>
@@ -89,10 +128,14 @@
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.netty</groupId>
-                <artifactId>netty-all</artifactId>
-                <version>${netty.version}</version>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-graph-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
             </dependency>
+            <!-- netty-all 的直接条目删掉：z-boot-dependencies 已经 import 同一个 io.netty:netty-bom，
+                 面值 4.1.138.Final 与本仓迁移前逐字节相同（现 tree io.netty 30 件版本一件没动）。
+                 log4j-api 的直接条目（原来钉的是上面那格已删除的 log4j.version）也删掉：地板按坐标
+                 直接钉 2.25.4，同值。重复 import / 重复条目只会搅乱 DM 优先级。 -->
             <dependency>
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-api</artifactId>
@@ -103,39 +146,56 @@
                 <artifactId>slf4j-simple</artifactId>
                 <version>${slf4j.version}</version>
             </dependency>
-            <dependency>
-                <groupId>org.apache.logging.log4j</groupId>
-                <artifactId>log4j-api</artifactId>
-                <version>${log4j.version}</version>
-            </dependency>
+            <!-- junit 家族按坐标逐条写直接条目（迁移前只有 junit-jupiter 一条，其余三件 api/engine/params
+                 与两件 platform 是靠传递解析拿到 5.10.2/1.10.2 的；地板的 junit-bom 5.9.3 会把这些
+                 传递件压到 5.9.3/1.9.3 ⇒ 逐条钉住才零漂移。现 tree 命中的是这 6 格，
+                 opentest4j 1.3.0 / apiguardian 1.1.2 地板与本仓同值，不钉）。 -->
             <dependency>
                 <groupId>org.junit.jupiter</groupId>
                 <artifactId>junit-jupiter</artifactId>
                 <version>${junit.version}</version>
                 <scope>test</scope>
             </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-api</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-engine</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-params</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.platform</groupId>
+                <artifactId>junit-platform-commons</artifactId>
+                <version>${junit-platform.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.platform</groupId>
+                <artifactId>junit-platform-engine</artifactId>
+                <version>${junit-platform.version}</version>
+            </dependency>
+            <!-- objenesis 按坐标写**直接**条目顶住 3.2：地板那一格是历史值 2.6
+                 （z-boot-dependencies 的直接 DM，比 mockito-core 4.5.1 自己声明的 3.2 还低），
+                 继承下来就是把一个坐标**压低**。现 tree 实测这一格确实是唯一一处下行
+                 （3.2 → 2.6），其余漂移全是地板向上的口径（spring 5.3.31→5.3.39、
+                 json-path 2.7.0→2.9.0、json-smart/accessors-smart 2.4.7→2.4.9、asm 9.1→9.2、
+                 byte-buddy 1.12.9→1.12.23 = spring-boot 2.7.18 自己给 mockito 4.5.1 配的值）。
+                 本仓 0 处 import org.mockito（现读 0 个文件），所以这格今天是惰性的；
+                 但迁 pom 不该顺手压低版本 —— 与地板不同值必须写直接条目（坑 1：import 顶不住）。 -->
+            <dependency>
+                <groupId>org.objenesis</groupId>
+                <artifactId>objenesis</artifactId>
+                <version>3.2</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
-
-    <build>
-        <pluginManagement>
-            <plugins>
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-compiler-plugin</artifactId>
-                    <version>3.13.0</version>
-                    <configuration>
-                        <release>17</release>
-                    </configuration>
-                </plugin>
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-surefire-plugin</artifactId>
-                    <version>3.2.5</version>
-                </plugin>
-            </plugins>
-        </pluginManagement>
-    </build>
 
     <profiles>
         <profile>

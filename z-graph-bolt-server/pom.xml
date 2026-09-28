@@ -49,20 +49,21 @@
 
 
     <dependencies>
+        <!-- version 全部由仓根 DM / 父链下发，理由同 z-graph-core 的注释：
+             z-graph* 钉 ${project.version}；netty-all 走地板 netty-bom 4.1.138.Final；
+             log4j-api 走地板 2.25.4；slf4j-simple 是本仓有意的分歧（地板那一格是 spring-boot 的
+             1.7.36），由仓根 DM 的直接条目压住 ${slf4j.version}=2.0.13。 -->
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-api</artifactId>
-            <version>1.0.7</version>
         </dependency>
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-protocol</artifactId>
-            <version>1.0.7</version>
         </dependency>
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-core</artifactId>
-            <version>1.0.7</version>
         </dependency>
         <dependency>
             <groupId>io.netty</groupId>
@@ -71,33 +72,17 @@
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
-            <version>${log4j2.version}</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
-            <version>${slf4j.version}</version>
             <scope>runtime</scope>
         </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.10.2</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
 </project>

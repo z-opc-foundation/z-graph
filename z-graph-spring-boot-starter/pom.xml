@@ -48,18 +48,15 @@
 
 
 
-    <properties>
-        <!-- 与 z-boot-dependencies 的 pin 一致；starter 只编译期需要 Spring，故全部 optional -->
-        <!-- 2026-09-28「同坐标单版本」：2.7.12 → 2.7.18（2.7 线最后一版，Java 8 可用），
-             与 z-boot-dependencies 1.0.18 / z-opc 根 pom 同一口径；12→18 含 CVE 修复，纯上行。 -->
-        <spring-boot.version>2.7.18</spring-boot.version>
-    </properties>
-
     <dependencies>
+        <!-- 四件的 version 都不写：z-graph-bolt-server 由仓根 DM 钉 ${project.version}；
+             slf4j-api 由仓根 DM 的**直接**条目压住本仓的 2.0.13（地板那侧是 spring-boot 的 1.7.36，
+             继承来的直接条目会顶掉 import，所以必须写直接条目）；
+             spring-boot 两件由地板 z-boot-dependencies 的 spring-boot.version=2.7.18 下发，
+             与本仓迁移前面值同一格。 -->
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-graph-bolt-server</artifactId>
-            <version>1.0.7</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
@@ -68,14 +65,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-autoconfigure</artifactId>
-            <version>${spring-boot.version}</version>
             <optional>true</optional>
         </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
-            <version>${spring-boot.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
