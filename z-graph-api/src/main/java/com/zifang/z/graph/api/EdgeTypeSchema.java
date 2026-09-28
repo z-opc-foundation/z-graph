@@ -19,11 +19,11 @@ public class EdgeTypeSchema {
                 throw new IllegalArgumentException("Duplicate field on edge type " + name + ": " + field.getName());
             }
         }
-        this.fields = List.copyOf(fields);
+        this.fields = Colls.copyOfList(fields);
     }
 
     public EdgeTypeSchema(String name) {
-        this(name, List.of());
+        this(name, Colls.listOf());
     }
 
     public String getName() { return name; }
@@ -51,7 +51,7 @@ public class EdgeTypeSchema {
     }
 
     public void validate(Map<String, Object> properties) {
-        if (properties == null) properties = Map.of();
+        if (properties == null) properties = Colls.mapOf();
         for (Map.Entry<String, Object> entry : properties.entrySet()) {
             String key = entry.getKey();
             TagSchema.Field field = getField(key);
@@ -83,15 +83,25 @@ public class EdgeTypeSchema {
     }
 
     private static boolean typeMatches(Object value, TagSchema.DataType expected) {
-        return switch (expected) {
-            case STRING -> value instanceof String;
-            case INT -> value instanceof Integer;
-            case BIGINT -> value instanceof Integer || value instanceof Long;
-            case DOUBLE -> value instanceof Number;
-            case BOOL -> value instanceof Boolean;
-            case NULL -> value == null;
-            case DATE, DATETIME -> value instanceof String || value instanceof java.util.Date;
-        };
+        switch (expected) {
+            case STRING:
+                return value instanceof String;
+            case INT:
+                return value instanceof Integer;
+            case BIGINT:
+                return value instanceof Integer || value instanceof Long;
+            case DOUBLE:
+                return value instanceof Number;
+            case BOOL:
+                return value instanceof Boolean;
+            case NULL:
+                return value == null;
+            case DATE:
+            case DATETIME:
+                return value instanceof String || value instanceof java.util.Date;
+            default:
+                throw new IllegalArgumentException("Unsupported data type: " + expected);
+        }
     }
 
     @Override

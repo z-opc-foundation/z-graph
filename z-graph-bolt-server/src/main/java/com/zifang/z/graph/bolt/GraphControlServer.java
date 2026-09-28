@@ -4,7 +4,9 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import com.zifang.z.graph.api.GraphCommit;
+import com.zifang.z.graph.api.GraphStore;
 import com.zifang.z.graph.core.CypherEngine;
+import com.zifang.z.graph.core.GraphCheckout;
 import com.zifang.z.graph.core.GraphMetaService;
 import com.zifang.z.graph.core.GraphQueryService;
 import com.zifang.z.graph.core.GraphVersionStore;
@@ -15,6 +17,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -29,6 +32,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPOutputStream;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 本地 Graphd 控制面服务骨架。
@@ -56,6 +60,8 @@ public final class GraphControlServer {
     private final AtomicInteger authFailures = new AtomicInteger();
     // 请求日志环形缓冲（最近 500 条）
     private static final int LOG_BUFFER_SIZE = 500;
+    /** Java 8 只有 URLDecoder.decode(String, String)，编码名常量保持与 StandardCharsets.UTF_8 同源。 */
+    private static final String UTF_8 = StandardCharsets.UTF_8.name();
     private final Map<String, Object>[] logBuffer = new LinkedHashMap[LOG_BUFFER_SIZE];
     private final AtomicInteger logIndex = new AtomicInteger();
 
@@ -96,7 +102,7 @@ public final class GraphControlServer {
 
             // 生成或复用 X-Request-ID
             String requestId = exchange.getRequestHeaders().getFirst("X-Request-ID");
-            if (requestId == null || requestId.isBlank()) {
+            if (requestId == null || requestId.trim().isEmpty()) {
                 requestId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
             }
             final String reqId = requestId;
@@ -125,7 +131,7 @@ public final class GraphControlServer {
                 if (!apiToken.equals(provided)) {
                     authFailures.incrementAndGet();
                     logAccess(method, path, query, clientIp, 401, 0, reqId);
-                    writeJson(exchange, 401, Map.of("error", "Unauthorized: invalid or missing API token"));
+                    writeJson(exchange, 401, Colls.mapOf("error", "Unauthorized: invalid or missing API token"));
                     return;
                 }
             }
@@ -143,7 +149,7 @@ public final class GraphControlServer {
                     rateLimitedRequests.incrementAndGet();
                     logAccess(method, path, query, clientIp, 429, 0, reqId);
                     exchange.getResponseHeaders().set("Retry-After", "60");
-                    writeJson(exchange, 429, Map.of(
+                    writeJson(exchange, 429, Colls.mapOf(
                             "error", "Rate limit exceeded",
                             "limit", rateLimit,
                             "retryAfterSeconds", 60));
@@ -157,7 +163,7 @@ public final class GraphControlServer {
                 errorResponses.incrementAndGet();
                 logError(method, path, clientIp, 500, System.currentTimeMillis() - start, e);
                 try {
-                    writeJson(exchange, 500, Map.of("error", "Internal server error"));
+                    writeJson(exchange, 500, Colls.mapOf("error", "Internal server error"));
                 } catch (Exception ignored) { }
                 return;
             }
@@ -211,7 +217,7 @@ public final class GraphControlServer {
     private static String[] allowedOrigins() {
         String raw = System.getProperty("z.graph.cors.allowedOrigins",
                 System.getenv().getOrDefault("Z_GRAPH_CORS_ALLOWED_ORIGINS", "*"));
-        if (raw == null || raw.isBlank()) return new String[]{"*"};
+        if (raw == null || raw.trim().isEmpty()) return new String[]{"*"};
         return java.util.Arrays.stream(raw.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
@@ -238,7 +244,7 @@ public final class GraphControlServer {
             exchange.sendResponseHeaders(204, -1);
             exchange.getResponseBody().close();
         } else {
-            writeJson(exchange, 405, Map.of("error", "Method not allowed"));
+            writeJson(exchange, 405, Colls.mapOf("error", "Method not allowed"));
         }
     }
 
@@ -368,7 +374,7 @@ public final class GraphControlServer {
     }
 
     private static int parseIntOrDefault(String s, int def) {
-        if (s == null || s.isBlank()) return def;
+        if (s == null || s.trim().isEmpty()) return def;
         try { return Integer.parseInt(s); } catch (NumberFormatException e) { return def; }
     }
 
@@ -403,15 +409,15 @@ public final class GraphControlServer {
         Map<String, String> params = queryParameters(exchange.getRequestURI());
         String branch = params.getOrDefault("branch", "main");
         try {
-            var graphCheckout = repository.checkoutBranch(branch);
-            var store = graphCheckout.getStore();
+            GraphCheckout graphCheckout = repository.checkoutBranch(branch);
+            GraphStore store = graphCheckout.getStore();
             // 用 SHOW TAGS / SHOW EDGES 查询 schema
             List<Map<String, Object>> tags = new CypherEngine(store, repository)
-                    .execute("SHOW TAGS", Map.of());
+                    .execute("SHOW TAGS", Colls.mapOf());
             List<Map<String, Object>> edges = new CypherEngine(store, repository)
-                    .execute("SHOW EDGES", Map.of());
+                    .execute("SHOW EDGES", Colls.mapOf());
             List<Map<String, Object>> indexes = new CypherEngine(store, repository)
-                    .execute("SHOW INDEXES", Map.of());
+                    .execute("SHOW INDEXES", Colls.mapOf());
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("branch", branch);
             result.put("tags", tags);
@@ -419,7 +425,7 @@ public final class GraphControlServer {
             result.put("indexes", indexes);
             writeJson(exchange, 200, result);
         } catch (Exception e) {
-            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
     }
 
@@ -431,10 +437,10 @@ public final class GraphControlServer {
         Map<String, String> params = queryParameters(exchange.getRequestURI());
         String branch = params.getOrDefault("branch", "main");
         try {
-            var graphCheckout = repository.checkoutBranch(branch);
-            var store = graphCheckout.getStore();
+            GraphCheckout graphCheckout = repository.checkoutBranch(branch);
+            GraphStore store = graphCheckout.getStore();
             List<Map<String, Object>> stats = new CypherEngine(store, repository)
-                    .execute("CALL db.stats()", Map.of());
+                    .execute("CALL db.stats()", Colls.mapOf());
             GraphCommit head = metaService.head(branch);
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("branch", branch);
@@ -444,7 +450,7 @@ public final class GraphControlServer {
             result.put("stats", stats);
             writeJson(exchange, 200, result);
         } catch (Exception e) {
-            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
     }
 
@@ -456,7 +462,7 @@ public final class GraphControlServer {
     private void handleExplain(HttpExchange exchange) throws IOException {
         applyCorsHeaders(exchange);
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            writeJson(exchange, 405, Map.of("error", "POST required"));
+            writeJson(exchange, 405, Colls.mapOf("error", "POST required"));
             return;
         }
         try {
@@ -465,8 +471,8 @@ public final class GraphControlServer {
             String cypher = json.get("cypher");
             String branch = json.getOrDefault("branch", "main");
 
-            if (cypher == null || cypher.isBlank()) {
-                writeJson(exchange, 400, Map.of("error", "Missing 'cypher'"));
+            if (cypher == null || cypher.trim().isEmpty()) {
+                writeJson(exchange, 400, Colls.mapOf("error", "Missing 'cypher'"));
                 return;
             }
 
@@ -477,51 +483,51 @@ public final class GraphControlServer {
 
             // 解析查询类型
             if (upper.startsWith("MATCH")) {
-                steps.add(Map.of("operation", "Scan", "description", "遍历节点和边"));
+                steps.add(Colls.mapOf("operation", "Scan", "description", "遍历节点和边"));
                 if (upper.contains(" WHERE ")) {
-                    steps.add(Map.of("operation", "Filter", "description", "过滤不满足条件的记录"));
+                    steps.add(Colls.mapOf("operation", "Filter", "description", "过滤不满足条件的记录"));
                 }
                 if (upper.contains(" ORDER BY")) {
-                    steps.add(Map.of("operation", "Sort", "description", "排序结果"));
+                    steps.add(Colls.mapOf("operation", "Sort", "description", "排序结果"));
                 }
                 if (upper.contains(" LIMIT ")) {
-                    steps.add(Map.of("operation", "Limit", "description", "限制返回数量"));
+                    steps.add(Colls.mapOf("operation", "Limit", "description", "限制返回数量"));
                 }
                 if (upper.contains(" SKIP ")) {
-                    steps.add(Map.of("operation", "Skip", "description", "跳过前 N 条记录"));
+                    steps.add(Colls.mapOf("operation", "Skip", "description", "跳过前 N 条记录"));
                 }
                 if (upper.contains(" DISTINCT")) {
-                    steps.add(Map.of("operation", "Distinct", "description", "去重"));
+                    steps.add(Colls.mapOf("operation", "Distinct", "description", "去重"));
                 }
-                steps.add(Map.of("operation", "Project", "description", "投影返回字段"));
+                steps.add(Colls.mapOf("operation", "Project", "description", "投影返回字段"));
             } else if (upper.startsWith("CREATE")) {
-                steps.add(Map.of("operation", "CreateNodes", "description", "创建新节点"));
+                steps.add(Colls.mapOf("operation", "CreateNodes", "description", "创建新节点"));
                 if (upper.contains(")-[") || upper.contains("]<-")) {
-                    steps.add(Map.of("operation", "CreateEdges", "description", "创建新边"));
+                    steps.add(Colls.mapOf("operation", "CreateEdges", "description", "创建新边"));
                 }
-                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+                steps.add(Colls.mapOf("operation", "Commit", "description", "提交事务"));
             } else if (upper.startsWith("MERGE")) {
-                steps.add(Map.of("operation", "MatchOrCreate", "description", "查找匹配或创建新节点"));
-                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+                steps.add(Colls.mapOf("operation", "MatchOrCreate", "description", "查找匹配或创建新节点"));
+                steps.add(Colls.mapOf("operation", "Commit", "description", "提交事务"));
             } else if (upper.startsWith("DELETE") || upper.startsWith("DETACH DELETE")) {
-                steps.add(Map.of("operation", "Scan", "description", "查找目标节点/边"));
+                steps.add(Colls.mapOf("operation", "Scan", "description", "查找目标节点/边"));
                 if (upper.startsWith("DETACH")) {
-                    steps.add(Map.of("operation", "DetachEdges", "description", "删除关联边"));
+                    steps.add(Colls.mapOf("operation", "DetachEdges", "description", "删除关联边"));
                 }
-                steps.add(Map.of("operation", "DeleteNodes", "description", "删除节点"));
-                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+                steps.add(Colls.mapOf("operation", "DeleteNodes", "description", "删除节点"));
+                steps.add(Colls.mapOf("operation", "Commit", "description", "提交事务"));
             } else if (upper.startsWith("MATCH") && upper.contains(" SET ")) {
-                steps.add(Map.of("operation", "Scan", "description", "查找匹配的节点/边"));
-                steps.add(Map.of("operation", "Update", "description", "更新属性"));
-                steps.add(Map.of("operation", "Commit", "description", "提交事务"));
+                steps.add(Colls.mapOf("operation", "Scan", "description", "查找匹配的节点/边"));
+                steps.add(Colls.mapOf("operation", "Update", "description", "更新属性"));
+                steps.add(Colls.mapOf("operation", "Commit", "description", "提交事务"));
             } else if (upper.startsWith("SHOW")) {
-                steps.add(Map.of("operation", "SchemaLookup", "description", "查询 Schema 元数据"));
+                steps.add(Colls.mapOf("operation", "SchemaLookup", "description", "查询 Schema 元数据"));
             } else if (upper.startsWith("CALL")) {
-                steps.add(Map.of("operation", "ProcedureCall", "description", "调用内置过程"));
+                steps.add(Colls.mapOf("operation", "ProcedureCall", "description", "调用内置过程"));
             } else if (upper.startsWith("EXPLAIN") || upper.startsWith("PROFILE")) {
-                steps.add(Map.of("operation", "ExplainQuery", "description", "解析并返回执行计划"));
+                steps.add(Colls.mapOf("operation", "ExplainQuery", "description", "解析并返回执行计划"));
             } else {
-                steps.add(Map.of("operation", "Unknown", "description", "未知查询类型"));
+                steps.add(Colls.mapOf("operation", "Unknown", "description", "未知查询类型"));
             }
 
             plan.put("queryType", detectQueryType(upper));
@@ -537,7 +543,7 @@ public final class GraphControlServer {
             applyCorsHeaders(exchange);
             writeJson(exchange, 200, result);
         } catch (Exception e) {
-            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
     }
 
@@ -575,7 +581,7 @@ public final class GraphControlServer {
     private void handleBatch(HttpExchange exchange) throws IOException {
         applyCorsHeaders(exchange);
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            writeJson(exchange, 405, Map.of("error", "POST required"));
+            writeJson(exchange, 405, Colls.mapOf("error", "POST required"));
             return;
         }
         long start = System.currentTimeMillis();
@@ -589,8 +595,8 @@ public final class GraphControlServer {
             for (Map<String, String> stmt : statements) {
                 String cypher = stmt.get("cypher");
                 String branch = stmt.getOrDefault("branch", defaultBranch);
-                if (cypher == null || cypher.isBlank()) {
-                    results.add(Map.of("error", "Missing 'cypher'"));
+                if (cypher == null || cypher.trim().isEmpty()) {
+                    results.add(Colls.mapOf("error", "Missing 'cypher'"));
                     continue;
                 }
                 try {
@@ -601,24 +607,24 @@ public final class GraphControlServer {
                     if (mutating) {
                         GraphWriteTransaction tx = queryService.beginWrite(branch);
                         List<Map<String, Object>> rows = new CypherEngine(tx, repository)
-                                .execute(cypher, Map.of());
+                                .execute(cypher, Colls.mapOf());
                         tx.commit("batch", "Batch: " + cypher.substring(0, Math.min(cypher.length(), 60)));
-                        results.add(Map.of("rows", rows, "statementIndex", statements.indexOf(stmt)));
+                        results.add(Colls.mapOf("rows", rows, "statementIndex", statements.indexOf(stmt)));
                     } else {
-                        var graphCheckout = repository.checkoutBranch(branch);
+                        GraphCheckout graphCheckout = repository.checkoutBranch(branch);
                         List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
-                                .execute(cypher, Map.of());
-                        results.add(Map.of("rows", rows, "statementIndex", statements.indexOf(stmt)));
+                                .execute(cypher, Colls.mapOf());
+                        results.add(Colls.mapOf("rows", rows, "statementIndex", statements.indexOf(stmt)));
                     }
                 } catch (Exception e) {
-                    results.add(Map.of("error", e.getMessage(), "statementIndex", statements.indexOf(stmt)));
+                    results.add(Colls.mapOf("error", e.getMessage(), "statementIndex", statements.indexOf(stmt)));
                 }
             }
             long elapsed = System.currentTimeMillis() - start;
             exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
-            writeJson(exchange, 200, Map.of("results", results, "elapsedMs", elapsed));
+            writeJson(exchange, 200, Colls.mapOf("results", results, "elapsedMs", elapsed));
         } catch (Exception e) {
-            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
     }
 
@@ -630,26 +636,26 @@ public final class GraphControlServer {
         Map<String, String> params = queryParameters(exchange.getRequestURI());
         String branch = params.getOrDefault("branch", "main");
         try {
-            var graphCheckout = repository.checkoutBranch(branch);
-            var store = graphCheckout.getStore();
+            GraphCheckout graphCheckout = repository.checkoutBranch(branch);
+            GraphStore store = graphCheckout.getStore();
             List<Map<String, Object>> nodes = new CypherEngine(store, repository)
-                    .execute("MATCH (n) RETURN n", Map.of());
+                    .execute("MATCH (n) RETURN n", Colls.mapOf());
             // 获取所有边类型,逐个查询
             List<Map<String, Object>> edges = new ArrayList<>();
             List<Map<String, Object>> edgeTypes = new CypherEngine(store, repository)
-                    .execute("SHOW EDGES", Map.of());
+                    .execute("SHOW EDGES", Colls.mapOf());
             for (Map<String, Object> et : edgeTypes) {
                 String typeName = String.valueOf(et.getOrDefault("Name", et.getOrDefault("name", "")));
                 if (!typeName.isEmpty()) {
                     try {
                         List<Map<String, Object>> typeEdges = new CypherEngine(store, repository)
-                                .execute("MATCH (a)-[r:" + typeName + "]->(b) RETURN r", Map.of());
+                                .execute("MATCH (a)-[r:" + typeName + "]->(b) RETURN r", Colls.mapOf());
                         edges.addAll(typeEdges);
                     } catch (Exception ignored) { }
                 }
             }
             List<Map<String, Object>> tags = new CypherEngine(store, repository)
-                    .execute("SHOW TAGS", Map.of());
+                    .execute("SHOW TAGS", Colls.mapOf());
             GraphCommit head = metaService.head(branch);
 
             Map<String, Object> export = new LinkedHashMap<>();
@@ -658,7 +664,7 @@ public final class GraphControlServer {
             export.put("head", head.getId());
             export.put("nodeCount", head.getNodeCount());
             export.put("edgeCount", head.getEdgeCount());
-            export.put("schema", Map.of("tags", tags, "edgeTypes", edgeTypes));
+            export.put("schema", Colls.mapOf("tags", tags, "edgeTypes", edgeTypes));
             export.put("nodes", nodes);
             export.put("edges", edges);
             export.put("exportedAt", System.currentTimeMillis());
@@ -668,7 +674,7 @@ public final class GraphControlServer {
                     "attachment; filename=\"z-graph-export-" + branch + ".json\"");
             writeJson(exchange, 200, export);
         } catch (Exception e) {
-            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
     }
 
@@ -679,7 +685,7 @@ public final class GraphControlServer {
     private void handleImport(HttpExchange exchange) throws IOException {
         applyCorsHeaders(exchange);
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            writeJson(exchange, 405, Map.of("error", "POST required"));
+            writeJson(exchange, 405, Colls.mapOf("error", "POST required"));
             return;
         }
         long start = System.currentTimeMillis();
@@ -693,12 +699,12 @@ public final class GraphControlServer {
             String edgesJson = json.get("edges");
 
             int imported = 0;
-            if (nodesJson != null && !nodesJson.isBlank()) {
+            if (nodesJson != null && !nodesJson.trim().isEmpty()) {
                 // 解析节点数组并生成 CREATE 语句
                 List<String> nodeStatements = parseNodeImportStatements(nodesJson);
                 for (String stmt : nodeStatements) {
                     GraphWriteTransaction tx = queryService.beginWrite(branch);
-                    new CypherEngine(tx, repository).execute(stmt, Map.of());
+                    new CypherEngine(tx, repository).execute(stmt, Colls.mapOf());
                     tx.commit("import", "Import node");
                     imported++;
                 }
@@ -706,12 +712,12 @@ public final class GraphControlServer {
 
             long elapsed = System.currentTimeMillis() - start;
             exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
-            writeJson(exchange, 200, Map.of(
+            writeJson(exchange, 200, Colls.mapOf(
                     "imported", imported,
                     "branch", branch,
                     "elapsedMs", elapsed));
         } catch (Exception e) {
-            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
     }
 
@@ -735,8 +741,8 @@ public final class GraphControlServer {
             commit = parameters.get("commit");
         }
 
-        if (cypher == null || cypher.isBlank()) {
-            writeJson(exchange, 400, Map.of("error", "Missing 'cypher' in request"));
+        if (cypher == null || cypher.trim().isEmpty()) {
+            writeJson(exchange, 400, Colls.mapOf("error", "Missing 'cypher' in request"));
             return;
         }
 
@@ -751,42 +757,42 @@ public final class GraphControlServer {
                 // 写查询:通过 BEGIN+RUN+COMMIT 在独立事务提交,避免阻塞读请求
                 GraphWriteTransaction tx = queryService.beginWrite(branch);
                 List<Map<String, Object>> rows = new CypherEngine(tx, repository)
-                        .execute(cypher, Map.of());
+                        .execute(cypher, Colls.mapOf());
                 tx.commit("http", "HTTP query: " + cypher.substring(0, Math.min(cypher.length(), 80)));
                 long elapsed = System.currentTimeMillis() - start;
                 exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
                 writeJson(exchange, 200, rows);
             } else if (commit != null) {
-                var graphCheckout = repository.checkout(commit);
+                GraphCheckout graphCheckout = repository.checkout(commit);
                 List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
-                        .execute(cypher, Map.of());
+                        .execute(cypher, Colls.mapOf());
                 long elapsed = System.currentTimeMillis() - start;
                 exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
                 writeJson(exchange, 200, rows);
             } else {
-                var graphCheckout = repository.checkoutBranch(branch);
+                GraphCheckout graphCheckout = repository.checkoutBranch(branch);
                 List<Map<String, Object>> rows = new CypherEngine(graphCheckout.getStore(), repository)
-                        .execute(cypher, Map.of());
+                        .execute(cypher, Colls.mapOf());
                 long elapsed = System.currentTimeMillis() - start;
                 exchange.getResponseHeaders().set("X-Response-Time", elapsed + "ms");
                 writeJson(exchange, 200, rows);
             }
         } catch (IllegalStateException conflict) {
-            writeJson(exchange, 409, Map.of("error", "Stale head: " + conflict.getMessage()));
+            writeJson(exchange, 409, Colls.mapOf("error", "Stale head: " + conflict.getMessage()));
         } catch (Exception e) {
-            writeJson(exchange, statusFor(e), Map.of("error", e.getMessage()));
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
     }
 
-    private static Map<String, String> queryParameters(URI uri) {
+    private static Map<String, String> queryParameters(URI uri) throws UnsupportedEncodingException {
         Map<String, String> result = new LinkedHashMap<>();
         String rawQuery = uri.getRawQuery();
         if (rawQuery == null || rawQuery.isEmpty()) return result;
         for (String pair : rawQuery.split("&")) {
             int separator = pair.indexOf('=');
             if (separator <= 0) continue;
-            String key = URLDecoder.decode(pair.substring(0, separator), StandardCharsets.UTF_8);
-            String value = URLDecoder.decode(pair.substring(separator + 1), StandardCharsets.UTF_8);
+            String key = URLDecoder.decode(pair.substring(0, separator), UTF_8);
+            String value = URLDecoder.decode(pair.substring(separator + 1), UTF_8);
             result.put(key, value);
         }
         return result;
@@ -818,12 +824,12 @@ public final class GraphControlServer {
             }
             byte[] compressed = baos.toByteArray();
             exchange.sendResponseHeaders(status, compressed.length);
-            try (var output = exchange.getResponseBody()) {
+            try (OutputStream output = exchange.getResponseBody()) {
                 output.write(compressed);
             }
         } else {
             exchange.sendResponseHeaders(status, raw.length);
-            try (var output = exchange.getResponseBody()) {
+            try (OutputStream output = exchange.getResponseBody()) {
                 output.write(raw);
             }
         }
@@ -835,12 +841,14 @@ public final class GraphControlServer {
             return "\"" + escape(String.valueOf(value)) + "\"";
         }
         if (value instanceof Number || value instanceof Boolean) return value.toString();
-        if (value instanceof Map<?, ?> map) {
+        if (value instanceof Map<?, ?>) {
+            Map<?, ?> map = (Map<?, ?>) value;
             return map.entrySet().stream()
                     .map(entry -> toJson(String.valueOf(entry.getKey())) + ":" + toJson(entry.getValue()))
                     .collect(java.util.stream.Collectors.joining(",", "{", "}"));
         }
-        if (value instanceof Collection<?> collection) {
+        if (value instanceof Collection<?>) {
+            Collection<?> collection = (Collection<?>) value;
             return collection.stream().map(GraphControlServer::toJson)
                     .collect(java.util.stream.Collectors.joining(",", "[", "]"));
         }
@@ -870,9 +878,9 @@ public final class GraphControlServer {
     /** 从简单 JSON 字符串中提取 key-value（支持嵌套引号内的逗号）。 */
     private static Map<String, String> parseJsonStringMap(String json) {
         Map<String, String> result = new LinkedHashMap<>();
-        if (json == null || json.isBlank()) return result;
+        if (json == null || json.trim().isEmpty()) return result;
         // 状态机解析:跳过引号内的逗号
-        String trimmed = json.strip();
+        String trimmed = json.trim();
         if (trimmed.startsWith("{")) trimmed = trimmed.substring(1);
         if (trimmed.endsWith("}")) trimmed = trimmed.substring(0, trimmed.length() - 1);
 
@@ -926,8 +934,8 @@ public final class GraphControlServer {
      */
     private static List<Map<String, String>> parseStatementsArray(String json) {
         List<Map<String, String>> result = new ArrayList<>();
-        if (json == null || json.isBlank()) return result;
-        String trimmed = json.strip();
+        if (json == null || json.trim().isEmpty()) return result;
+        String trimmed = json.trim();
         // 找到 "statements" 键后面的数组
         int idx = trimmed.indexOf("\"statements\"");
         if (idx < 0) {
@@ -962,8 +970,8 @@ public final class GraphControlServer {
      */
     private static List<String> parseNodeImportStatements(String nodesJson) {
         List<String> statements = new ArrayList<>();
-        if (nodesJson == null || nodesJson.isBlank()) return statements;
-        String trimmed = nodesJson.strip();
+        if (nodesJson == null || nodesJson.trim().isEmpty()) return statements;
+        String trimmed = nodesJson.trim();
         if (trimmed.startsWith("[")) trimmed = trimmed.substring(1);
         if (trimmed.endsWith("]")) trimmed = trimmed.substring(0, trimmed.length() - 1);
 
@@ -983,11 +991,11 @@ public final class GraphControlServer {
         for (String nodeObj : nodeObjs) {
             Map<String, String> props = parseJsonStringMap(nodeObj);
             String label = props.remove("label");
-            if (label == null || label.isBlank()) label = "Node";
+            if (label == null || label.trim().isEmpty()) label = "Node";
             StringBuilder sb = new StringBuilder("CREATE (n:");
             sb.append(label).append(" {");
             boolean first = true;
-            for (var entry : props.entrySet()) {
+            for (Map.Entry<String, String> entry : props.entrySet()) {
                 if (!first) sb.append(", ");
                 sb.append(entry.getKey()).append(": ");
                 String val = entry.getValue();

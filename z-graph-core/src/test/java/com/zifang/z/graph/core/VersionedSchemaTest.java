@@ -11,6 +11,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 覆盖：
@@ -31,9 +32,9 @@ class VersionedSchemaTest {
     void schemasTravelThroughCommitAndBranch() {
         GraphVersionStore repository = new GraphVersionStore(dataDir);
         GraphWriteTransaction tx = repository.beginWrite("main");
-        tx.createTag(new TagSchema("Person", List.of(
+        tx.createTag(new TagSchema("Person", Colls.listOf(
                 new TagSchema.Field("name", TagSchema.DataType.STRING, false))));
-        tx.addNode("Person", Map.of("name", "Alice"));
+        tx.addNode("Person", Colls.mapOf("name", "Alice"));
         GraphCommit first = tx.commit("alice", "init schema");
 
         // 在 main 上查看 schema
@@ -44,9 +45,9 @@ class VersionedSchemaTest {
         // 从 first 切出 feature 分支，再添加 EdgeType schema
         repository.createBranch("feature", first.getId());
         GraphWriteTransaction feature = repository.beginWrite("feature");
-        feature.createEdgeType(new EdgeTypeSchema("KNOWS", List.of(
+        feature.createEdgeType(new EdgeTypeSchema("KNOWS", Colls.listOf(
                 new TagSchema.Field("since", TagSchema.DataType.INT))));
-        feature.addEdge("KNOWS", 0L, 0L, Map.of("since", 2020));
+        feature.addEdge("KNOWS", 0L, 0L, Colls.mapOf("since", 2020));
         GraphCommit second = feature.commit("bob", "extend schema");
 
         // feature 分支上的快照同时包含 tag 和 edgeType schema
@@ -64,9 +65,9 @@ class VersionedSchemaTest {
     void schemasSurviveRepositoryReload() throws Exception {
         GraphVersionStore repository = new GraphVersionStore(dataDir);
         GraphWriteTransaction tx = repository.beginWrite("main");
-        tx.createTag(new TagSchema("Person", List.of(
+        tx.createTag(new TagSchema("Person", Colls.listOf(
                 new TagSchema.Field("name", TagSchema.DataType.STRING, false))));
-        tx.addNode("Person", Map.of("name", "Alice"));
+        tx.addNode("Person", Colls.mapOf("name", "Alice"));
         GraphCommit first = tx.commit("alice", "init");
 
         // 重新打开仓库，验证 schema 恢复
@@ -78,7 +79,7 @@ class VersionedSchemaTest {
         // 写入 schema 不一致的节点需要从新事务上发起：checkOut 不可写
         assertThrows(TagSchema.SchemaViolationException.class, () -> {
             GraphWriteTransaction tx2 = reloaded.beginWrite("main");
-            tx2.addNode("Person", Map.of("name", "Bob", "extra", 1));
+            tx2.addNode("Person", Colls.mapOf("name", "Bob", "extra", 1));
         });
     }
 
@@ -96,7 +97,7 @@ class VersionedSchemaTest {
             futures.add(executor.submit(() -> {
                 try {
                     GraphWriteTransaction tx = repository.beginWrite("main");
-                    tx.addNode("Person", Map.of("name", "T" + threadIdx));
+                    tx.addNode("Person", Colls.mapOf("name", "T" + threadIdx));
                     tx.commit("user-" + threadIdx, "concurrent #" + threadIdx);
                     successCount.incrementAndGet();
                 } catch (GraphVersionStore.StaleHeadException expected) {

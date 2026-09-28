@@ -5,8 +5,10 @@ import org.junit.jupiter.api.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 覆盖 EXPLAIN / DESCRIBE / SHOW STATS / CREATE EDGE INDEX / EXISTS 子查询。
@@ -69,7 +71,7 @@ class ExplainAndDescribeTest {
         Map<String, Object> agg = plan.stream()
                 .filter(p -> "Aggregate".equals(p.get("Operator")))
                 .findFirst()
-                .orElseThrow();
+                .orElseThrow(() -> new NoSuchElementException());
         assertTrue(agg.get("Detail").toString().contains("cnt"));
         assertTrue(agg.get("Detail").toString().contains("city"));
     }
@@ -94,8 +96,8 @@ class ExplainAndDescribeTest {
 
     @Test
     void showStatsReportsGraphMetrics() {
-        store.addNode("Person", Map.of("name", "Alice"));
-        store.addNode("Person", Map.of("name", "Bob"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Bob"));
         List<Map<String, Object>> rows = engine.execute("SHOW STATS");
         assertEquals(1, rows.size());
         Map<String, Object> stats = rows.get(0);
@@ -118,7 +120,7 @@ class ExplainAndDescribeTest {
         Map<String, Object> edgeIndex = rows.stream()
                 .filter(r -> "KNOWS".equals(r.get("On")) && "since".equals(r.get("Property")))
                 .findFirst()
-                .orElseThrow();
+                .orElseThrow(() -> new NoSuchElementException());
         assertEquals("EDGE", edgeIndex.get("Kind"));
     }
 
@@ -133,9 +135,9 @@ class ExplainAndDescribeTest {
 
     @Test
     void existsOutgoingEdgeFilters() {
-        Node alice = store.addNode("Person", Map.of("name", "Alice"));
-        Node bob = store.addNode("Person", Map.of("name", "Bob"));
-        store.addEdge("KNOWS", alice.getId(), bob.getId(), Map.of());
+        Node alice = store.addNode("Person", Colls.mapOf("name", "Alice"));
+        Node bob = store.addNode("Person", Colls.mapOf("name", "Bob"));
+        store.addEdge("KNOWS", alice.getId(), bob.getId(), Colls.mapOf());
 
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) WHERE EXISTS { (n)-[]->() } RETURN n.name AS name");
@@ -145,7 +147,7 @@ class ExplainAndDescribeTest {
 
     @Test
     void existsReturnsFalseWhenNoEdges() {
-        store.addNode("Person", Map.of("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) WHERE EXISTS { (n)-[]->() } RETURN n.name AS name");
         assertTrue(rows.isEmpty());
@@ -153,8 +155,8 @@ class ExplainAndDescribeTest {
 
     @Test
     void notExistsInvertsSemantics() {
-        store.addNode("Person", Map.of("name", "Alice"));
-        store.addNode("Person", Map.of("name", "Bob"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Bob"));
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) WHERE NOT EXISTS { (n)-[]->() } RETURN n.name AS name");
         assertEquals(2, rows.size());

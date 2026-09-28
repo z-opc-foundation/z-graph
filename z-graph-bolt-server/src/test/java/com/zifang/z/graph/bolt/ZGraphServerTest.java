@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * ZGraphServer 联合启动测试:在随机端口同时拉起 Bolt + HTTP 控制面,
@@ -19,7 +20,7 @@ class ZGraphServerTest {
     void zGraphServerStartsBoltAndControlPlaneTogether() throws Exception {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction tx = repository.beginWrite("main");
-        tx.addNode("Person", Map.of("name", "Alice", "age", 30));
+        tx.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
         tx.commit("seed", "seed");
 
         int controlPort = pickFreePort();
@@ -36,8 +37,17 @@ class ZGraphServerTest {
             java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
             assertEquals(200, conn.getResponseCode());
-            String body = new String(conn.getInputStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8);
+            String body;
+            try (java.io.InputStream stream = conn.getInputStream()) {
+                java.io.ByteArrayOutputStream captured = new java.io.ByteArrayOutputStream();
+                byte[] chunk = new byte[4096];
+                int read;
+                while ((read = stream.read(chunk)) != -1) {
+                    captured.write(chunk, 0, read);
+                }
+                body = new String(captured.toByteArray(),
+                        java.nio.charset.StandardCharsets.UTF_8);
+            }
             assertNotNull(body);
             assertEquals(1, repository.checkoutBranch("main").getStore().getNodeCount());
         } finally {

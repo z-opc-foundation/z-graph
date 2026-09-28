@@ -17,7 +17,7 @@ public final class GraphMergeResult {
         this.merged = merged;
         this.baseCommitId = baseCommitId;
         this.commit = commit;
-        this.conflicts = List.copyOf(conflicts == null ? List.of() : conflicts);
+        this.conflicts = Colls.copyOfList(conflicts == null ? Colls.listOf() : conflicts);
     }
 
     public boolean isMerged() {

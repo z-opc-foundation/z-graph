@@ -2,7 +2,7 @@ package com.zifang.z.graph.bolt;
 
 import com.zifang.z.graph.core.GraphVersionStore;
 
-import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /** 独立启动 Meta/Query HTTP 控制面，默认监听 8090。 */
 public final class GraphControlServerMain {
@@ -15,7 +15,7 @@ public final class GraphControlServerMain {
         String dataDirectory = System.getProperty("z.graph.dataDir");
         GraphVersionStore repository = dataDirectory == null
                 ? new GraphVersionStore()
-                : new GraphVersionStore(Path.of(dataDirectory));
+                : new GraphVersionStore(Paths.get(dataDirectory));
         GraphControlServer server = new GraphControlServer(port, repository);
         server.start();
         Runtime.getRuntime().addShutdownHook(new Thread(server::stop));

@@ -12,7 +12,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 
 import java.io.IOException;
-import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /**
  * z-graph 的 Spring Boot 自动装配：一个 {@link GraphVersionStore} + 内嵌 HTTP 控制面
@@ -37,16 +37,16 @@ public class ZGraphAutoConfiguration {
     @ConditionalOnMissingBean
     public GraphVersionStore graphVersionStore(ZGraphProperties props) {
         String dataDir = props.getDataDir();
-        GraphVersionStore store = dataDir == null || dataDir.isBlank()
+        GraphVersionStore store = dataDir == null || dataDir.trim().isEmpty()
                 ? new GraphVersionStore()
-                : new GraphVersionStore(Path.of(dataDir));
+                : new GraphVersionStore(Paths.get(dataDir));
         store.withCheckpointInterval(props.getCheckpointInterval())
                 .withMaxRetainedViews(props.getMaxRetainedViews())
                 .withRetainedWholeGraphViews(props.getRetainedWholeGraphViews())
                 .withViewLayerLimit(props.getViewLayerLimit());
         log.info("z-graph 版本仓库就绪: dataDir={}, checkpointInterval={}, maxRetainedViews={}, "
                         + "retainedWholeGraphViews={}, viewLayerLimit={}",
-                dataDir == null || dataDir.isBlank() ? "(in-memory)" : dataDir,
+                dataDir == null || dataDir.trim().isEmpty() ? "(in-memory)" : dataDir,
                 props.getCheckpointInterval(), props.getMaxRetainedViews(),
                 props.getRetainedWholeGraphViews(), props.getViewLayerLimit());
         return store;

@@ -1,7 +1,9 @@
 package com.zifang.z.graph.starter.autoconfigure;
 
+import com.zifang.z.graph.api.Colls;
 import com.zifang.z.graph.bolt.GraphControlServer;
 import com.zifang.z.graph.core.GraphVersionStore;
+import com.zifang.z.graph.core.GraphWriteTransaction;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -10,11 +12,12 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.context.ConfigurableApplicationContext;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,22 +48,17 @@ class ZGraphStarterBootstrapTest {
             int port = server.port();
             assertTrue(port > 0, "自动装配没 bind 出端口");
 
-            HttpResponse<String> health = HttpClient.newHttpClient().send(
-                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/health")).GET().build(),
-                    HttpResponse.BodyHandlers.ofString());
+            Response health = get("http://127.0.0.1:" + port + "/health");
             assertEquals(200, health.statusCode(), health.body());
             assertTrue(health.body().contains("\"UP\""), health.body());
 
             // commit 视图这条链在装配出来的仓库上真的走得通
-            var tx = store.beginWrite("main");
-            tx.addNode("Person", java.util.Map.of("name", "Booted Alice"));
+            GraphWriteTransaction tx = store.beginWrite("main");
+            tx.addNode("Person", Colls.mapOf("name", "Booted Alice"));
             tx.commit("t", "boot");
-            HttpResponse<String> query = HttpClient.newHttpClient().send(
-                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port
-                            + "/query?cypher=" + java.net.URLEncoder.encode(
-                            "MATCH (n:Person) RETURN n.name AS name", StandardCharsets.UTF_8)))
-                            .GET().build(),
-                    HttpResponse.BodyHandlers.ofString());
+            Response query = get("http://127.0.0.1:" + port
+                    + "/query?cypher=" + URLEncoder.encode(
+                    "MATCH (n:Person) RETURN n.name AS name", "UTF-8"));
             assertEquals(200, query.statusCode(), query.body());
             assertTrue(query.body().contains("Booted Alice"), query.body());
         }
@@ -68,15 +66,57 @@ class ZGraphStarterBootstrapTest {
 
     @Test
     void importsFileIsWhereSpringLooksAndNamesThatClass() throws Exception {
-        var url = ZGraphAutoConfiguration.class.getClassLoader()
+        URL url = ZGraphAutoConfiguration.class.getClassLoader()
                 .getResource("META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports");
         assertNotNull(url, "imports 不在 classpath 上 ⇒ 使用方扫不到自动配置");
         try (InputStream in = url.openStream()) {
-            String body = new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
+            String body = readBody(in).trim();
             assertEquals(ZGraphAutoConfiguration.class.getName(), body,
                     "imports 里写的类名和被装配的类对不上");
         }
         // 属性类必须挂 @ConfigurationProperties，否则 z.graph.* 十个字段一个都不会被绑上
         assertTrue(ZGraphProperties.class.isAnnotationPresent(ConfigurationProperties.class));
+    }
+
+    /** Java 8 没有 java.net.http，用 HttpURLConnection 做同样的 GET。 */
+    private static Response get(String url) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setRequestMethod("GET");
+        try {
+            int status = connection.getResponseCode();
+            // 4xx/5xx 的正文在 errorStream 里，断言消息要用到它
+            InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            return new Response(status, stream == null ? "" : readBody(stream));
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static String readBody(InputStream stream) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
+        int read;
+        try {
+            while ((read = stream.read(chunk)) != -1) {
+                buffer.write(chunk, 0, read);
+            }
+        } finally {
+            stream.close();
+        }
+        return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private static final class Response {
+        private final int statusCode;
+        private final String body;
+
+        private Response(int statusCode, String body) {
+            this.statusCode = statusCode;
+            this.body = body;
+        }
+
+        int statusCode() { return statusCode; }
+
+        String body() { return body; }
     }
 }

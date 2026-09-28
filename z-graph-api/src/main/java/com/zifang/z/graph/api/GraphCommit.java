@@ -29,7 +29,7 @@ public final class GraphCommit {
                        long nodeCount,
                        long edgeCount) {
         this.id = Objects.requireNonNull(id, "id");
-        this.parents = List.copyOf(parents == null ? List.of() : parents);
+        this.parents = Colls.copyOfList(parents == null ? Colls.listOf() : parents);
         this.branch = Objects.requireNonNull(branch, "branch");
         this.author = author == null ? "unknown" : author;
         this.message = message == null ? "" : message;

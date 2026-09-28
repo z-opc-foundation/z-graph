@@ -1,5 +1,6 @@
 package com.zifang.z.graph.bolt;
 
+import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.core.CypherEngine;
 import com.zifang.z.graph.core.GraphVersionStore;
 import com.zifang.z.graph.core.GraphWriteTransaction;
@@ -18,6 +19,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * Bolt 4.4 消息处理 — 当前支持:
@@ -58,25 +60,43 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
             log.debug("Received message signature=0x{}", String.format("%02X", signature & 0xFF));
 
             switch (signature) {
-                case BoltConstants.MSG_HELLO -> handleHello(ctx, msg);
-                case BoltConstants.MSG_RUN -> handleRun(ctx, msg);
-                case BoltConstants.MSG_PULL -> handlePull(ctx, msg);
-                case BoltConstants.MSG_GOODBYE -> {
+                case BoltConstants.MSG_HELLO:
+                    handleHello(ctx, msg);
+                    break;
+                case BoltConstants.MSG_RUN:
+                    handleRun(ctx, msg);
+                    break;
+                case BoltConstants.MSG_PULL:
+                    handlePull(ctx, msg);
+                    break;
+                case BoltConstants.MSG_GOODBYE: {
                     log.info("Client sent GOODBYE, closing connection");
                     if (activeTransaction != null) {
                         activeTransaction.rollback();
                         activeTransaction = null;
                     }
                     ctx.close();
+                    break;
                 }
-                case BoltConstants.MSG_RESET -> handleReset(ctx);
-                case BoltConstants.MSG_DISCARD -> handleDiscard(ctx, msg);
-                case BoltConstants.MSG_BEGIN -> handleBegin(ctx, msg);
-                case BoltConstants.MSG_COMMIT -> handleCommit(ctx, msg);
-                case BoltConstants.MSG_ROLLBACK -> handleRollback(ctx, msg);
-                default -> {
+                case BoltConstants.MSG_RESET:
+                    handleReset(ctx);
+                    break;
+                case BoltConstants.MSG_DISCARD:
+                    handleDiscard(ctx, msg);
+                    break;
+                case BoltConstants.MSG_BEGIN:
+                    handleBegin(ctx, msg);
+                    break;
+                case BoltConstants.MSG_COMMIT:
+                    handleCommit(ctx, msg);
+                    break;
+                case BoltConstants.MSG_ROLLBACK:
+                    handleRollback(ctx, msg);
+                    break;
+                default: {
                     log.warn("Unsupported message signature=0x{}", String.format("%02X", signature & 0xFF));
                     writeFailure(ctx, "Unsupported message signature: 0x" + Integer.toHexString(signature & 0xFF));
+                    break;
                 }
             }
         } catch (Exception e) {
@@ -93,7 +113,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
             return;
         }
         activeTransaction = graphRepository.beginWrite("main");
-        writeSuccess(ctx, Map.of("tx_id", UUID.randomUUID().toString(), "branch", "main"));
+        writeSuccess(ctx, Colls.mapOf("tx_id", UUID.randomUUID().toString(), "branch", "main"));
     }
 
     private void handleCommit(ChannelHandlerContext ctx, BoltMessage msg) {
@@ -102,9 +122,9 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
             return;
         }
         try {
-            var commit = activeTransaction.commit("bolt", "Bolt transaction commit");
+            GraphCommit commit = activeTransaction.commit("bolt", "Bolt transaction commit");
             activeTransaction = null;
-            writeSuccess(ctx, Map.of("commit", commit.getId(), "branch", "main"));
+            writeSuccess(ctx, Colls.mapOf("commit", commit.getId(), "branch", "main"));
         } catch (RuntimeException error) {
             activeTransaction.rollback();
             activeTransaction = null;
@@ -119,7 +139,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         }
         activeTransaction.rollback();
         activeTransaction = null;
-        writeSuccess(ctx, Map.of());
+        writeSuccess(ctx, Colls.mapOf());
     }
 
     private void handleHello(ChannelHandlerContext ctx, BoltMessage msg) {
@@ -142,13 +162,13 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         }
         String cypher = (String) msg.fields.get(0);
         Map<String, Object> parameters = msg.fields.size() >= 2 && msg.fields.get(1) instanceof Map
-                ? (Map<String, Object>) msg.fields.get(1) : Map.of();
+                ? (Map<String, Object>) msg.fields.get(1) : Colls.mapOf();
         log.info("RUN cypher='{}' params={}", cypher, parameters);
 
         long qid = nextQid.getAndIncrement();
         try {
             List<Map<String, Object>> rows = executeCypher(cypher, parameters);
-            List<String> fields = rows.isEmpty() ? List.of() : List.copyOf(rows.get(0).keySet());
+            List<String> fields = rows.isEmpty() ? Colls.listOf() : Colls.copyOfList(rows.get(0).keySet());
             streams.put(qid, rows);
             streamFields.put(qid, fields);
             streamCursor.put(qid, 0);
@@ -199,7 +219,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
     private void handlePull(ChannelHandlerContext ctx, BoltMessage msg) {
         // PULL 结构:[{qid, n}] — 字段已被 decoder 解析
         Map<String, Object> extra = msg.fields.isEmpty()
-                ? Map.of()
+                ? Colls.mapOf()
                 : (Map<String, Object>) msg.fields.get(0);
         long qid = ((Number) extra.get("qid")).longValue();
         long n = extra.containsKey("n") ? ((Number) extra.get("n")).longValue() : -1;
@@ -239,7 +259,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
     private void handleDiscard(ChannelHandlerContext ctx, BoltMessage msg) {
         // DISCARD 结构:[{qid, n}] — 字段已被 decoder 解析
         if (msg.fields.isEmpty()) {
-            writeSuccess(ctx, Map.of());
+            writeSuccess(ctx, Colls.mapOf());
             return;
         }
         Map<String, Object> extra = (Map<String, Object>) msg.fields.get(0);
@@ -258,7 +278,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
         streams.clear();
         streamFields.clear();
         streamCursor.clear();
-        writeSuccess(ctx, Map.of());
+        writeSuccess(ctx, Colls.mapOf());
     }
 
     // ===== 响应构造 =====
@@ -299,7 +319,7 @@ public class BoltMessageHandler extends SimpleChannelInboundHandler<BoltMessage>
 
     private void writeIgnored(ChannelHandlerContext ctx) {
         ByteBuf buf = ctx.alloc().buffer();
-        BoltFrames.writeStruct(buf, BoltConstants.RESP_IGNORED, Map.of());
+        BoltFrames.writeStruct(buf, BoltConstants.RESP_IGNORED, Colls.mapOf());
         ctx.writeAndFlush(wrapAsChunk(buf));
     }
 

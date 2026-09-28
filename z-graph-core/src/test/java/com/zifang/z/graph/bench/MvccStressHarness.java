@@ -1,13 +1,16 @@
 package com.zifang.z.graph.bench;
 
 import com.zifang.z.graph.api.GraphCommit;
+import com.zifang.z.graph.api.GraphStore;
 import com.zifang.z.graph.api.Node;
+import com.zifang.z.graph.core.GraphCheckout;
 import com.zifang.z.graph.core.GraphVersionStore;
 import com.zifang.z.graph.core.GraphWriteTransaction;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -23,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntConsumer;
 import java.util.stream.Stream;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * z-graph MVCC 压力／性能测试台。
@@ -109,7 +113,7 @@ public final class MvccStressHarness {
             config.budgetProbes = 4;
             config.preyGraphNodes = 2_000;
         }
-        Path workdir = argValue(args, "--workdir", Path.of(System.getProperty("java.io.tmpdir"), "zgraph-stress"));
+        Path workdir = argValue(args, "--workdir", Paths.get(System.getProperty("java.io.tmpdir"), "zgraph-stress"));
         Files.createDirectories(workdir);
 
         MvccStressHarness harness = new MvccStressHarness(config, workdir);
@@ -127,7 +131,7 @@ public final class MvccStressHarness {
     private static Path argValue(String[] args, String flag, Path fallback) {
         for (String arg : args) {
             if (arg.startsWith(flag + "=")) {
-                return Path.of(arg.substring(flag.length() + 1));
+                return Paths.get(arg.substring(flag.length() + 1));
             }
         }
         return fallback;
@@ -195,9 +199,9 @@ public final class MvccStressHarness {
         }
         long previous = -1;
         for (int i = 0; i < nodes; i++) {
-            Node node = write.addNode("Person", Map.of("name", "user-" + i, "age", 18 + (i % 60)));
+            Node node = write.addNode("Person", Colls.mapOf("name", "user-" + i, "age", 18 + (i % 60)));
             if (previous >= 0) {
-                write.addEdge("KNOWS", previous, node.getId(), Map.of("since", 2000 + (i % 25)));
+                write.addEdge("KNOWS", previous, node.getId(), Colls.mapOf("since", 2000 + (i % 25)));
             }
             previous = node.getId();
             entities += 2;
@@ -277,7 +281,7 @@ public final class MvccStressHarness {
             long target = i % graphNodes;
             long started = System.nanoTime();
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.updateNode(target, Map.of("age", 30 + i));
+            write.updateNode(target, Colls.mapOf("age", 30 + i));
             long beforeCommit = System.nanoTime();
             write.commit("probe", "probe " + i);
             long ended = System.nanoTime();
@@ -291,7 +295,7 @@ public final class MvccStressHarness {
             long target = i % graphNodes;
             long started = System.nanoTime();
             GraphWriteTransaction write = snapshot.beginWrite("main");
-            write.updateNode(target, Map.of("age", 30 + i));
+            write.updateNode(target, Colls.mapOf("age", 30 + i));
             write.commit("probe", "probe " + i);
             snapshotSamples[i] = (System.nanoTime() - started) / 1_000;
         }
@@ -317,7 +321,7 @@ public final class MvccStressHarness {
             List<String> chain = new ArrayList<>();
             for (int i = 0; i < config.travelCommits; i++) {
                 GraphWriteTransaction write = repository.beginWrite("main");
-                write.addNode("Audit", Map.of("name", "none", "seq", i, "blob", "x" + (i % 97)));
+                write.addNode("Audit", Colls.mapOf("name", "none", "seq", i, "blob", "x" + (i % 97)));
                 chain.add(write.commit("torture", "step " + i).getId());
             }
             System.out.printf("  %8d", interval);
@@ -353,7 +357,7 @@ public final class MvccStressHarness {
 
     /** 打开历史视图并真的读取内容，返回 {节点数, 属性校验和}。 */
     private long[] openAndCount(GraphVersionStore repository, String commitId) {
-        var checkout = repository.checkout(commitId);
+        GraphCheckout checkout = repository.checkout(commitId);
         long count = 0;
         long checksum = 0;
         for (Node node : checkout.getStore().getAllNodes()) {
@@ -391,7 +395,7 @@ public final class MvccStressHarness {
         long afterLoad = usedHeap();
         for (int i = 0; i < config.memoryCommits; i++) {
             GraphWriteTransaction write = delta.beginWrite("main");
-            write.updateNode(i % config.memoryGraphNodes, Map.of("age", 40 + i));
+            write.updateNode(i % config.memoryGraphNodes, Colls.mapOf("age", 40 + i));
             write.commit("mem", "commit " + i);
         }
         long deltaBytes = Math.max(0, usedHeap() - afterLoad);
@@ -422,7 +426,7 @@ public final class MvccStressHarness {
         try {
             for (int i = 0; i < config.memoryCommits; i++) {
                 GraphWriteTransaction write = snapshot.beginWrite("main");
-                write.updateNode(i % config.memoryGraphNodes, Map.of("age", 40 + i));
+                write.updateNode(i % config.memoryGraphNodes, Colls.mapOf("age", 40 + i));
                 String id = write.commit("mem", "commit " + i).getId();
                 retained++;
                 // 强制该 commit 的视图物化并驻留，等价于旧方案"每 commit 一份整图"。
@@ -463,7 +467,7 @@ public final class MvccStressHarness {
         runThreads(threads, slot -> {
             for (int i = 0; i < ops; i++) {
                 GraphWriteTransaction write = contested.beginWrite("main");
-                write.addNode("Contend", Map.of("t", slot, "i", i));
+                write.addNode("Contend", Colls.mapOf("t", slot, "i", i));
                 try {
                     committed.add(write.commit("contend", "c").getId());
                     shared.success.incrementAndGet();
@@ -498,7 +502,7 @@ public final class MvccStressHarness {
             for (int i = 0; i < ops; i++) {
                 try {
                     GraphWriteTransaction write = branched.beginWrite(branch);
-                    write.addNode("Own", Map.of("name", "x", "i", i));
+                    write.addNode("Own", Colls.mapOf("name", "x", "i", i));
                     write.commit(branch, "c" + i);
                     branchCounters.success.incrementAndGet();
                 } catch (RuntimeException error) {
@@ -532,7 +536,7 @@ public final class MvccStressHarness {
             await(gate);
             for (int i = 0; i < ops * 2; i++) {
                 GraphWriteTransaction write = mixed.beginWrite("main");
-                write.addNode("Writer", Map.of("name", "w", "i", i));
+                write.addNode("Writer", Colls.mapOf("name", "w", "i", i));
                 try {
                     history.add(write.commit("writer", "w" + i));
                     counters.success.incrementAndGet();
@@ -624,7 +628,7 @@ public final class MvccStressHarness {
         long started = System.nanoTime();
         for (int i = 0; i < config.persistCommits; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.updateNode(i % config.persistGraphNodes, Map.of("age", 50 + i));
+            write.updateNode(i % config.persistGraphNodes, Colls.mapOf("age", 50 + i));
             chain.add(write.commit("disk", "c" + i).getId());
         }
         long micros = Math.max(1, (System.nanoTime() - started) / 1_000);
@@ -657,7 +661,7 @@ public final class MvccStressHarness {
         int mismatched = 0;
         long expectedNodes = config.persistGraphNodes;
         for (int i = 0; i < chain.size(); i += Math.max(1, chain.size() / 25)) {
-            var view = reopened.checkout(chain.get(i));
+            GraphCheckout view = reopened.checkout(chain.get(i));
             checked++;
             if (view.getNodeCount() != expectedNodes) {
                 mismatched++;
@@ -687,7 +691,7 @@ public final class MvccStressHarness {
             repository.createBranch("trash" + b, repository.getBranchHead("main").getId());
             for (int i = 0; i < 40; i++) {
                 GraphWriteTransaction write = repository.beginWrite("trash" + b);
-                write.addNode("Junk", Map.of("name", "j", "b", b, "i", i));
+                write.addNode("Junk", Colls.mapOf("name", "j", "b", b, "i", i));
                 write.commit("junk", "j");
             }
         }
@@ -743,7 +747,7 @@ public final class MvccStressHarness {
             List<String> chain = new ArrayList<>();
             for (int i = 0; i < config.budgetCommits; i++) {
                 GraphWriteTransaction write = repository.beginWrite("main");
-                write.addNode("Audit", Map.of("name", "none", "seq", i, "blob", "z" + (i % 89)));
+                write.addNode("Audit", Colls.mapOf("name", "none", "seq", i, "blob", "z" + (i % 89)));
                 chain.add(write.commit("budget", "step " + i).getId());
             }
             long[] first = new long[config.budgetProbes];
@@ -755,11 +759,11 @@ public final class MvccStressHarness {
                 String commitId = chain.get(Math.max(0, index));
                 long expectedNodes = nodes + index + 1L;
                 long startedFirst = System.nanoTime();
-                var view = repository.checkout(commitId).getStore();
+                GraphStore view = repository.checkout(commitId).getStore();
                 long openMicros = (System.nanoTime() - startedFirst) / 1_000;
                 long[] probeFirst = probeView(view);
                 long startedRepeat = System.nanoTime();
-                var again = repository.checkout(commitId).getStore();
+                GraphStore again = repository.checkout(commitId).getStore();
                 long repeatOpenMicros = (System.nanoTime() - startedRepeat) / 1_000;
                 long[] probeRepeat = probeView(again);
                 first[p] = (System.nanoTime() - startedFirst) / 1_000;
@@ -831,7 +835,7 @@ public final class MvccStressHarness {
         List<String> chain = new ArrayList<>();
         for (int i = 0; i < config.preyCommits; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.addNode("Audit", Map.of("name", "none", "seq", i, "blob", "prey"));
+            write.addNode("Audit", Colls.mapOf("name", "none", "seq", i, "blob", "prey"));
             chain.add(write.commit("prey", "step " + i).getId());
         }
         String target = chain.get(chain.size() / 2);
@@ -875,9 +879,9 @@ public final class MvccStressHarness {
         GraphWriteTransaction write = repository.beginWrite("main");
         long previous = -1;
         for (int i = 0; i < nodes; i++) {
-            Node node = write.addNode("Person", Map.of("name", "user-" + i, "age", 18 + (i % 60)));
+            Node node = write.addNode("Person", Colls.mapOf("name", "user-" + i, "age", 18 + (i % 60)));
             if (previous >= 0 && i % 2 == 0) {
-                write.addEdge("KNOWS", previous, node.getId(), Map.of());
+                write.addEdge("KNOWS", previous, node.getId(), Colls.mapOf());
             }
             previous = node.getId();
             if ((i + 1) % batch == 0) {

@@ -6,6 +6,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 内存图引擎 — 基于邻接表的完整 GraphStore 实现。
@@ -58,12 +59,12 @@ public class InMemoryGraphStore implements GraphStore {
 
     @Override
     public Node addNode(long id, String label, Map<String, Object> properties) {
-        return addNode(id, (label != null && !label.isEmpty()) ? List.of(label) : List.of(), properties);
+        return addNode(id, (label != null && !label.isEmpty()) ? Colls.listOf(label) : Colls.listOf(), properties);
     }
 
     /** 以完整标签集合创建节点，供快照复制和版本合并保留多标签。 */
     public Node addNode(long id, Collection<String> labels, Map<String, Object> properties) {
-        Collection<String> safeLabels = labels != null ? labels : List.of();
+        Collection<String> safeLabels = labels != null ? labels : Colls.listOf();
         validateTagSchemas(safeLabels, properties);
         return installNode(new Node(id, safeLabels, deepCopyMap(properties)));
     }
@@ -114,7 +115,7 @@ public class InMemoryGraphStore implements GraphStore {
     @Override
     public List<Long> getNodeIdsByLabel(String label) {
         Set<Long> ids = labelIndex.get(label);
-        return ids != null ? List.copyOf(ids) : List.of();
+        return ids != null ? Colls.copyOfList(ids) : Colls.listOf();
     }
 
     @Override
@@ -159,14 +160,14 @@ public class InMemoryGraphStore implements GraphStore {
     @Override
     public List<Edge> getOutEdges(long nodeId) {
         List<Long> eids = outEdges.get(nodeId);
-        if (eids == null || eids.isEmpty()) { return List.of(); }
+        if (eids == null || eids.isEmpty()) { return Colls.listOf(); }
         return eids.stream().map(edges::get).filter(Objects::nonNull).collect(Collectors.toList());
     }
 
     @Override
     public List<Edge> getInEdges(long nodeId) {
         List<Long> eids = inEdges.get(nodeId);
-        if (eids == null || eids.isEmpty()) { return List.of(); }
+        if (eids == null || eids.isEmpty()) { return Colls.listOf(); }
         return eids.stream().map(edges::get).filter(Objects::nonNull).collect(Collectors.toList());
     }
 
@@ -181,7 +182,7 @@ public class InMemoryGraphStore implements GraphStore {
     @Override
     public List<Edge> getEdgesByType(String edgeType) {
         Set<Long> eids = typeIndex.get(edgeType);
-        if (eids == null || eids.isEmpty()) { return List.of(); }
+        if (eids == null || eids.isEmpty()) { return Colls.listOf(); }
         return eids.stream().map(edges::get).filter(Objects::nonNull).collect(Collectors.toList());
     }
 
@@ -223,7 +224,7 @@ public class InMemoryGraphStore implements GraphStore {
             Map<Object, Set<Long>> index = propertyIndexes.get(definition);
             if (index != null) {
                 Set<Long> ids = index.get(propertyValue);
-                return ids == null ? List.of() : ids.stream().sorted().collect(Collectors.toList());
+                return ids == null ? Colls.listOf() : ids.stream().sorted().collect(Collectors.toList());
             }
         }
         List<Long> candidateIds = label != null ? getNodeIdsByLabel(label) : new ArrayList<>(nodes.keySet());
@@ -256,14 +257,14 @@ public class InMemoryGraphStore implements GraphStore {
 
     /** 索引当前覆盖的标签+属性键集合，供版本层复制索引定义。 */
     Set<IndexDefinition> indexDefinitions() {
-        return Set.copyOf(propertyIndexDefinitions);
+        return Colls.copyOfSet(propertyIndexDefinitions);
     }
 
     private void rebuildPropertyIndex(IndexDefinition definition) {
         ConcurrentHashMap<Object, Set<Long>> index =
                 propertyIndexes.computeIfAbsent(definition, ignored -> new ConcurrentHashMap<>());
         index.clear();
-        for (Long nodeId : labelIndex.getOrDefault(definition.label(), Set.of())) {
+        for (Long nodeId : labelIndex.getOrDefault(definition.label(), Colls.setOf())) {
             Node node = nodes.get(nodeId);
             if (node == null) continue;
             Object value = node.get(definition.propertyKey());
@@ -540,7 +541,7 @@ public class InMemoryGraphStore implements GraphStore {
 
     @Override
     public List<String> listTags() {
-        return tagSchemas.keySet().stream().sorted().toList();
+        return tagSchemas.keySet().stream().sorted().collect(Colls.toUnmodifiableList());
     }
 
     @Override
@@ -571,10 +572,43 @@ public class InMemoryGraphStore implements GraphStore {
 
     @Override
     public List<String> listEdgeTypes() {
-        return edgeTypeSchemas.keySet().stream().sorted().toList();
+        return edgeTypeSchemas.keySet().stream().sorted().collect(Colls.toUnmodifiableList());
     }
 
-    record IndexDefinition(String label, String propertyKey) {
+    static final class IndexDefinition {
+        private final String label;
+        private final String propertyKey;
+
+        IndexDefinition(String label, String propertyKey) {
+            this.label = label;
+            this.propertyKey = propertyKey;
+        }
+
+        public String label() { return label; }
+
+        public String propertyKey() { return propertyKey; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof IndexDefinition)) {
+                return false;
+            }
+            IndexDefinition other = (IndexDefinition) o;
+            return Objects.equals(label, other.label) && Objects.equals(propertyKey, other.propertyKey);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(label, propertyKey);
+        }
+
+        @Override
+        public String toString() {
+            return "IndexDefinition[label=" + label + ", propertyKey=" + propertyKey + "]";
+        }
     }
 
     static Map<String, Object> deepCopyMap(Map<String, Object> source) {
@@ -588,15 +622,18 @@ public class InMemoryGraphStore implements GraphStore {
 
     @SuppressWarnings("unchecked")
     private static Object deepCopyValue(Object value) {
-        if (value instanceof Map<?, ?> map) {
+        if (value instanceof Map<?, ?>) {
+            Map<?, ?> map = (Map<?, ?>) value;
             Map<String, Object> copy = new LinkedHashMap<>();
             map.forEach((key, item) -> copy.put(String.valueOf(key), deepCopyValue(item)));
             return copy;
         }
-        if (value instanceof List<?> list) {
+        if (value instanceof List<?>) {
+            List<?> list = (List<?>) value;
             return list.stream().map(InMemoryGraphStore::deepCopyValue).collect(Collectors.toList());
         }
-        if (value instanceof Set<?> set) {
+        if (value instanceof Set<?>) {
+            Set<?> set = (Set<?>) value;
             return set.stream().map(InMemoryGraphStore::deepCopyValue)
                     .collect(Collectors.toCollection(LinkedHashSet::new));
         }
@@ -613,7 +650,7 @@ public class InMemoryGraphStore implements GraphStore {
 
     public List<List<String>> getPropertyIndexes() {
         return propertyIndexDefinitions.stream()
-                .map(definition -> List.of(definition.label(), definition.propertyKey()))
+                .map(definition -> Colls.listOf(definition.label(), definition.propertyKey()))
                 .sorted(Comparator.comparing(item -> item.get(0) + "\u0000" + item.get(1)))
                 .collect(Collectors.toList());
     }

@@ -50,13 +50,11 @@ public class Edge {
     public boolean equals(Object o) {
         if (this == o) {
             return true;
-        } else {
-            if (!(o instanceof Edge e)) {
-                return false;
-            } else {
-                return id == e.id;
-            }
         }
+        if (!(o instanceof Edge)) {
+            return false;
+        }
+        return id == ((Edge) o).id;
     }
 
     @Override

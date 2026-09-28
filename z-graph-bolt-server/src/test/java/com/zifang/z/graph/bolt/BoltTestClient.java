@@ -13,6 +13,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 极简 Bolt 4.4 客户端：单连接、同步 HELLO / RUN / PULL 流程，用于服务端 e2e 集成测试。
@@ -32,7 +34,7 @@ public class BoltTestClient implements AutoCloseable {
     /** HELLO 握手：发送空 extra 元数据，返回 SUCCESS 中的 server map。 */
     public Map<String, Object> hello() throws IOException {
         ByteBuf buf = Unpooled.buffer();
-        BoltFrames.writeStruct(buf, BoltConstants.MSG_HELLO, Map.of());
+        BoltFrames.writeStruct(buf, BoltConstants.MSG_HELLO, Colls.mapOf());
         writeMessage(buf);
         return readMessage().meta;
     }
@@ -41,7 +43,7 @@ public class BoltTestClient implements AutoCloseable {
     public Map<String, Object> run(String cypher, Map<String, Object> params) throws IOException {
         ByteBuf buf = Unpooled.buffer();
         Object[] fields = params == null || params.isEmpty()
-                ? new Object[]{cypher, Map.of()}
+                ? new Object[]{cypher, Colls.mapOf()}
                 : new Object[]{cypher, params};
         BoltFrames.writeStruct(buf, BoltConstants.MSG_RUN, fields);
         writeMessage(buf);
@@ -59,7 +61,7 @@ public class BoltTestClient implements AutoCloseable {
     /** PULL all（n=-1）,按 RUN meta 中的 fields 顺序将 RECORD 字段拼装成 Map。 */
     public List<Map<String, Object>> pullAll(List<String> fields) throws IOException {
         ByteBuf buf = Unpooled.buffer();
-        BoltFrames.writeStruct(buf, BoltConstants.MSG_PULL, Map.of("n", -1));
+        BoltFrames.writeStruct(buf, BoltConstants.MSG_PULL, Colls.mapOf("n", -1));
         writeMessage(buf);
         return consumeStream(fields);
     }
@@ -67,7 +69,7 @@ public class BoltTestClient implements AutoCloseable {
     /** PULL 指定 qid 的流,按 fields 顺序把 RECORD 字段拼成 Map。 */
     public List<Map<String, Object>> pull(long qid, int n, List<String> fields) throws IOException {
         ByteBuf buf = Unpooled.buffer();
-        BoltFrames.writeStruct(buf, BoltConstants.MSG_PULL, Map.of("qid", qid, "n", n));
+        BoltFrames.writeStruct(buf, BoltConstants.MSG_PULL, Colls.mapOf("qid", qid, "n", n));
         writeMessage(buf);
         return consumeStream(fields);
     }
@@ -109,7 +111,7 @@ public class BoltTestClient implements AutoCloseable {
     /** 从最近一次 RUN 的 SUCCESS 元数据中取出 qid。 */
     public long lastQid(Map<String, Object> runMeta) {
         Object qid = runMeta.get("qid");
-        if (qid instanceof Number n) return n.longValue();
+        if (qid instanceof Number) return ((Number) qid).longValue();
         throw new IllegalStateException("qid not found in RUN meta: " + runMeta);
     }
 
@@ -117,7 +119,8 @@ public class BoltTestClient implements AutoCloseable {
     @SuppressWarnings("unchecked")
     public List<String> lastFields(Map<String, Object> runMeta) {
         Object fields = runMeta.get("fields");
-        if (fields instanceof List<?> list) {
+        if (fields instanceof List<?>) {
+            List<?> list = (List<?>) fields;
             List<String> out = new ArrayList<>(list.size());
             for (Object f : list) out.add(f == null ? null : f.toString());
             return out;
@@ -127,14 +130,14 @@ public class BoltTestClient implements AutoCloseable {
 
     public void begin() throws IOException {
         ByteBuf buf = Unpooled.buffer();
-        BoltFrames.writeStruct(buf, BoltConstants.MSG_BEGIN, Map.of());
+        BoltFrames.writeStruct(buf, BoltConstants.MSG_BEGIN, Colls.mapOf());
         writeMessage(buf);
         readMessage();
     }
 
     public String commit() throws IOException {
         ByteBuf buf = Unpooled.buffer();
-        BoltFrames.writeStruct(buf, BoltConstants.MSG_COMMIT, Map.of());
+        BoltFrames.writeStruct(buf, BoltConstants.MSG_COMMIT, Colls.mapOf());
         writeMessage(buf);
         Frame frame = readMessage();
         Object commit = frame.meta.get("commit");
@@ -143,7 +146,7 @@ public class BoltTestClient implements AutoCloseable {
 
     public void rollback() throws IOException {
         ByteBuf buf = Unpooled.buffer();
-        BoltFrames.writeStruct(buf, BoltConstants.MSG_ROLLBACK, Map.of());
+        BoltFrames.writeStruct(buf, BoltConstants.MSG_ROLLBACK, Colls.mapOf());
         writeMessage(buf);
         readMessage();
     }
@@ -178,7 +181,19 @@ public class BoltTestClient implements AutoCloseable {
         if (!isEnd) {
             throw new IOException("Multi-chunk messages not supported in BoltTestClient");
         }
-        byte[] payload = in.readNBytes(chunkLen);
+        byte[] payload = new byte[chunkLen];
+        int offset = 0;
+        while (offset < chunkLen) {
+            int read = in.read(payload, offset, chunkLen - offset);
+            if (read < 0) break;
+            offset += read;
+        }
+        if (offset < chunkLen) {
+            // 与 InputStream.readNBytes 同语义：提前 EOF 时返回短数组而不是抛异常
+            byte[] partial = new byte[offset];
+            System.arraycopy(payload, 0, partial, 0, offset);
+            payload = partial;
+        }
         return parseFrame(payload);
     }
 
@@ -209,7 +224,46 @@ public class BoltTestClient implements AutoCloseable {
         return new Frame(signature, meta, values);
     }
 
-    private record Frame(int signature, Map<String, Object> meta, List<Object> values) {
+    private static final class Frame {
+        private final int signature;
+        private final Map<String, Object> meta;
+        private final List<Object> values;
+
+        private Frame(int signature, Map<String, Object> meta, List<Object> values) {
+            this.signature = signature;
+            this.meta = meta;
+            this.values = values;
+        }
+
+        public int signature() { return signature; }
+
+        public Map<String, Object> meta() { return meta; }
+
+        public List<Object> values() { return values; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Frame)) {
+                return false;
+            }
+            Frame other = (Frame) o;
+            return signature == other.signature
+                    && Objects.equals(meta, other.meta)
+                    && Objects.equals(values, other.values);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(signature, meta, values);
+        }
+
+        @Override
+        public String toString() {
+            return "Frame[signature=" + signature + ", meta=" + meta + ", values=" + values + "]";
+        }
     }
 
     public static String asString(Object o) {
@@ -217,7 +271,7 @@ public class BoltTestClient implements AutoCloseable {
     }
 
     public static int asInt(Object o) {
-        if (o instanceof Number n) return n.intValue();
+        if (o instanceof Number) return ((Number) o).intValue();
         return Integer.parseInt(String.valueOf(o));
     }
 

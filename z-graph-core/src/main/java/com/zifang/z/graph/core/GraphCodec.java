@@ -52,18 +52,21 @@ final class GraphCodec {
         } else if (value instanceof Float || value instanceof Double) {
             out.writeByte(5);
             out.writeDouble(((Number) value).doubleValue());
-        } else if (value instanceof Map<?, ?> map) {
+        } else if (value instanceof Map<?, ?>) {
+            Map<?, ?> map = (Map<?, ?>) value;
             out.writeByte(6);
             out.writeInt(map.size());
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 out.writeUTF(String.valueOf(entry.getKey()));
                 writeValue(out, entry.getValue());
             }
-        } else if (value instanceof Collection<?> collection) {
+        } else if (value instanceof Collection<?>) {
+            Collection<?> collection = (Collection<?>) value;
             out.writeByte(7);
             out.writeInt(collection.size());
             for (Object item : collection) writeValue(out, item);
-        } else if (value instanceof byte[] bytes) {
+        } else if (value instanceof byte[]) {
+            byte[] bytes = (byte[]) value;
             out.writeByte(8);
             out.writeInt(bytes.length);
             out.write(bytes);
@@ -83,32 +86,53 @@ final class GraphCodec {
     }
 
     static Object readValue(DataInputStream in) throws IOException {
-        return switch (in.readByte()) {
-            case 0 -> null;
-            case 1 -> in.readUTF();
-            case 2 -> in.readBoolean();
-            case 3 -> in.readInt();
-            case 4 -> in.readLong();
-            case 5 -> in.readDouble();
-            case 6 -> {
+        byte type = in.readByte();
+        Object result;
+        switch (type) {
+            case 0:
+                result = null;
+                break;
+            case 1:
+                result = in.readUTF();
+                break;
+            case 2:
+                result = in.readBoolean();
+                break;
+            case 3:
+                result = in.readInt();
+                break;
+            case 4:
+                result = in.readLong();
+                break;
+            case 5:
+                result = in.readDouble();
+                break;
+            case 6: {
                 int size = in.readInt();
                 Map<String, Object> map = new LinkedHashMap<>();
                 for (int i = 0; i < size; i++) map.put(in.readUTF(), readValue(in));
-                yield map;
+                result = map;
+                break;
             }
-            case 7 -> {
+            case 7: {
                 int size = in.readInt();
                 Collection<Object> items = new ArrayList<>(size);
                 for (int i = 0; i < size; i++) items.add(readValue(in));
-                yield items;
+                result = items;
+                break;
             }
-            case 8 -> {
+            case 8: {
                 byte[] bytes = new byte[in.readInt()];
                 in.readFully(bytes);
-                yield bytes;
+                result = bytes;
+                break;
             }
-            case 9 -> in.readUTF();
-            default -> throw new IOException("Unknown graph property type");
-        };
+            case 9:
+                result = in.readUTF();
+                break;
+            default:
+                throw new IOException("Unknown graph property type");
+        }
+        return result;
     }
 }

@@ -9,6 +9,7 @@ import com.zifang.z.graph.api.TagSchema;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 提交快照的只读视图。查询引擎可以在该视图上执行 MATCH/RETURN，任何写操作都会被拒绝。
@@ -49,7 +50,7 @@ public final class ReadOnlyGraphStore implements GraphStore {
 
     @Override
     public List<Long> getNodeIdsByLabel(String label) {
-        return List.copyOf(delegate.getNodeIdsByLabel(label));
+        return Colls.copyOfList(delegate.getNodeIdsByLabel(label));
     }
 
     @Override
@@ -85,22 +86,22 @@ public final class ReadOnlyGraphStore implements GraphStore {
 
     @Override
     public List<Edge> getOutEdges(long nodeId) {
-        return delegate.getOutEdges(nodeId).stream().map(ReadOnlyGraphStore::copyEdge).toList();
+        return delegate.getOutEdges(nodeId).stream().map(ReadOnlyGraphStore::copyEdge).collect(Colls.toUnmodifiableList());
     }
 
     @Override
     public List<Edge> getInEdges(long nodeId) {
-        return delegate.getInEdges(nodeId).stream().map(ReadOnlyGraphStore::copyEdge).toList();
+        return delegate.getInEdges(nodeId).stream().map(ReadOnlyGraphStore::copyEdge).collect(Colls.toUnmodifiableList());
     }
 
     @Override
     public List<Edge> getEdges(long nodeId) {
-        return delegate.getEdges(nodeId).stream().map(ReadOnlyGraphStore::copyEdge).toList();
+        return delegate.getEdges(nodeId).stream().map(ReadOnlyGraphStore::copyEdge).collect(Colls.toUnmodifiableList());
     }
 
     @Override
     public List<Edge> getEdgesByType(String edgeType) {
-        return delegate.getEdgesByType(edgeType).stream().map(ReadOnlyGraphStore::copyEdge).toList();
+        return delegate.getEdgesByType(edgeType).stream().map(ReadOnlyGraphStore::copyEdge).collect(Colls.toUnmodifiableList());
     }
 
     @Override
@@ -110,22 +111,22 @@ public final class ReadOnlyGraphStore implements GraphStore {
 
     @Override
     public Set<Long> traverse(long startNodeId, int maxDepth, String edgeType) {
-        return Set.copyOf(delegate.traverse(startNodeId, maxDepth, edgeType));
+        return Colls.copyOfSet(delegate.traverse(startNodeId, maxDepth, edgeType));
     }
 
     @Override
     public List<Long> findNodesByProperty(String label, String propertyKey, Object propertyValue) {
-        return List.copyOf(delegate.findNodesByProperty(label, propertyKey, propertyValue));
+        return Colls.copyOfList(delegate.findNodesByProperty(label, propertyKey, propertyValue));
     }
 
     @Override
     public List<Node> getAllNodes() {
-        return delegate.getAllNodes().stream().map(ReadOnlyGraphStore::copyNode).toList();
+        return delegate.getAllNodes().stream().map(ReadOnlyGraphStore::copyNode).collect(Colls.toUnmodifiableList());
     }
 
     @Override
     public List<Edge> getAllEdges() {
-        return delegate.getAllEdges().stream().map(ReadOnlyGraphStore::copyEdge).toList();
+        return delegate.getAllEdges().stream().map(ReadOnlyGraphStore::copyEdge).collect(Colls.toUnmodifiableList());
     }
 
     @Override
@@ -139,7 +140,10 @@ public final class ReadOnlyGraphStore implements GraphStore {
     }
 
     public boolean hasPropertyIndex(String label, String propertyKey) {
-        return delegate instanceof InMemoryGraphStore store && store.hasPropertyIndex(label, propertyKey);
+        if (!(delegate instanceof InMemoryGraphStore)) {
+            return false;
+        }
+        return ((InMemoryGraphStore) delegate).hasPropertyIndex(label, propertyKey);
     }
 
     @Override

@@ -60,10 +60,10 @@ public class Node {
         if (this == o) {
             return true;
         } else {
-            if (!(o instanceof Node n)) {
+            if (!(o instanceof Node)) {
                 return false;
             } else {
-                return id == n.id;
+                return id == ((Node) o).id;
             }
         }
     }

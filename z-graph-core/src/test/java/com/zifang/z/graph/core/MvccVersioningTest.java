@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.NoSuchElementException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * MVCC 语义测试：节点多版本链、按 commit 打开视图、增量化存储、检查点回放、
@@ -40,7 +42,7 @@ class MvccVersioningTest {
     private static GraphCommit seed(GraphVersionStore repository, int count) {
         GraphWriteTransaction write = repository.beginWrite("main");
         for (int i = 0; i < count; i++) {
-            write.addNode("Person", Map.of("name", "P" + i, "age", 20 + i));
+            write.addNode("Person", Colls.mapOf("name", "P" + i, "age", 20 + i));
         }
         return write.commit("seed", "seed " + count);
     }
@@ -80,14 +82,14 @@ class MvccVersioningTest {
         List<String> commitIds = new ArrayList<>();
         for (int age = 30; age < 33; age++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.updateNode(alice, Map.of("age", age));
+            write.updateNode(alice, Colls.mapOf("age", age));
             commitIds.add(write.commit("editor", "age=" + age).getId());
         }
 
         List<GraphEntityVersion> history = repository.nodeVersions(alice);
         // 1 个创建版本 + 3 个改属性版本；同一次提交里改多个属性也只算一个版本。
         assertEquals(4, history.size());
-        assertEquals(Set.of("name", "age"), new HashSet<>(history.get(0).getNode().getProperties().keySet()));
+        assertEquals(Colls.setOf("name", "age"), new HashSet<>(history.get(0).getNode().getProperties().keySet()));
         assertEquals(20, history.get(0).getNode().get("age"));
         for (int i = 0; i < commitIds.size(); i++) {
             GraphEntityVersion version = history.get(i + 1);
@@ -110,11 +112,11 @@ class MvccVersioningTest {
         long target = onlyNodeId(repository.checkout(base.getId()), "P0");
 
         GraphWriteTransaction first = repository.beginWrite("main");
-        first.updateNode(target, Map.of("age", 31));
+        first.updateNode(target, Colls.mapOf("age", 31));
         GraphCommit firstCommit = first.commit("editor", "31");
 
         GraphWriteTransaction second = repository.beginWrite("main");
-        second.updateNode(target, Map.of("city", "Hangzhou"));
+        second.updateNode(target, Colls.mapOf("city", "Hangzhou"));
         GraphCommit secondCommit = second.commit("editor", "city");
 
         assertEquals(20, repository.checkout(base.getId()).getStore().getNode(target).get("age"));
@@ -126,11 +128,11 @@ class MvccVersioningTest {
 
         // 节点在指定 ref 上的可见版本 = 最近一次真正改动过它的祖先提交。
         assertEquals(base.getId(),
-                repository.nodeVersionAt(target, base.getId()).orElseThrow().getCommitId());
+                repository.nodeVersionAt(target, base.getId()).orElseThrow(() -> new NoSuchElementException()).getCommitId());
         assertEquals(firstCommit.getId(),
-                repository.nodeVersionAt(target, firstCommit.getId()).orElseThrow().getCommitId());
+                repository.nodeVersionAt(target, firstCommit.getId()).orElseThrow(() -> new NoSuchElementException()).getCommitId());
         assertEquals(secondCommit.getId(),
-                repository.nodeVersionAt(target, "main").orElseThrow().getCommitId());
+                repository.nodeVersionAt(target, "main").orElseThrow(() -> new NoSuchElementException()).getCommitId());
         // 历史包含创建版本，因此比"改动次数"多一条。
         assertEquals(3, repository.nodeHistory(target, "main").size());
         assertEquals(2, repository.nodeHistory(target, firstCommit.getId()).size());
@@ -153,15 +155,15 @@ class MvccVersioningTest {
         assertEquals(2, repository.checkout(deleted.getId()).getNodeCount());
         assertNotNull(repository.checkout(deleted.getId()).getStore().getNode(survivor));
 
-        GraphEntityVersion last = repository.nodeVersionAt(doomed, deleted.getId()).orElseThrow();
+        GraphEntityVersion last = repository.nodeVersionAt(doomed, deleted.getId()).orElseThrow(() -> new NoSuchElementException());
         assertTrue(last.isDelete());
         assertEquals(GraphEntityVersion.Kind.DELETE, last.getKind());
         assertNull(last.getNode());
         // 删除版本也占链上的一格，旧 ref 上仍然解析到创建版本。
-        assertEquals(List.of(GraphEntityVersion.Kind.UPSERT, GraphEntityVersion.Kind.DELETE),
-                repository.nodeVersions(doomed).stream().map(GraphEntityVersion::getKind).toList());
-        assertEquals(base.getId(), repository.nodeVersionAt(doomed, base.getId()).orElseThrow().getCommitId());
-        assertFalse(repository.nodeVersionAt(survivor, deleted.getId()).orElseThrow().isDelete());
+        assertEquals(Colls.listOf(GraphEntityVersion.Kind.UPSERT, GraphEntityVersion.Kind.DELETE),
+                repository.nodeVersions(doomed).stream().map(GraphEntityVersion::getKind).collect(Colls.toUnmodifiableList()));
+        assertEquals(base.getId(), repository.nodeVersionAt(doomed, base.getId()).orElseThrow(() -> new NoSuchElementException()).getCommitId());
+        assertFalse(repository.nodeVersionAt(survivor, deleted.getId()).orElseThrow(() -> new NoSuchElementException()).isDelete());
     }
 
     /**
@@ -176,7 +178,7 @@ class MvccVersioningTest {
 
         for (int i = 0; i < 40; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.addNode("Audit", Map.of("seq", i));
+            write.addNode("Audit", Colls.mapOf("seq", i));
             write.commit("auditor", "audit " + i);
         }
 
@@ -209,7 +211,7 @@ class MvccVersioningTest {
         assertTrue(write.pendingDelta().isEmpty());
         assertEquals(500, write.getNodeCount());
 
-        Node added = write.addNode("Person", Map.of("name", "Newcomer"));
+        Node added = write.addNode("Person", Colls.mapOf("name", "Newcomer"));
         assertEquals(1, write.pendingDelta().nodeUpserts().size());
         assertEquals(added.getId(), write.pendingDelta().nodeUpserts().iterator().next().getId());
 
@@ -234,7 +236,7 @@ class MvccVersioningTest {
         long doomed = onlyNodeId(view, "P4");
 
         GraphWriteTransaction write = repository.beginWrite("main");
-        write.updateNode(target, Map.of("age", 99));
+        write.updateNode(target, Colls.mapOf("age", 99));
         write.removeNode(doomed);
         write.commit("editor", "mutate");
 
@@ -242,7 +244,7 @@ class MvccVersioningTest {
         assertEquals(5, view.getNodeCount());
         assertEquals(20, view.getStore().getNode(target).get("age"));
         assertNotNull(view.getStore().getNode(doomed));
-        assertThrows(UnsupportedOperationException.class, () -> view.getStore().updateNode(target, Map.of("age", 1)));
+        assertThrows(UnsupportedOperationException.class, () -> view.getStore().updateNode(target, Colls.mapOf("age", 1)));
         assertThrows(UnsupportedOperationException.class, () -> view.query("MATCH (n:Person) SET n.age = 1"));
         // 同一 commit 的视图被复用，后续提交只产生新视图。
         assertEquals(20, repository.checkout(base.getId()).getStore().getNode(target).get("age"));
@@ -262,15 +264,15 @@ class MvccVersioningTest {
 
         List<String> frequentCommits = new ArrayList<>();
         List<String> sparseCommits = new ArrayList<>();
-        for (GraphVersionStore repository : List.of(frequent, sparse)) {
+        for (GraphVersionStore repository : Colls.listOf(frequent, sparse)) {
             GraphCommit base = seed(repository, 60);
             long first = onlyNodeId(repository.checkout(base.getId()), "P0");
             (repository == frequent ? frequentCommits : sparseCommits).add(base.getId());
             for (int i = 0; i < 30; i++) {
                 GraphWriteTransaction write = repository.beginWrite("main");
-                write.updateNode(first, Map.of("age", 100 + i));
-                Node trail = write.addNode("Trail", Map.of("i", i));
-                write.addEdge("POINTS", first, trail.getId(), Map.of("step", i));
+                write.updateNode(first, Colls.mapOf("age", 100 + i));
+                Node trail = write.addNode("Trail", Colls.mapOf("i", i));
+                write.addEdge("POINTS", first, trail.getId(), Colls.mapOf("step", i));
                 GraphCommit commit = write.commit("torture", "step " + i);
                 (repository == frequent ? frequentCommits : sparseCommits).add(commit.getId());
             }
@@ -305,7 +307,7 @@ class MvccVersioningTest {
         expectedAges.add(23);
         for (int i = 0; i < 5; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.updateNode(target, Map.of("age", 200 + i));
+            write.updateNode(target, Colls.mapOf("age", 200 + i));
             chain.add(write.commit("editor", "bump " + i).getId());
             expectedAges.add(200 + i);
         }
@@ -321,9 +323,9 @@ class MvccVersioningTest {
         // 索引定义写在祖先层，之后的事务必须穿透覆盖层读得到，并且能按它查。
         GraphWriteTransaction later = repository.beginWrite("main");
         assertTrue(later.hasPropertyIndex("Person", "name"));
-        assertEquals(List.of(List.of("Person", "name")), later.getPropertyIndexes());
-        assertEquals(List.of(target), later.findNodesByProperty("Person", "name", "P3"));
-        later.updateNode(target, Map.of("age", 300));
+        assertEquals(Colls.listOf(Colls.listOf("Person", "name")), later.getPropertyIndexes());
+        assertEquals(Colls.listOf(target), later.findNodesByProperty("Person", "name", "P3"));
+        later.updateNode(target, Colls.mapOf("age", 300));
         chain.add(later.commit("editor", "bump with ancestor index").getId());
         expectedAges.add(300);
 
@@ -336,7 +338,7 @@ class MvccVersioningTest {
         // 层数封顶：超过上限必须摊平一次，否则读要穿透任意深的链。
         for (int i = 0; i < 60; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.updateNode(target, Map.of("age", 400 + i));
+            write.updateNode(target, Colls.mapOf("age", 400 + i));
             write.commit("torture", "depth " + i);
         }
         long bounded = stat(repository.versionStats(), "maxViewLayers");
@@ -359,7 +361,7 @@ class MvccVersioningTest {
         chain.add(seeded.getId());
         for (int i = 0; i < 20; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.updateNode(target, Map.of("age", 500 + i));
+            write.updateNode(target, Colls.mapOf("age", 500 + i));
             chain.add(write.commit("mem", "bump " + i).getId());
         }
 
@@ -392,7 +394,7 @@ class MvccVersioningTest {
         chain.add(seeded.getId());
         for (int i = 0; i < 12; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
-            write.addNode("Audit", Map.of("name", "a" + i));
+            write.addNode("Audit", Colls.mapOf("name", "a" + i));
             chain.add(write.commit("mem", "step " + i).getId());
         }
 
@@ -412,9 +414,9 @@ class MvccVersioningTest {
 
         // 两个分支各自开事务、各自提交，互不覆盖。
         GraphWriteTransaction mainWrite = repository.beginWrite("main");
-        mainWrite.addNode("Person", Map.of("name", "Main-only"));
+        mainWrite.addNode("Person", Colls.mapOf("name", "Main-only"));
         GraphWriteTransaction featureWrite = repository.beginWrite("feature");
-        featureWrite.addNode("Person", Map.of("name", "Feature-only"));
+        featureWrite.addNode("Person", Colls.mapOf("name", "Feature-only"));
 
         GraphCommit mainHead = mainWrite.commit("main", "main change");
         assertEquals(11, repository.checkout(mainHead.getId()).getNodeCount());
@@ -426,7 +428,7 @@ class MvccVersioningTest {
 
         // 乐观并发：head 已被推进的旧事务必须失败，而不是静默覆盖。
         GraphWriteTransaction stale = repository.beginWrite("main");
-        stale.addNode("Person", Map.of("name", "too late"));
+        stale.addNode("Person", Colls.mapOf("name", "too late"));
         GraphCommit raced = repository.beginWrite("main").commit("other", "race");
         assertThrows(GraphVersionStore.StaleHeadException.class, () -> stale.commit("x", "must fail"));
         assertEquals(raced.getId(), repository.getBranchHead("main").getId());
@@ -442,11 +444,11 @@ class MvccVersioningTest {
         repository.createBranch("release", base.getId());
 
         GraphWriteTransaction first = repository.beginWrite("main");
-        first.updateNode(target, Map.of("age", 41));
+        first.updateNode(target, Colls.mapOf("age", 41));
         GraphCommit c1 = first.commit("editor", "41");
 
         GraphWriteTransaction second = repository.beginWrite("release");
-        second.updateNode(target, Map.of("age", 7));
+        second.updateNode(target, Colls.mapOf("age", 7));
         GraphCommit c2 = second.commit("editor", "7 on release");
 
         GraphVersionStore reopened = new GraphVersionStore(directory);
@@ -456,12 +458,12 @@ class MvccVersioningTest {
         assertEquals(4, reopened.listCommits().size());
         // 版本链是从增量重建的：seed 创建 + 两条分支各改一次。
         assertEquals(3, reopened.nodeVersions(target).size());
-        assertEquals(c1.getId(), reopened.nodeVersionAt(target, "main").orElseThrow().getCommitId());
-        assertEquals(c2.getId(), reopened.nodeVersionAt(target, "release").orElseThrow().getCommitId());
+        assertEquals(c1.getId(), reopened.nodeVersionAt(target, "main").orElseThrow(() -> new NoSuchElementException()).getCommitId());
+        assertEquals(c2.getId(), reopened.nodeVersionAt(target, "release").orElseThrow(() -> new NoSuchElementException()).getCommitId());
 
         // 序号必须恢复，重启后新提交不能和历史撞号。
         GraphWriteTransaction third = reopened.beginWrite("main");
-        third.updateNode(target, Map.of("age", 42));
+        third.updateNode(target, Colls.mapOf("age", 42));
         GraphCommit c3 = third.commit("editor", "42");
         assertNotEqualsAnyOf(c3.getId(), c1.getId(), c2.getId(), base.getId());
         assertTrue(c3.getTimestampEpochMillis() > 0);
@@ -498,7 +500,7 @@ class MvccVersioningTest {
         long p0 = onlyNodeId(repository.checkout(seedCommit.getId()), "P0");
 
         GraphWriteTransaction scratchWrite = repository.beginWrite("scratch");
-        scratchWrite.addNode("Temp", Map.of("keep", false));
+        scratchWrite.addNode("Temp", Colls.mapOf("keep", false));
         GraphCommit scratchHead = scratchWrite.commit("trash", "throwaway");
         assertEquals(6, repository.checkout(scratchHead.getId()).getNodeCount());
         // root + seed + scratchHead
@@ -533,7 +535,7 @@ class MvccVersioningTest {
         GraphCommit base = seed(repository, 2);
 
         GraphWriteTransaction write = repository.beginWrite("main");
-        write.createTag(new TagSchema("Person", List.of(
+        write.createTag(new TagSchema("Person", Colls.listOf(
                 new TagSchema.Field("name", TagSchema.DataType.STRING, false),
                 new TagSchema.Field("age", TagSchema.DataType.INT, true))));
         write.createPropertyIndex("Person", "age");
@@ -541,16 +543,16 @@ class MvccVersioningTest {
 
         assertTrue(repository.checkout(withSchema.getId()).hasPropertyIndex("Person", "age"));
         assertFalse(repository.checkout(base.getId()).hasPropertyIndex("Person", "age"));
-        assertEquals(List.of("Person"), repository.checkout(withSchema.getId()).listTags());
-        assertEquals(List.of(), repository.checkout(base.getId()).listTags());
+        assertEquals(Colls.listOf("Person"), repository.checkout(withSchema.getId()).listTags());
+        assertEquals(Colls.listOf(), repository.checkout(base.getId()).listTags());
         assertNotNull(repository.checkout(withSchema.getId()).getTagSchema("Person"));
         assertNull(repository.checkout(base.getId()).getTagSchema("Person"));
 
         // 索引定义是版本化的，值倒排必须在物化视图上真的建好，而不是只有定义。
         InMemoryGraphStore indexedView = repository.materializeView(withSchema.getId());
         assertTrue(indexedView.hasPropertyIndex("Person", "age"));
-        assertEquals(List.of(1L), indexedView.findNodesByProperty("Person", "age", 21));
-        assertEquals(List.of(), repository.materializeView(base.getId())
+        assertEquals(Colls.listOf(1L), indexedView.findNodesByProperty("Person", "age", 21));
+        assertEquals(Colls.listOf(), repository.materializeView(base.getId())
                 .findNodesByProperty("Person", "age", 999));
 
         GraphWriteTransaction drop = repository.beginWrite("main");
@@ -561,11 +563,11 @@ class MvccVersioningTest {
         assertTrue(drop.dropPropertyIndex("Person", "age"));
         GraphCommit dropped = drop.commit("dba", "drop");
 
-        assertEquals(List.of(), repository.checkout(dropped.getId()).listTags());
+        assertEquals(Colls.listOf(), repository.checkout(dropped.getId()).listTags());
         assertFalse(repository.checkout(dropped.getId()).hasPropertyIndex("Person", "age"));
         assertEquals(0, repository.checkout(dropped.getId()).getNodeCount());
         // 旧提交上的 schema、索引和节点都不受后续 drop 影响。
-        assertEquals(List.of("Person"), repository.checkout(withSchema.getId()).listTags());
+        assertEquals(Colls.listOf("Person"), repository.checkout(withSchema.getId()).listTags());
         assertTrue(repository.checkout(withSchema.getId()).hasPropertyIndex("Person", "age"));
         assertEquals(2, repository.checkout(withSchema.getId()).getNodeCount());
     }
@@ -574,16 +576,16 @@ class MvccVersioningTest {
     void edgeUpdatesReindexAdjacencyOnBothEndpoints() {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction setup = repository.beginWrite("main");
-        Node a = setup.addNode("Person", Map.of("name", "A"));
-        Node b = setup.addNode("Person", Map.of("name", "B"));
-        Node c = setup.addNode("Person", Map.of("name", "C"));
-        Edge knows = setup.addEdge("KNOWS", a.getId(), b.getId(), Map.of("since", 2020));
+        Node a = setup.addNode("Person", Colls.mapOf("name", "A"));
+        Node b = setup.addNode("Person", Colls.mapOf("name", "B"));
+        Node c = setup.addNode("Person", Colls.mapOf("name", "C"));
+        Edge knows = setup.addEdge("KNOWS", a.getId(), b.getId(), Colls.mapOf("since", 2020));
         GraphCommit base = setup.commit("seed", "triangle");
 
         GraphWriteTransaction move = repository.beginWrite("main");
         long edgeId = knows.getId();
         move.removeEdge(edgeId);
-        move.addEdge(edgeId, "KNOWS", a.getId(), c.getId(), Map.of("since", 2021));
+        move.addEdge(edgeId, "KNOWS", a.getId(), c.getId(), Colls.mapOf("since", 2021));
         // 同一事务内先删后加同一 id，净变更必须只是一条 UPSERT。
         assertEquals(0, move.pendingDelta().edgeDeletes().size());
         assertEquals(1, move.pendingDelta().edgeUpserts().size());
@@ -608,7 +610,7 @@ class MvccVersioningTest {
         assertEquals(b.getId(), edgeHistory.get(0).getEdge().getEndNodeId());
         assertEquals(c.getId(), edgeHistory.get(1).getEdge().getEndNodeId());
         assertFalse(edgeHistory.get(1).isDelete());
-        assertEquals(base.getId(), repository.edgeVersionAt(edgeId, base.getId()).orElseThrow().getCommitId());
+        assertEquals(base.getId(), repository.edgeVersionAt(edgeId, base.getId()).orElseThrow(() -> new NoSuchElementException()).getCommitId());
         // 只改边的两端不会给端点节点增加版本。
         assertEquals(1, repository.nodeVersions(a.getId()).size());
         assertEquals(1, repository.nodeVersions(c.getId()).size());
@@ -634,9 +636,9 @@ class MvccVersioningTest {
         assertEquals(31, rows.get(0).get("age"));
         assertEquals("Beijing", rows.get(0).get("city"));
         assertEquals(30, repository.checkout(created.getId()).getStore().getAllNodes().stream()
-                .filter(node -> "Alice".equals(node.get("name"))).findFirst().orElseThrow().get("age"));
+                .filter(node -> "Alice".equals(node.get("name"))).findFirst().orElseThrow(() -> new NoSuchElementException()).get("age"));
         long alice = repository.checkout(created.getId()).getStore().getAllNodes().stream()
-                .filter(node -> "Alice".equals(node.get("name"))).findFirst().orElseThrow().getId();
+                .filter(node -> "Alice".equals(node.get("name"))).findFirst().orElseThrow(() -> new NoSuchElementException()).getId();
         // 此刻链上两格：CREATE 一次、SET 一次。
         assertEquals(2, repository.nodeVersions(alice).size());
         // 两条属性改一次提交，仍然只加一个版本。
@@ -652,10 +654,10 @@ class MvccVersioningTest {
     void nodeDeletionCascadesToEdgesInViewAndDelta() {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction setup = repository.beginWrite("main");
-        Node hub = setup.addNode("Hub", Map.of("name", "hub"));
-        Node leaf = setup.addNode("Leaf", Map.of("name", "leaf"));
-        setup.addEdge("LINK", hub.getId(), leaf.getId(), Map.of());
-        setup.addEdge("BACK", leaf.getId(), hub.getId(), Map.of());
+        Node hub = setup.addNode("Hub", Colls.mapOf("name", "hub"));
+        Node leaf = setup.addNode("Leaf", Colls.mapOf("name", "leaf"));
+        setup.addEdge("LINK", hub.getId(), leaf.getId(), Colls.mapOf());
+        setup.addEdge("BACK", leaf.getId(), hub.getId(), Colls.mapOf());
         GraphCommit withEdges = setup.commit("seed", "star");
         assertEquals(2, repository.checkout(withEdges.getId()).getEdgeCount());
 

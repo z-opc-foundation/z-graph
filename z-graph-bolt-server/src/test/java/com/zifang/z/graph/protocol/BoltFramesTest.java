@@ -4,11 +4,13 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * BoltFrames 编解码单元测试。
@@ -75,7 +77,9 @@ class BoltFramesTest {
     @Test
     void testStringLongRoundTrip() {
         ByteBuf buf = Unpooled.buffer();
-        String s = "x".repeat(300); // 触发 STRING_16
+        char[] filler = new char[300];
+        Arrays.fill(filler, 'x');
+        String s = new String(filler); // 触发 STRING_16
         BoltFrames.writeString(buf, s);
         assertEquals(s, BoltFrames.readValue(buf));
     }
@@ -92,7 +96,7 @@ class BoltFramesTest {
     @Test
     void testListRoundTrip() {
         ByteBuf buf = Unpooled.buffer();
-        BoltFrames.writeList(buf, List.of(1, "two", Boolean.TRUE));
+        BoltFrames.writeList(buf, Colls.listOf(1, "two", Boolean.TRUE));
         Object v = BoltFrames.readValue(buf);
         assertInstanceOf(List.class, v);
         @SuppressWarnings("unchecked")

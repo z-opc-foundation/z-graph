@@ -32,6 +32,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * MVCC 版本化图存储。
@@ -111,7 +112,7 @@ public final class GraphVersionStore {
         if (storageDirectory != null && loadState()) {
             return;
         }
-        GraphCommit root = createCommit(List.of(), "main", "system", "Initial graph",
+        GraphCommit root = createCommit(Colls.listOf(), "main", "system", "Initial graph",
                 new GraphDelta().freeze(), 0, 0);
         branches.put("main", root.getId());
         persistHeader();
@@ -180,11 +181,11 @@ public final class GraphVersionStore {
     }
 
     public synchronized List<GraphCommit> listCommits() {
-        return List.copyOf(commits.values());
+        return Colls.copyOfList(commits.values());
     }
 
     public synchronized List<String> listBranches() {
-        return List.copyOf(branches.keySet());
+        return Colls.copyOfList(branches.keySet());
     }
 
     /** 返回 ref 的第一父链日志，ref 可以是 branch 名或 commit ID。 */
@@ -197,7 +198,7 @@ public final class GraphVersionStore {
             history.add(commit);
             current = commit.getParents().isEmpty() ? null : commit.getParents().get(0);
         }
-        return List.copyOf(history);
+        return Colls.copyOfList(history);
     }
 
     public synchronized GraphCommit createBranch(String branch, String fromCommitId) {
@@ -262,8 +263,11 @@ public final class GraphVersionStore {
      * 途中遇到的套叠覆盖层会被这份平铺视图替换掉（两者内容相同，平铺版读得更快）。
      */
     private InMemoryGraphStore materializeFlat(String commitId) {
-        if (views.get(commitId) instanceof InMemoryGraphStore cached) {
-            return cached;
+        // views 是 access-order LinkedHashMap，get() 会改写内部顺序：这里只求值一次，
+        // 绝不为了 instanceof 而多打一次 get。
+        GraphStore cached = views.get(commitId);
+        if (cached instanceof InMemoryGraphStore) {
+            return (InMemoryGraphStore) cached;
         }
         List<String> chain = new ArrayList<>();
         String cursor = commitId;
@@ -344,12 +348,12 @@ public final class GraphVersionStore {
 
     /** 节点的全部版本，按提交先后排列；节点从未出现在仓库里时为空。 */
     public synchronized List<GraphEntityVersion> nodeVersions(long nodeId) {
-        return List.copyOf(nodeVersions.getOrDefault(nodeId, List.of()));
+        return Colls.copyOfList(nodeVersions.getOrDefault(nodeId, Colls.listOf()));
     }
 
     /** 边的全部版本，按提交先后排列。 */
     public synchronized List<GraphEntityVersion> edgeVersions(long edgeId) {
-        return List.copyOf(edgeVersions.getOrDefault(edgeId, List.of()));
+        return Colls.copyOfList(edgeVersions.getOrDefault(edgeId, Colls.listOf()));
     }
 
     /**
@@ -368,10 +372,10 @@ public final class GraphVersionStore {
     public synchronized List<GraphEntityVersion> nodeHistory(long nodeId, String ref) {
         Set<String> ancestry = ancestorsOfRef(ref);
         List<GraphEntityVersion> visible = new ArrayList<>();
-        for (GraphEntityVersion version : nodeVersions.getOrDefault(nodeId, List.of())) {
+        for (GraphEntityVersion version : nodeVersions.getOrDefault(nodeId, Colls.listOf())) {
             if (ancestry.contains(version.getCommitId())) visible.add(version);
         }
-        return List.copyOf(visible);
+        return Colls.copyOfList(visible);
     }
 
     private java.util.Optional<GraphEntityVersion> versionAt(List<GraphEntityVersion> chain,
@@ -424,8 +428,8 @@ public final class GraphVersionStore {
         for (GraphStore view : views.values()) {
             retainedViewEntities += entityWidth(view);
             wholeGraphWidth = Math.max(wholeGraphWidth, view.getNodeCount() + view.getEdgeCount());
-            if (view instanceof VersionOverlayStore layered) {
-                maxViewLayers = Math.max(maxViewLayers, layered.viewDepth());
+            if (view instanceof VersionOverlayStore) {
+                maxViewLayers = Math.max(maxViewLayers, ((VersionOverlayStore) view).viewDepth());
             }
         }
         stats.put("retainedViewEntities", retainedViewEntities);
@@ -493,7 +497,7 @@ public final class GraphVersionStore {
         InMemoryGraphStore target = EMPTY_VIEW.copy();
         target.applyDelta(full);
         GraphDelta replacement = GraphDelta.between(materializeFlat(headId), target);
-        GraphCommit commit = createCommit(List.of(headId), branch, author, message, replacement.freeze(),
+        GraphCommit commit = createCommit(Colls.listOf(headId), branch, author, message, replacement.freeze(),
                 target.getNodeCount(), target.getEdgeCount());
         branches.put(branch, commit.getId());
         persistHeader();
@@ -515,7 +519,7 @@ public final class GraphVersionStore {
         String targetHeadId = branches.get(targetBranch);
         String sourceHeadId = branches.get(sourceBranch);
         if (Objects.equals(targetHeadId, sourceHeadId)) {
-            return new GraphMergeResult(false, targetHeadId, commits.get(targetHeadId), List.of());
+            return new GraphMergeResult(false, targetHeadId, commits.get(targetHeadId), Colls.listOf());
         }
 
         Map<String, Integer> targetAncestors = ancestorDistances(targetHeadId);
@@ -527,7 +531,7 @@ public final class GraphVersionStore {
             // source 已经包含 target 的全部历史，执行 fast-forward。
             branches.put(targetBranch, sourceHeadId);
             persistHeader();
-            return new GraphMergeResult(true, baseId, commits.get(sourceHeadId), List.of());
+            return new GraphMergeResult(true, baseId, commits.get(sourceHeadId), Colls.listOf());
         }
 
         InMemoryGraphStore base = materializeFlat(baseId);
@@ -539,11 +543,11 @@ public final class GraphVersionStore {
         }
 
         GraphDelta mergeDelta = GraphDelta.between(ours, merged.store).freeze();
-        GraphCommit mergeCommit = createCommit(List.of(targetHeadId, sourceHeadId), targetBranch, author, message,
+        GraphCommit mergeCommit = createCommit(Colls.listOf(targetHeadId, sourceHeadId), targetBranch, author, message,
                 mergeDelta, merged.store.getNodeCount(), merged.store.getEdgeCount());
         branches.put(targetBranch, mergeCommit.getId());
         persistHeader();
-        return new GraphMergeResult(true, baseId, mergeCommit, List.of());
+        return new GraphMergeResult(true, baseId, mergeCommit, Colls.listOf());
     }
 
     /**
@@ -565,7 +569,7 @@ public final class GraphVersionStore {
                     "Branch advanced since transaction started: " + branch
                             + " (expected " + baseCommitId + ", actual " + currentHeadId + ")");
         }
-        GraphCommit commit = createCommit(List.of(baseCommitId), branch, author, message, delta, nodeCount, edgeCount);
+        GraphCommit commit = createCommit(Colls.listOf(baseCommitId), branch, author, message, delta, nodeCount, edgeCount);
         branches.put(branch, commit.getId());
         // 先移动 head 再登记视图：淘汰规则要按"是否还是某个分支的 head"决定谁能被换出。
         registerCommittedView(commit.getId(), committedView);
@@ -616,7 +620,7 @@ public final class GraphVersionStore {
     public synchronized int garbageCollect(String... keepBranches) {
         Set<String> keep = keepBranches == null || keepBranches.length == 0
                 ? new LinkedHashSet<>(branches.keySet())
-                : new LinkedHashSet<>(List.of(keepBranches));
+                : new LinkedHashSet<>(Colls.listOf(keepBranches));
         Set<String> reachable = new HashSet<>();
         for (String branch : keep) {
             String head = branches.get(requireBranch(branch));
@@ -1264,7 +1268,7 @@ public final class GraphVersionStore {
     }
 
     private static void validateBranchName(String branch) {
-        if (branch == null || branch.isBlank() || !branch.matches("[A-Za-z0-9._/-]+")) {
+        if (branch == null || branch.trim().isEmpty() || !branch.matches("[A-Za-z0-9._/-]+")) {
             throw new IllegalArgumentException("Invalid branch name: " + branch);
         }
     }

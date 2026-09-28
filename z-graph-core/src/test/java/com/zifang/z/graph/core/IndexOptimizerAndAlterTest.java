@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 覆盖：
@@ -37,8 +38,8 @@ class IndexOptimizerAndAlterTest {
 
     @Test
     void indexPushdownFindsSingleHit() {
-        store.addNode("Person", Map.of("name", "Alice", "age", 30));
-        store.addNode("Person", Map.of("name", "Bob", "age", 25));
+        store.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
+        store.addNode("Person", Colls.mapOf("name", "Bob", "age", 25));
         store.createPropertyIndex("Person", "name");
 
         List<Map<String, Object>> rows = engine.execute(
@@ -49,21 +50,21 @@ class IndexOptimizerAndAlterTest {
 
     @Test
     void indexPushdownFindsMultipleHits() {
-        store.addNode("Person", Map.of("name", "Alice", "city", "Beijing"));
-        store.addNode("Person", Map.of("name", "Alice", "city", "Shanghai"));
-        store.addNode("Person", Map.of("name", "Bob", "city", "Beijing"));
+        store.addNode("Person", Colls.mapOf("name", "Alice", "city", "Beijing"));
+        store.addNode("Person", Colls.mapOf("name", "Alice", "city", "Shanghai"));
+        store.addNode("Person", Colls.mapOf("name", "Bob", "city", "Beijing"));
         store.createPropertyIndex("Person", "name");
 
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.city AS city");
         assertEquals(2, rows.size());
-        List<String> cities = rows.stream().map(r -> (String) r.get("city")).sorted().toList();
-        assertEquals(List.of("Beijing", "Shanghai"), cities);
+        List<String> cities = rows.stream().map(r -> (String) r.get("city")).sorted().collect(Colls.toUnmodifiableList());
+        assertEquals(Colls.listOf("Beijing", "Shanghai"), cities);
     }
 
     @Test
     void indexPushdownReturnsEmptyWhenNoHit() {
-        store.addNode("Person", Map.of("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
         store.createPropertyIndex("Person", "name");
 
         List<Map<String, Object>> rows = engine.execute(
@@ -74,8 +75,8 @@ class IndexOptimizerAndAlterTest {
     @Test
     void indexPushdownFallsBackToScanWithoutIndex() {
         // 没建索引的场景仍然能正确返回结果（走全表扫描 + WHERE 过滤）
-        store.addNode("Person", Map.of("name", "Alice"));
-        store.addNode("Person", Map.of("name", "Bob"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Bob"));
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.name AS name");
         assertEquals(1, rows.size());
@@ -96,7 +97,7 @@ class IndexOptimizerAndAlterTest {
         assertTrue(schema.hasField("city"));
 
         // 添加新字段后写入新字段的数据仍然合规
-        store.addNode("Person", Map.of("name", "Alice", "age", 30, "city", "Beijing"));
+        store.addNode("Person", Colls.mapOf("name", "Alice", "age", 30, "city", "Beijing"));
         assertEquals(1, store.getNodeCount());
     }
 

@@ -2,7 +2,7 @@ package com.zifang.z.graph.bolt;
 
 import com.zifang.z.graph.core.GraphVersionStore;
 
-import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -32,7 +32,7 @@ public final class ZGraphServer {
 
         GraphVersionStore repository = dataDirectory == null
                 ? new GraphVersionStore()
-                : new GraphVersionStore(Path.of(dataDirectory));
+                : new GraphVersionStore(Paths.get(dataDirectory));
 
         BoltServer bolt = new BoltServer(boltPort, repository);
         bolt.start();
@@ -51,11 +51,11 @@ public final class ZGraphServer {
     }
 
     private static int resolvePort(String arg, String envKey, String propKey, int defaultPort) {
-        if (arg != null && !arg.isBlank()) return Integer.parseInt(arg);
+        if (arg != null && !arg.trim().isEmpty()) return Integer.parseInt(arg);
         String envValue = System.getenv(envKey);
-        if (envValue != null && !envValue.isBlank()) return Integer.parseInt(envValue);
+        if (envValue != null && !envValue.trim().isEmpty()) return Integer.parseInt(envValue);
         String propValue = System.getProperty(propKey);
-        if (propValue != null && !propValue.isBlank()) return Integer.parseInt(propValue);
+        if (propValue != null && !propValue.trim().isEmpty()) return Integer.parseInt(propValue);
         return defaultPort;
     }
 }

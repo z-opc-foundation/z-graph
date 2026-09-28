@@ -8,19 +8,23 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 自动装配的判据一律"读回来等于什么"，不看有没有调用过 setter——
@@ -51,7 +55,7 @@ class ZGraphAutoConfigurationTest {
                 .run(ctx -> {
                     GraphVersionStore store = ctx.getBean(GraphVersionStore.class);
                     GraphWriteTransaction tx = store.beginWrite("main");
-                    tx.addNode("Person", Map.of("name", "In-memory Alice"));
+                    tx.addNode("Person", Colls.mapOf("name", "In-memory Alice"));
                     tx.commit("test", "in-memory write");
                     assertEquals(1, entriesUnder(dir), "data-dir 留空却往目录里写了东西");
                 });
@@ -67,15 +71,17 @@ class ZGraphAutoConfigurationTest {
                     boundPort[0] = port;
                     assertTrue(port > 0, "port=0 时读到 " + port + "，说明拿的是配置值而不是内核分配的端口");
 
-                    HttpResponse<String> health = HttpClient.newHttpClient().send(
-                            HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/health")).GET().build(),
-                            HttpResponse.BodyHandlers.ofString());
-                    assertEquals(200, health.statusCode(), "按 port() 报的端口连不上，那个读数就是假的");
-                    assertTrue(health.body().contains("\"UP\""), health.body());
+                    HttpURLConnection health = (HttpURLConnection) new URL(
+                            "http://127.0.0.1:" + port + "/health").openConnection();
+                    health.setRequestMethod("GET");
+                    assertEquals(200, health.getResponseCode(), "按 port() 报的端口连不上，那个读数就是假的");
+                    String healthBody = readBody(health.getInputStream());
+                    assertTrue(healthBody.contains("\"UP\""), healthBody);
+                    health.disconnect();
 
                     GraphVersionStore store = ctx.getBean(GraphVersionStore.class);
                     GraphWriteTransaction tx = store.beginWrite("main");
-                    tx.addNode("Person", Map.of("name", "Starter Alice"));
+                    tx.addNode("Person", Colls.mapOf("name", "Starter Alice"));
                     tx.commit("test", "starter write");
                     assertTrue(Files.isDirectory(dir.resolve("objects")),
                             "data-dir 配了却没落盘，说明这个属性没人读");
@@ -121,11 +127,26 @@ class ZGraphAutoConfigurationTest {
     }
 
     private static long entriesUnder(Path dir) {
-        try (var walk = Files.walk(dir)) {
+        try (Stream<Path> walk = Files.walk(dir)) {
             return walk.count(); // 目录本身没被写过时就是 1
         } catch (Exception e) {
             throw new AssertionError(e);
         }
+    }
+
+    /** Java 8 没有 java.net.http，测试用 HttpURLConnection 读响应体。 */
+    private static String readBody(InputStream stream) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
+        int read;
+        try {
+            while ((read = stream.read(chunk)) != -1) {
+                buffer.write(chunk, 0, read);
+            }
+        } finally {
+            stream.close();
+        }
+        return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
     }
 
     private static boolean stillListening(int port) {

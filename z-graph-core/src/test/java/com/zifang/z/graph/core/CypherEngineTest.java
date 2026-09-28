@@ -6,6 +6,7 @@ import org.junit.jupiter.api.*;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * CypherEngine 单元测试 — 覆盖 CREATE/MATCH/WHERE/SET/DELETE/RETURN/UNWIND。
@@ -145,7 +146,7 @@ class CypherEngineTest {
         engine.execute("CREATE (b:Person {name: 'Bob', age: 20})");
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) WHERE n.age > $minimum RETURN n.name AS name",
-                Map.of("minimum", 25));
+                Colls.mapOf("minimum", 25));
         assertEquals(1, rows.size());
         assertEquals("Alice", rows.get(0).get("name"));
     }

@@ -5,8 +5,10 @@ import org.junit.jupiter.api.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 覆盖 NebulaGraph 风格的管理 Cypher：
@@ -35,8 +37,8 @@ class ShowAndAggregationTest {
 
     @Test
     void showTagsReturnsRegisteredTags() {
-        store.createTag(new TagSchema("Person", List.of()));
-        store.createTag(new TagSchema("City", List.of()));
+        store.createTag(new TagSchema("Person", Colls.listOf()));
+        store.createTag(new TagSchema("City", Colls.listOf()));
         List<Map<String, Object>> rows = engine.execute("SHOW TAGS");
         assertEquals(2, rows.size());
         assertEquals("City", rows.get(0).get("Name"));
@@ -65,7 +67,7 @@ class ShowAndAggregationTest {
 
     @Test
     void showTagDescribesFields() {
-        store.createTag(new TagSchema("Person", List.of(
+        store.createTag(new TagSchema("Person", Colls.listOf(
                 new TagSchema.Field("name", TagSchema.DataType.STRING, false),
                 new TagSchema.Field("age", TagSchema.DataType.INT))));
         List<Map<String, Object>> rows = engine.execute("SHOW TAG Person");
@@ -77,7 +79,7 @@ class ShowAndAggregationTest {
 
     @Test
     void showEdgeDescribesFields() {
-        store.createEdgeType(new EdgeTypeSchema("KNOWS", List.of(
+        store.createEdgeType(new EdgeTypeSchema("KNOWS", Colls.listOf(
                 new TagSchema.Field("since", TagSchema.DataType.INT))));
         List<Map<String, Object>> rows = engine.execute("SHOW EDGE KNOWS");
         assertEquals(1, rows.size());
@@ -94,9 +96,9 @@ class ShowAndAggregationTest {
 
     @Test
     void countStarReturnsRowCount() {
-        store.addNode("Person", Map.of("name", "Alice"));
-        store.addNode("Person", Map.of("name", "Bob"));
-        store.addNode("City", Map.of("name", "Beijing"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Bob"));
+        store.addNode("City", Colls.mapOf("name", "Beijing"));
         List<Map<String, Object>> rows = engine.execute("MATCH (n) RETURN count(*) AS c");
         assertEquals(1, rows.size());
         assertEquals(3L, rows.get(0).get("c"));
@@ -104,9 +106,9 @@ class ShowAndAggregationTest {
 
     @Test
     void countOnExpressionIgnoresNull() {
-        store.addNode("Person", Map.of("name", "Alice", "age", 30));
-        store.addNode("Person", Map.of("name", "Bob"));
-        store.addNode("Person", Map.of("name", "Charlie", "age", 25));
+        store.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
+        store.addNode("Person", Colls.mapOf("name", "Bob"));
+        store.addNode("Person", Colls.mapOf("name", "Charlie", "age", 25));
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) RETURN count(n.age) AS c");
         assertEquals(1, rows.size());
@@ -115,9 +117,9 @@ class ShowAndAggregationTest {
 
     @Test
     void sumAndAvgOverNumericProperty() {
-        store.addNode("Person", Map.of("age", 30));
-        store.addNode("Person", Map.of("age", 25));
-        store.addNode("Person", Map.of("age", 35));
+        store.addNode("Person", Colls.mapOf("age", 30));
+        store.addNode("Person", Colls.mapOf("age", 25));
+        store.addNode("Person", Colls.mapOf("age", 35));
         List<Map<String, Object>> sumRows = engine.execute(
                 "MATCH (n:Person) RETURN sum(n.age) AS total");
         assertEquals(1, sumRows.size());
@@ -131,9 +133,9 @@ class ShowAndAggregationTest {
 
     @Test
     void minAndMaxAcrossMixedValues() {
-        store.addNode("Person", Map.of("age", 30, "name", "Alice"));
-        store.addNode("Person", Map.of("age", 25, "name", "Bob"));
-        store.addNode("Person", Map.of("age", 35, "name", "Charlie"));
+        store.addNode("Person", Colls.mapOf("age", 30, "name", "Alice"));
+        store.addNode("Person", Colls.mapOf("age", 25, "name", "Bob"));
+        store.addNode("Person", Colls.mapOf("age", 35, "name", "Charlie"));
 
         List<Map<String, Object>> minRows = engine.execute(
                 "MATCH (n:Person) RETURN min(n.age) AS youngest");
@@ -148,9 +150,9 @@ class ShowAndAggregationTest {
 
     @Test
     void aggregationGroupsByNonAggregateColumn() {
-        store.addNode("Person", Map.of("city", "Beijing", "age", 30));
-        store.addNode("Person", Map.of("city", "Beijing", "age", 25));
-        store.addNode("Person", Map.of("city", "Shanghai", "age", 40));
+        store.addNode("Person", Colls.mapOf("city", "Beijing", "age", 30));
+        store.addNode("Person", Colls.mapOf("city", "Beijing", "age", 25));
+        store.addNode("Person", Colls.mapOf("city", "Shanghai", "age", 40));
 
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (n:Person) RETURN n.city AS city, count(n) AS cnt, avg(n.age) AS avg_age");
@@ -158,13 +160,13 @@ class ShowAndAggregationTest {
         Map<String, Object> beijing = rows.stream()
                 .filter(r -> "Beijing".equals(r.get("city")))
                 .findFirst()
-                .orElseThrow();
+                .orElseThrow(() -> new NoSuchElementException());
         assertEquals(2L, beijing.get("cnt"));
         assertEquals(27.5, ((Number) beijing.get("avg_age")).doubleValue(), 1e-9);
         Map<String, Object> shanghai = rows.stream()
                 .filter(r -> "Shanghai".equals(r.get("city")))
                 .findFirst()
-                .orElseThrow();
+                .orElseThrow(() -> new NoSuchElementException());
         assertEquals(1L, shanghai.get("cnt"));
         assertEquals(40.0, ((Number) shanghai.get("avg_age")).doubleValue(), 1e-9);
     }

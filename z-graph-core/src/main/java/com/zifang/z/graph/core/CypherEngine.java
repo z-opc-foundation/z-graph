@@ -5,6 +5,7 @@ import com.zifang.z.graph.api.*;
 import java.util.*;
 import java.util.regex.*;
 import java.util.stream.Collectors;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * Cypher 查询引擎 — 支持 OpenCypher 子集的查询解析与执行。
@@ -179,7 +180,8 @@ public class CypherEngine {
     private String toCypherLiteral(Object value) {
         if (value == null) return "null";
         if (value instanceof Boolean || value instanceof Number) return value.toString();
-        if (value instanceof Collection<?> collection) {
+        if (value instanceof Collection<?>) {
+            Collection<?> collection = (Collection<?>) value;
             return "[" + collection.stream().map(this::toCypherLiteral).collect(Collectors.joining(", ")) + "]";
         }
         return "'" + value.toString().replace("'", "\\\\'") + "'";
@@ -190,7 +192,7 @@ public class CypherEngine {
     private List<Map<String, Object>> executeReturn(String cypher) {
         // RETURN expr AS alias, expr2 AS alias2, ...
         String body = cypher.substring(6).trim();
-        return List.of(parseReturnRow(body));
+        return Colls.listOf(parseReturnRow(body));
     }
 
     private Map<String, Object> parseReturnRow(String returnBody) {
@@ -339,13 +341,13 @@ public class CypherEngine {
         MatchBinding binding = new MatchBinding();
         if (!variable.isEmpty()) binding.variables.put(variable, node);
         if (returnClause != null && !returnClause.isEmpty()) {
-            return executeReturnProjection(returnClause, List.of(binding));
+            return executeReturnProjection(returnClause, Colls.listOf(binding));
         }
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("id", node.getId());
         row.put("label", label);
         row.putAll(node.getProperties());
-        return List.of(row);
+        return Colls.listOf(row);
     }
 
     // ==================== MATCH ====================
@@ -470,7 +472,7 @@ public class CypherEngine {
         if (limitClause != null && !limitClause.trim().isEmpty()) {
             to = Math.min(ordered.size(), from + (int) Double.parseDouble(limitClause.trim()));
         }
-        if (from >= ordered.size()) return List.of();
+        if (from >= ordered.size()) return Colls.listOf();
         return new ArrayList<>(ordered.subList(from, Math.min(to, ordered.size())));
     }
 
@@ -511,8 +513,8 @@ public class CypherEngine {
                 String varName = key.substring(0, dot);
                 String prop = key.substring(dot + 1);
                 Object target = binding.variables.get(varName);
-                if (target instanceof Node node) return node.get(prop);
-                if (target instanceof Edge edge) return edge.get(prop);
+                if (target instanceof Node) return ((Node) target).get(prop);
+                if (target instanceof Edge) return ((Edge) target).get(prop);
             }
             if (binding.variables.containsKey(key)) {
                 return binding.variables.get(key);
@@ -521,7 +523,40 @@ public class CypherEngine {
         return null;
     }
 
-    private record OrderKey(String column, boolean ascending) {
+    private static final class OrderKey {
+        private final String column;
+        private final boolean ascending;
+
+        private OrderKey(String column, boolean ascending) {
+            this.column = column;
+            this.ascending = ascending;
+        }
+
+        public String column() { return column; }
+
+        public boolean ascending() { return ascending; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof OrderKey)) {
+                return false;
+            }
+            OrderKey other = (OrderKey) o;
+            return ascending == other.ascending && Objects.equals(column, other.column);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(column, ascending);
+        }
+
+        @Override
+        public String toString() {
+            return "OrderKey[column=" + column + ", ascending=" + ascending + "]";
+        }
     }
 
     private List<OrderKey> parseOrderClause(String clause) {
@@ -547,7 +582,8 @@ public class CypherEngine {
         Set<Long> nodeIdsToDelete = new LinkedHashSet<>();
         for (MatchBinding b : bindings) {
             for (Map.Entry<String, Object> e : b.variables.entrySet()) {
-                if (e.getValue() instanceof Node n) {
+                if (e.getValue() instanceof Node) {
+                    Node n = (Node) e.getValue();
                     nodeIdsToDelete.add(n.getId());
                 }
             }
@@ -557,7 +593,7 @@ public class CypherEngine {
 
             else store.removeNode(id);
         }
-        return List.of(Map.of("deleted", nodeIdsToDelete.size()));
+        return Colls.listOf(Colls.mapOf("deleted", nodeIdsToDelete.size()));
     }
 
     private void executeSet(String setExpr, List<MatchBinding> bindings) {
@@ -582,10 +618,10 @@ public class CypherEngine {
                 Object target = b.variables.get(varName);
                 // 必须走 store 的更新入口：物化视图交出的是只读快照，
                 // 就地改句柄会让 SET 静默丢失，甚至改脏共享的历史视图。
-                if (target instanceof Node node) {
-                    store.updateNode(node.getId(), singlePropertyPatch(propName, value));
-                } else if (target instanceof Edge edge) {
-                    store.updateEdge(edge.getId(), singlePropertyPatch(propName, value));
+                if (target instanceof Node) {
+                    store.updateNode(((Node) target).getId(), singlePropertyPatch(propName, value));
+                } else if (target instanceof Edge) {
+                    store.updateEdge(((Edge) target).getId(), singlePropertyPatch(propName, value));
                 }
             }
         }
@@ -609,11 +645,11 @@ public class CypherEngine {
         for (MatchBinding binding : bindings) {
             for (Map.Entry<String, Object> entry : binding.variables.entrySet()) {
                 Object value = entry.getValue();
-                if (value instanceof Node node) {
-                    Node fresh = store.getNode(node.getId());
+                if (value instanceof Node) {
+                    Node fresh = store.getNode(((Node) value).getId());
                     if (fresh != null) entry.setValue(fresh);
-                } else if (value instanceof Edge edge) {
-                    Edge fresh = store.getEdge(edge.getId());
+                } else if (value instanceof Edge) {
+                    Edge fresh = store.getEdge(((Edge) value).getId());
                     if (fresh != null) entry.setValue(fresh);
                 }
             }
@@ -682,7 +718,7 @@ public class CypherEngine {
         List<MatchBinding> results = new ArrayList<>();
         for (MatchBinding base : existing) {
             List<Long> starts = base.variables.containsKey(fromVar)
-                    ? List.of(((Node) base.variables.get(fromVar)).getId())
+                    ? Colls.listOf(((Node) base.variables.get(fromVar)).getId())
                     : (fromLabel != null ? store.getNodeIdsByLabel(fromLabel) : store.getAllNodeIds());
             for (long startId : starts) {
                 Node startNode = store.getNode(startId);
@@ -955,8 +991,8 @@ public class CypherEngine {
         if (anchorMatcher.find()) {
             String anchor = anchorMatcher.group(1);
             Object target = binding.variables.get(anchor);
-            if (target instanceof Node node) {
-                return !store.getOutEdges(node.getId()).isEmpty();
+            if (target instanceof Node) {
+                return !store.getOutEdges(((Node) target).getId()).isEmpty();
             }
             return false;
         }
@@ -965,8 +1001,8 @@ public class CypherEngine {
         if (incomingMatcher.find()) {
             String anchor = incomingMatcher.group(1);
             Object target = binding.variables.get(anchor);
-            if (target instanceof Node node) {
-                return !store.getInEdges(node.getId()).isEmpty();
+            if (target instanceof Node) {
+                return !store.getInEdges(((Node) target).getId()).isEmpty();
             }
             return false;
         }
@@ -982,9 +1018,9 @@ public class CypherEngine {
             String varName = expr.substring(0, dotPos);
             String prop = expr.substring(dotPos + 1);
             Object target = binding.variables.get(varName);
-            if (target instanceof Node node) { return node.get(prop); }
+            if (target instanceof Node) { return ((Node) target).get(prop); }
 
-            if (target instanceof Edge edge) { return edge.get(prop); }
+            if (target instanceof Edge) { return ((Edge) target).get(prop); }
 
         }
         // 先查 binding 中的变量引用（如 x、n）
@@ -1019,7 +1055,7 @@ public class CypherEngine {
         for (Projection projection : projections) {
             row.put(projection.alias, projection.aggregate == null
                     ? resolveExpression(projection.expr, binding)
-                    : projection.aggregate.compute(List.of(binding)));
+                    : projection.aggregate.compute(Colls.listOf(binding)));
         }
         return row;
     }
@@ -1054,7 +1090,7 @@ public class CypherEngine {
         Map<String, Map<String, Object>> groupKeys = new LinkedHashMap<>();
         List<Projection> nonAggregates = projections.stream()
                 .filter(p -> p.aggregate == null)
-                .toList();
+                .collect(Colls.toUnmodifiableList());
         for (MatchBinding binding : bindings) {
             StringBuilder key = new StringBuilder();
             Map<String, Object> keyMap = new LinkedHashMap<>();
@@ -1076,10 +1112,10 @@ public class CypherEngine {
             Map<String, Object> row = new LinkedHashMap<>();
             for (Projection projection : projections) {
                 if (projection.aggregate != null) {
-                    row.put(projection.alias, projection.aggregate.compute(List.of()));
+                    row.put(projection.alias, projection.aggregate.compute(Colls.listOf()));
                 }
             }
-            return List.of(row);
+            return Colls.listOf(row);
         }
         for (Map.Entry<String, List<MatchBinding>> entry : groups.entrySet()) {
             Map<String, Object> row = new LinkedHashMap<>(groupKeys.get(entry.getKey()));
@@ -1104,7 +1140,7 @@ public class CypherEngine {
     }
 
     private Object evaluateAggregate(String function, String source, List<MatchBinding> bindings) {
-        if (bindings == null) bindings = List.of();
+        if (bindings == null) bindings = Colls.listOf();
         if ("count".equals(function)) {
             if (source == null) return (long) bindings.size();
             long nonNull = 0;
@@ -1120,13 +1156,18 @@ public class CypherEngine {
             if (value instanceof Number) values.add(value);
         }
         if (values.isEmpty()) return null;
-        return switch (function) {
-            case "sum" -> values.stream().mapToDouble(v -> ((Number) v).doubleValue()).sum();
-            case "avg" -> values.stream().mapToDouble(v -> ((Number) v).doubleValue()).average().orElse(0);
-            case "min" -> values.stream().min((a, b) -> compareNumbersOrStrings(a, b)).orElse(null);
-            case "max" -> values.stream().max((a, b) -> compareNumbersOrStrings(a, b)).orElse(null);
-            default -> null;
-        };
+        switch (function) {
+            case "sum":
+                return values.stream().mapToDouble(v -> ((Number) v).doubleValue()).sum();
+            case "avg":
+                return values.stream().mapToDouble(v -> ((Number) v).doubleValue()).average().orElse(0);
+            case "min":
+                return values.stream().min((a, b) -> compareNumbersOrStrings(a, b)).orElse(null);
+            case "max":
+                return values.stream().max((a, b) -> compareNumbersOrStrings(a, b)).orElse(null);
+            default:
+                return null;
+        }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -1137,7 +1178,46 @@ public class CypherEngine {
         return String.valueOf(a).compareTo(String.valueOf(b));
     }
 
-    private record Projection(String expr, String alias, AggregateCall aggregate) {
+    private static final class Projection {
+        private final String expr;
+        private final String alias;
+        private final AggregateCall aggregate;
+
+        private Projection(String expr, String alias, AggregateCall aggregate) {
+            this.expr = expr;
+            this.alias = alias;
+            this.aggregate = aggregate;
+        }
+
+        public String expr() { return expr; }
+
+        public String alias() { return alias; }
+
+        public AggregateCall aggregate() { return aggregate; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Projection)) {
+                return false;
+            }
+            Projection other = (Projection) o;
+            return Objects.equals(expr, other.expr)
+                    && Objects.equals(alias, other.alias)
+                    && Objects.equals(aggregate, other.aggregate);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(expr, alias, aggregate);
+        }
+
+        @Override
+        public String toString() {
+            return "Projection[expr=" + expr + ", alias=" + alias + ", aggregate=" + aggregate + "]";
+        }
     }
 
     private final class AggregateCall {
@@ -1173,7 +1253,7 @@ public class CypherEngine {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put(asVar, evaluateLiteral(item));
             if (returnExpr != null && !returnExpr.trim().isEmpty()) {
-                row = projectRow(returnExpr.trim(), new MatchBinding(Map.of(asVar, row.get(asVar))));
+                row = projectRow(returnExpr.trim(), new MatchBinding(Colls.mapOf(asVar, row.get(asVar))));
             }
             results.add(row);
         }
@@ -1289,7 +1369,7 @@ public class CypherEngine {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("Name", name);
         row.put("Fields", schema.getFields().size());
-        return List.of(row);
+        return Colls.listOf(row);
     }
 
     private List<Map<String, Object>> executeDropTag(String cypher) {
@@ -1302,7 +1382,7 @@ public class CypherEngine {
         if (!dropped) {
             throw new CypherException("Tag not found: " + name);
         }
-        return List.of(Map.of("Dropped", name));
+        return Colls.listOf(Colls.mapOf("Dropped", name));
     }
 
     private List<Map<String, Object>> executeCreateEdgeType(String cypher) {
@@ -1327,7 +1407,7 @@ public class CypherEngine {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("Name", name);
         row.put("Fields", schema.getFields().size());
-        return List.of(row);
+        return Colls.listOf(row);
     }
 
     private List<Map<String, Object>> executeDropEdgeType(String cypher) {
@@ -1340,7 +1420,7 @@ public class CypherEngine {
         if (!dropped) {
             throw new CypherException("EdgeType not found: " + name);
         }
-        return List.of(Map.of("Dropped", name));
+        return Colls.listOf(Colls.mapOf("Dropped", name));
     }
 
     /** ALTER TAG <name> ADD (<field> <type> [, ...]) / DROP (<field>) */
@@ -1382,7 +1462,7 @@ public class CypherEngine {
             }
             TagSchema next = applySchemaAction(current, fieldsStr, action, "ALTER TAG " + name);
             store.createTag(next);
-            return List.of(Map.of("Altered", name, "Action", action, "Fields", next.getFields().size()));
+            return Colls.listOf(Colls.mapOf("Altered", name, "Action", action, "Fields", next.getFields().size()));
         } else {
             EdgeTypeSchema current = store.getEdgeTypeSchema(name);
             if (current == null) {
@@ -1390,7 +1470,7 @@ public class CypherEngine {
             }
             EdgeTypeSchema next = applyEdgeAction(current, fieldsStr, action);
             store.createEdgeType(next);
-            return List.of(Map.of("Altered", name, "Action", action, "Fields", next.getFields().size()));
+            return Colls.listOf(Colls.mapOf("Altered", name, "Action", action, "Fields", next.getFields().size()));
         }
     }
 
@@ -1458,7 +1538,7 @@ public class CypherEngine {
 
     /** REBUILD TAG INDEX <name> / REBUILD INDEX <name>。当前为同步空操作，索引已实时维护。 */
     private List<Map<String, Object>> executeRebuildIndex(String cypher) {
-        return List.of(Map.of("Rebuilt", "ok",
+        return Colls.listOf(Colls.mapOf("Rebuilt", "ok",
                 "Note", "in-memory index is always up-to-date"));
     }
 
@@ -1531,11 +1611,11 @@ public class CypherEngine {
             List<String> aggregates = projections.stream()
                     .filter(p -> p.aggregate() != null)
                     .map(Projection::alias)
-                    .toList();
+                    .collect(Colls.toUnmodifiableList());
             List<String> groupKeys = projections.stream()
                     .filter(p -> p.aggregate() == null)
                     .map(Projection::alias)
-                    .toList();
+                    .collect(Colls.toUnmodifiableList());
             if (!aggregates.isEmpty()) {
                 plan.add(step("Aggregate",
                         "aggregates=" + aggregates + " groupBy=" + groupKeys));
@@ -1586,7 +1666,7 @@ public class CypherEngine {
         }
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.putAll(ims.getStats());
-        return List.of(stats);
+        return Colls.listOf(stats);
     }
 
     /**
@@ -1594,18 +1674,18 @@ public class CypherEngine {
      * InMemoryGraphStore。返回 null 时说明 store 不是内存图。
      */
     private static InMemoryGraphStore unwrapInMemoryStore(GraphStore store) {
-        if (store instanceof InMemoryGraphStore ims) return ims;
-        if (store instanceof ReadOnlyGraphStore ros) {
-            GraphStore delegate = reflectDelegate(ros);
-            if (delegate instanceof InMemoryGraphStore ims) return ims;
+        if (store instanceof InMemoryGraphStore) return (InMemoryGraphStore) store;
+        if (store instanceof ReadOnlyGraphStore) {
+            GraphStore delegate = reflectDelegate((ReadOnlyGraphStore) store);
+            if (delegate instanceof InMemoryGraphStore) return (InMemoryGraphStore) delegate;
         }
         // GraphWriteTransaction 直接实现 GraphStore,反射取出 workingStore 字段
-        if (store instanceof GraphWriteTransaction tx) {
+        if (store instanceof GraphWriteTransaction) {
             try {
                 java.lang.reflect.Field f = GraphWriteTransaction.class.getDeclaredField("workingStore");
                 f.setAccessible(true);
-                Object ws = f.get(tx);
-                if (ws instanceof InMemoryGraphStore ims) return ims;
+                Object ws = f.get(store);
+                if (ws instanceof InMemoryGraphStore) return (InMemoryGraphStore) ws;
             } catch (ReflectiveOperationException ignored) {
                 // 回落到 null
             }
@@ -1643,28 +1723,44 @@ public class CypherEngine {
             throw new CypherException("Invalid CALL statement: " + cypher);
         }
         String procedure = m.group(1).toLowerCase();
-        String[] args = m.group(2) == null || m.group(2).isBlank()
+        String[] args = m.group(2) == null || m.group(2).trim().isEmpty()
                 ? new String[0]
                 : splitByComma(m.group(2)).stream()
                         .map(String::trim)
                         .filter(s -> !s.isEmpty())
                         .toArray(String[]::new);
-        return switch (procedure) {
-            case "db.version", "version" -> {
+        switch (procedure) {
+            case "db.version":
+            case "version": {
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("version", "z-graph-1.0.0");
                 row.put("build", "in-memory MVP");
-                yield List.of(row);
+                return Colls.listOf(row);
             }
-            case "db.stats", "stats" -> executeShowStats();
-            case "db.tags", "tags" -> listSchemas("TAG");
-            case "db.edges", "edges" -> listSchemas("EDGE");
-            case "db.indexes", "indexes" -> listIndexes();
-            case "db.branches", "branches" -> listBranches();
-            case "db.commits", "commits" -> listCommits();
-            case "db.head", "head" -> listHead(procedureArgs(args));
-            default -> throw new CypherException("Unknown procedure: " + procedure);
-        };
+            case "db.stats":
+            case "stats":
+                return executeShowStats();
+            case "db.tags":
+            case "tags":
+                return listSchemas("TAG");
+            case "db.edges":
+            case "edges":
+                return listSchemas("EDGE");
+            case "db.indexes":
+            case "indexes":
+                return listIndexes();
+            case "db.branches":
+            case "branches":
+                return listBranches();
+            case "db.commits":
+            case "commits":
+                return listCommits();
+            case "db.head":
+            case "head":
+                return listHead(procedureArgs(args));
+            default:
+                throw new CypherException("Unknown procedure: " + procedure);
+        }
     }
 
     /** 把 CALL db.head('<branch>') 的字符串参数解出来,缺省 main。 */
@@ -1719,7 +1815,7 @@ public class CypherEngine {
         row.put("Message", head.getMessage());
         row.put("Nodes", head.getNodeCount());
         row.put("Edges", head.getEdgeCount());
-        return List.of(row);
+        return Colls.listOf(row);
     }
 
     private void requireRepository() {
@@ -1757,7 +1853,7 @@ public class CypherEngine {
     private List<Map<String, Object>> listIndexes() {
         InMemoryGraphStore ims = unwrapInMemoryStore(store);
         if (ims == null) {
-            return List.of();
+            return Colls.listOf();
         }
         List<Map<String, Object>> rows = new ArrayList<>();
         for (List<String> index : ims.getPropertyIndexes()) {
@@ -1801,9 +1897,10 @@ public class CypherEngine {
         }
         String label = parts[0].trim();
         String property = parts[1].trim();
-        if (!(store instanceof InMemoryGraphStore ims)) {
+        if (!(store instanceof InMemoryGraphStore)) {
             throw new CypherException("Index management requires InMemoryGraphStore");
         }
+        InMemoryGraphStore ims = (InMemoryGraphStore) store;
         boolean created = ims.createPropertyIndex(label, property);
         if (!created && !ims.hasPropertyIndex(label, property)) {
             throw new CypherException("Failed to create index: " + label + "." + property);
@@ -1811,7 +1908,7 @@ public class CypherEngine {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("Kind", kind);
         row.put("Name", label + "." + property);
-        return List.of(row);
+        return Colls.listOf(row);
     }
 
     private List<Map<String, Object>> executeDropIndex(String cypher) {
@@ -1836,9 +1933,10 @@ public class CypherEngine {
         }
         String label = parts[0].trim();
         String property = parts[1].trim();
-        if (!(store instanceof InMemoryGraphStore ims)) {
+        if (!(store instanceof InMemoryGraphStore)) {
             throw new CypherException("Index management requires InMemoryGraphStore");
         }
+        InMemoryGraphStore ims = (InMemoryGraphStore) store;
         boolean dropped = ims.dropPropertyIndex(label, property);
         if (!dropped) {
             throw new CypherException("Index not found: " + label + "." + property);
@@ -1846,7 +1944,7 @@ public class CypherEngine {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("Kind", kind);
         row.put("Dropped", label + "." + property);
-        return List.of(row);
+        return Colls.listOf(row);
     }
 
     private static String stripLeadingKeyword(String cypher, String keywordUpper) {
@@ -1923,13 +2021,41 @@ public class CypherEngine {
         } else {
             row.put("column_1", null);
         }
-        return List.of(row);
+        return Colls.listOf(row);
     }
 
     // ==================== 索引下推优化 ====================
 
     /** 单节点 MATCH + WHERE 等值 + 索引命中时构造的 binding 集合。 */
-    private record IndexedSeed(List<MatchBinding> bindings) {
+    private static final class IndexedSeed {
+        private final List<MatchBinding> bindings;
+
+        private IndexedSeed(List<MatchBinding> bindings) {
+            this.bindings = bindings;
+        }
+
+        public List<MatchBinding> bindings() { return bindings; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof IndexedSeed)) {
+                return false;
+            }
+            return Objects.equals(bindings, ((IndexedSeed) o).bindings);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(bindings);
+        }
+
+        @Override
+        public String toString() {
+            return "IndexedSeed[bindings=" + bindings + "]";
+        }
     }
 
     /**
@@ -1938,7 +2064,8 @@ public class CypherEngine {
      */
     private IndexedSeed tryIndexSeed(String pattern, String whereClause) {
         if (whereClause == null || whereClause.trim().isEmpty()) return null;
-        if (!(store instanceof InMemoryGraphStore ims)) return null;
+        if (!(store instanceof InMemoryGraphStore)) return null;
+        InMemoryGraphStore ims = (InMemoryGraphStore) store;
         Matcher patMatch = Pattern.compile("^\\s*\\(\\s*(\\w+)\\s*:\\s*(\\w+)\\s*\\)\\s*$").matcher(pattern.trim());
         if (!patMatch.matches()) return null;
         String var = patMatch.group(1);
@@ -2008,27 +2135,27 @@ public class CypherEngine {
         if (lhs instanceof Number && rhs instanceof Number) {
             double l = ((Number) lhs).doubleValue();
             double r = ((Number) rhs).doubleValue();
-            return switch (op) {
-                case "=" -> l == r;
-                case "!=" -> l != r;
-                case ">" -> l > r;
-                case "<" -> l < r;
-                case ">=" -> l >= r;
-                case "<=" -> l <= r;
-                default -> false;
-            };
+            switch (op) {
+                case "=": return l == r;
+                case "!=": return l != r;
+                case ">": return l > r;
+                case "<": return l < r;
+                case ">=": return l >= r;
+                case "<=": return l <= r;
+                default: return false;
+            }
         }
         // 字符串比较
         int cmp = lhs.toString().compareTo(rhs.toString());
-        return switch (op) {
-            case "=" -> cmp == 0;
-            case "!=" -> cmp != 0;
-            case ">" -> cmp > 0;
-            case "<" -> cmp < 0;
-            case ">=" -> cmp >= 0;
-            case "<=" -> cmp <= 0;
-            default -> false;
-        };
+        switch (op) {
+            case "=": return cmp == 0;
+            case "!=": return cmp != 0;
+            case ">": return cmp > 0;
+            case "<": return cmp < 0;
+            case ">=": return cmp >= 0;
+            case "<=": return cmp <= 0;
+            default: return false;
+        }
     }
 
     private String extractClause(String cypher, String upper, String startKeyword, String endPattern) {
@@ -2063,7 +2190,7 @@ public class CypherEngine {
             }
             sb.append(c);
         }
-        if (!sb.isEmpty()) { parts.add(sb.toString()); }
+        if (sb.length() > 0) { parts.add(sb.toString()); }
 
         return parts;
     }
@@ -2107,14 +2234,16 @@ public class CypherEngine {
         Map<String, Object> toResultMap() {
             Map<String, Object> result = new LinkedHashMap<>();
             for (Map.Entry<String, Object> e : variables.entrySet()) {
-                if (e.getValue() instanceof Node node) {
+                if (e.getValue() instanceof Node) {
+                    Node node = (Node) e.getValue();
                     result.put(e.getKey(), node);
                     result.put(e.getKey() + ".id", node.getId());
                     result.put(e.getKey() + ".labels", node.getLabels());
                     for (Map.Entry<String, Object> prop : node.getProperties().entrySet()) {
                         result.put(e.getKey() + "." + prop.getKey(), prop.getValue());
                     }
-                } else if (e.getValue() instanceof Edge edge) {
+                } else if (e.getValue() instanceof Edge) {
+                    Edge edge = (Edge) e.getValue();
                     result.put(e.getKey(), edge);
                 } else {
                     result.put(e.getKey(), e.getValue());

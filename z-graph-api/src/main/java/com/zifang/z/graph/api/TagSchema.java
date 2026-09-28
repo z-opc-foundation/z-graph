@@ -56,11 +56,11 @@ public class TagSchema {
                 throw new IllegalArgumentException("Duplicate field on tag " + name + ": " + field.getName());
             }
         }
-        this.fields = List.copyOf(fields);
+        this.fields = Colls.copyOfList(fields);
     }
 
     public TagSchema(String name) {
-        this(name, List.of());
+        this(name, Colls.listOf());
     }
 
     public String getName() { return name; }
@@ -95,7 +95,7 @@ public class TagSchema {
      * @throws SchemaViolationException 当属性集不合法时抛出
      */
     public void validate(Map<String, Object> properties) {
-        if (properties == null) properties = Map.of();
+        if (properties == null) properties = Colls.mapOf();
         for (Map.Entry<String, Object> entry : properties.entrySet()) {
             String key = entry.getKey();
             Field field = getField(key);
@@ -127,15 +127,25 @@ public class TagSchema {
     }
 
     private static boolean typeMatches(Object value, DataType expected) {
-        return switch (expected) {
-            case STRING -> value instanceof String;
-            case INT -> value instanceof Integer;
-            case BIGINT -> value instanceof Integer || value instanceof Long;
-            case DOUBLE -> value instanceof Number;
-            case BOOL -> value instanceof Boolean;
-            case NULL -> value == null;
-            case DATE, DATETIME -> value instanceof String || value instanceof java.util.Date;
-        };
+        switch (expected) {
+            case STRING:
+                return value instanceof String;
+            case INT:
+                return value instanceof Integer;
+            case BIGINT:
+                return value instanceof Integer || value instanceof Long;
+            case DOUBLE:
+                return value instanceof Number;
+            case BOOL:
+                return value instanceof Boolean;
+            case NULL:
+                return value == null;
+            case DATE:
+            case DATETIME:
+                return value instanceof String || value instanceof java.util.Date;
+            default:
+                throw new IllegalArgumentException("Unsupported data type: " + expected);
+        }
     }
 
     @Override

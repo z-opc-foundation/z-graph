@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 覆盖 NebulaGraph 风格的 DDL Cypher 与变长路径匹配、OPTIONAL MATCH。
@@ -102,19 +103,19 @@ class DdlAndPathTest {
 
     @Test
     void variableLengthPathFindsTwoHops() {
-        Node a = store.addNode("City", Map.of("name", "A"));
-        Node b = store.addNode("City", Map.of("name", "B"));
-        Node c = store.addNode("City", Map.of("name", "C"));
-        Node d = store.addNode("City", Map.of("name", "D"));
-        store.addEdge("ROAD", a.getId(), b.getId(), Map.of());
-        store.addEdge("ROAD", b.getId(), c.getId(), Map.of());
-        store.addEdge("ROAD", c.getId(), d.getId(), Map.of());
+        Node a = store.addNode("City", Colls.mapOf("name", "A"));
+        Node b = store.addNode("City", Colls.mapOf("name", "B"));
+        Node c = store.addNode("City", Colls.mapOf("name", "C"));
+        Node d = store.addNode("City", Colls.mapOf("name", "D"));
+        store.addEdge("ROAD", a.getId(), b.getId(), Colls.mapOf());
+        store.addEdge("ROAD", b.getId(), c.getId(), Colls.mapOf());
+        store.addEdge("ROAD", c.getId(), d.getId(), Colls.mapOf());
 
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (a:City)-[:ROAD*1..3]->(b:City) WHERE a.name = 'A' RETURN b.name AS name");
         // A → B (1), A → B → C (2), A → B → C → D (3)
         assertTrue(rows.size() >= 3);
-        List<String> names = rows.stream().map(r -> (String) r.get("name")).toList();
+        List<String> names = rows.stream().map(r -> (String) r.get("name")).collect(Colls.toUnmodifiableList());
         assertTrue(names.contains("B"));
         assertTrue(names.contains("C"));
         assertTrue(names.contains("D"));
@@ -122,11 +123,11 @@ class DdlAndPathTest {
 
     @Test
     void variableLengthPathTypeFiltering() {
-        Node a = store.addNode("City", Map.of("name", "A"));
-        Node b = store.addNode("City", Map.of("name", "B"));
-        Node c = store.addNode("City", Map.of("name", "C"));
-        store.addEdge("ROAD", a.getId(), b.getId(), Map.of());
-        store.addEdge("FLIGHT", b.getId(), c.getId(), Map.of());
+        Node a = store.addNode("City", Colls.mapOf("name", "A"));
+        Node b = store.addNode("City", Colls.mapOf("name", "B"));
+        Node c = store.addNode("City", Colls.mapOf("name", "C"));
+        store.addEdge("ROAD", a.getId(), b.getId(), Colls.mapOf());
+        store.addEdge("FLIGHT", b.getId(), c.getId(), Colls.mapOf());
 
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (a:City)-[:ROAD*1..3]->(b:City) WHERE a.name = 'A' RETURN b.name AS name");
@@ -137,11 +138,11 @@ class DdlAndPathTest {
 
     @Test
     void variableLengthPathRespectsMinHops() {
-        Node a = store.addNode("City", Map.of("name", "A"));
-        Node b = store.addNode("City", Map.of("name", "B"));
-        Node c = store.addNode("City", Map.of("name", "C"));
-        store.addEdge("ROAD", a.getId(), b.getId(), Map.of());
-        store.addEdge("ROAD", b.getId(), c.getId(), Map.of());
+        Node a = store.addNode("City", Colls.mapOf("name", "A"));
+        Node b = store.addNode("City", Colls.mapOf("name", "B"));
+        Node c = store.addNode("City", Colls.mapOf("name", "C"));
+        store.addEdge("ROAD", a.getId(), b.getId(), Colls.mapOf());
+        store.addEdge("ROAD", b.getId(), c.getId(), Colls.mapOf());
 
         List<Map<String, Object>> rows = engine.execute(
                 "MATCH (a:City)-[:ROAD*2..2]->(c:City) WHERE a.name = 'A' RETURN c.name AS name");
@@ -163,7 +164,7 @@ class DdlAndPathTest {
 
     @Test
     void optionalMatchFallsBackToNormalMatchWhenHits() {
-        store.addNode("Person", Map.of("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
         List<Map<String, Object>> rows = engine.execute(
                 "OPTIONAL MATCH (n:Person) RETURN n.name AS name");
         assertEquals(1, rows.size());
@@ -172,8 +173,8 @@ class DdlAndPathTest {
 
     @Test
     void optionalMatchRespectsWhereFilter() {
-        store.addNode("Person", Map.of("name", "Alice", "age", 30));
-        store.addNode("Person", Map.of("name", "Bob", "age", 20));
+        store.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
+        store.addNode("Person", Colls.mapOf("name", "Bob", "age", 20));
         // 命中 Alice
         List<Map<String, Object>> hit = engine.execute(
                 "OPTIONAL MATCH (n:Person) WHERE n.age > 25 RETURN n.name AS name");

@@ -8,8 +8,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 端到端测试：通过原生 Bolt 4.4 socket 协议与服务端交互，
@@ -25,7 +27,7 @@ class BoltServerE2ETest {
         repository = new GraphVersionStore();
         // 预置数据：通过事务写入 Person 节点，验证连接可以直接读到 main head
         GraphWriteTransaction tx = repository.beginWrite("main");
-        tx.addNode("Person", Map.of("name", "E2E Alice", "age", 30));
+        tx.addNode("Person", Colls.mapOf("name", "E2E Alice", "age", 30));
         tx.commit("seed", "seed");
 
         server = new BoltServer(0, repository);
@@ -69,7 +71,7 @@ class BoltServerE2ETest {
         try (BoltTestClient client = new BoltTestClient("127.0.0.1", server.port())) {
             client.hello();
             Map<String, Object> meta = client.run("MATCH (n:Person) WHERE n.name = $who RETURN n.age AS age",
-                    Map.of("who", "E2E Alice"));
+                    Colls.mapOf("who", "E2E Alice"));
             long qid = client.lastQid(meta);
             List<String> fields = client.lastFields(meta);
             List<Map<String, Object>> rows = client.pull(qid, -1, fields);
@@ -87,7 +89,7 @@ class BoltServerE2ETest {
             client.pull(client.lastQid(meta), -1, client.lastFields(meta));
             String commitId = client.commit();
             assertNotNull(commitId);
-            assertFalse(commitId.isBlank());
+            assertFalse(commitId.trim().isEmpty());
             // 提交后用新连接可以看到新节点（main head 已推进）
             try (BoltTestClient second = new BoltTestClient("127.0.0.1", server.port())) {
                 second.hello();
@@ -146,7 +148,7 @@ class BoltServerE2ETest {
             Map<String, Object> seedRow = commitRows.stream()
                     .filter(row -> "seed".equals(row.get("Message")))
                     .findFirst()
-                    .orElseThrow();
+                    .orElseThrow(() -> new NoSuchElementException());
             assertEquals("main", seedRow.get("Branch"));
             assertEquals(1, ((Number) seedRow.get("Nodes")).intValue());
 

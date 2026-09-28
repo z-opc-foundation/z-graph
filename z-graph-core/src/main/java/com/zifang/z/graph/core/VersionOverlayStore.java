@@ -19,6 +19,7 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.TreeSet;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * 写事务的读改写覆盖层（MVCC 里的 private version）。
@@ -67,7 +68,7 @@ final class VersionOverlayStore implements GraphStore {
      * 读穿透越贵，仓库据此决定何时摊平一次。平铺视图记作 0 层。
      */
     int viewDepth() {
-        return 1 + (base instanceof VersionOverlayStore layered ? layered.viewDepth() : 0);
+        return 1 + (base instanceof VersionOverlayStore ? ((VersionOverlayStore) base).viewDepth() : 0);
     }
 
     GraphDelta pendingDelta() {
@@ -85,9 +86,10 @@ final class VersionOverlayStore implements GraphStore {
 
     /** 缓存视图计费：平铺视图按整图规模，覆盖层只按本层增量。 */
     static long billedEntities(GraphStore view) {
-        return view instanceof VersionOverlayStore layered
-                ? layered.ownEntityCount()
-                : view.getNodeCount() + view.getEdgeCount();
+        if (view instanceof VersionOverlayStore) {
+            return ((VersionOverlayStore) view).ownEntityCount();
+        }
+        return view.getNodeCount() + view.getEdgeCount();
     }
 
     // ==================== 节点 ====================
@@ -99,11 +101,11 @@ final class VersionOverlayStore implements GraphStore {
 
     @Override
     public Node addNode(long id, String label, Map<String, Object> properties) {
-        return addNode(id, (label != null && !label.isEmpty()) ? List.of(label) : List.of(), properties);
+        return addNode(id, (label != null && !label.isEmpty()) ? Colls.listOf(label) : Colls.listOf(), properties);
     }
 
     Node addNode(long id, Collection<String> labels, Map<String, Object> properties) {
-        Collection<String> safeLabels = labels != null ? labels : List.of();
+        Collection<String> safeLabels = labels != null ? labels : Colls.listOf();
         validateTagSchemas(safeLabels, properties);
         Node node = new Node(id, safeLabels, InMemoryGraphStore.deepCopyMap(properties));
         if (mergedNode(id) == null) {
@@ -285,7 +287,7 @@ final class VersionOverlayStore implements GraphStore {
 
     private static List<Long> overlayBucket(Map<Long, List<Long>> buckets, long nodeId) {
         List<Long> bucket = buckets.get(nodeId);
-        return bucket == null ? List.of() : new ArrayList<>(bucket);
+        return bucket == null ? Colls.listOf() : new ArrayList<>(bucket);
     }
 
     private List<Long> baseEdgesFor(long nodeId) {
@@ -303,7 +305,7 @@ final class VersionOverlayStore implements GraphStore {
     public List<Edge> getOutEdges(long nodeId) {
         List<Edge> result = new ArrayList<>();
         Set<Long> emitted = new HashSet<>();
-        for (long id : base.getOutEdges(nodeId).stream().map(Edge::getId).toList()) {
+        for (long id : base.getOutEdges(nodeId).stream().map(Edge::getId).collect(Colls.toUnmodifiableList())) {
             if (isEdgeTouched(id)) continue;
             Edge edge = base.getEdge(id);
             if (edge != null && edge.getStartNodeId() == nodeId && emitted.add(id)) result.add(GraphDelta.copyEdge(edge));
@@ -319,7 +321,7 @@ final class VersionOverlayStore implements GraphStore {
     public List<Edge> getInEdges(long nodeId) {
         List<Edge> result = new ArrayList<>();
         Set<Long> emitted = new HashSet<>();
-        for (long id : base.getInEdges(nodeId).stream().map(Edge::getId).toList()) {
+        for (long id : base.getInEdges(nodeId).stream().map(Edge::getId).collect(Colls.toUnmodifiableList())) {
             if (isEdgeTouched(id)) continue;
             Edge edge = base.getEdge(id);
             if (edge != null && edge.getEndNodeId() == nodeId && emitted.add(id)) result.add(GraphDelta.copyEdge(edge));
@@ -520,7 +522,7 @@ final class VersionOverlayStore implements GraphStore {
         names.addAll(base.listTags());
         names.removeAll(pending.tagDeletes());
         for (TagSchema schema : pending.tagUpserts()) names.add(schema.getName());
-        return List.copyOf(names);
+        return Colls.copyOfList(names);
     }
 
     @Override
@@ -553,7 +555,7 @@ final class VersionOverlayStore implements GraphStore {
         names.addAll(base.listEdgeTypes());
         names.removeAll(pending.edgeTypeDeletes());
         for (EdgeTypeSchema schema : pending.edgeTypeUpserts()) names.add(schema.getName());
-        return List.copyOf(names);
+        return Colls.copyOfList(names);
     }
 
     // ==================== 属性索引定义 ====================
@@ -580,7 +582,7 @@ final class VersionOverlayStore implements GraphStore {
     List<List<String>> getPropertyIndexes() {
         List<List<String>> result = new ArrayList<>();
         for (InMemoryGraphStore.IndexDefinition definition : indexDefinitions()) {
-            result.add(List.of(definition.label(), definition.propertyKey()));
+            result.add(Colls.listOf(definition.label(), definition.propertyKey()));
         }
         return result;
     }
@@ -604,9 +606,9 @@ final class VersionOverlayStore implements GraphStore {
 
     /** 基底可能是平铺视图，也可能是上一个 commit 的覆盖层，两者都要能取出索引定义。 */
     private Set<InMemoryGraphStore.IndexDefinition> baseIndexDefinitions() {
-        if (base instanceof InMemoryGraphStore flat) return flat.indexDefinitions();
-        if (base instanceof VersionOverlayStore layered) return layered.indexDefinitions();
-        return Set.of();
+        if (base instanceof InMemoryGraphStore) return ((InMemoryGraphStore) base).indexDefinitions();
+        if (base instanceof VersionOverlayStore) return ((VersionOverlayStore) base).indexDefinitions();
+        return Colls.setOf();
     }
 
     @Override

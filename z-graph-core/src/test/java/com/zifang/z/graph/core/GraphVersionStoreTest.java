@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.zifang.z.graph.api.Colls;
 
 /** GraphVersionStore 的 commit、分支、checkout、merge 语义测试。 */
 class GraphVersionStoreTest {
@@ -23,11 +24,11 @@ class GraphVersionStoreTest {
         GraphVersionStore repository = new GraphVersionStore();
 
         GraphWriteTransaction firstWrite = repository.beginWrite("main");
-        firstWrite.addNode("Person", Map.of("name", "Alice"));
+        firstWrite.addNode("Person", Colls.mapOf("name", "Alice"));
         GraphCommit first = firstWrite.commit("alice", "add Alice");
 
         GraphWriteTransaction secondWrite = repository.beginWrite("main");
-        secondWrite.addNode("Person", Map.of("name", "Bob"));
+        secondWrite.addNode("Person", Colls.mapOf("name", "Bob"));
         GraphCommit second = secondWrite.commit("bob", "add Bob");
 
         assertEquals(1, repository.checkout(first.getId()).getNodeCount());
@@ -40,17 +41,17 @@ class GraphVersionStoreTest {
     void branchCanBeCreatedFromCommitAndMergedBack() {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction initialWrite = repository.beginWrite("main");
-        initialWrite.addNode("Person", Map.of("name", "Alice"));
+        initialWrite.addNode("Person", Colls.mapOf("name", "Alice"));
         GraphCommit base = initialWrite.commit("alice", "base graph");
 
         repository.createBranch("feature", base.getId());
 
         GraphWriteTransaction mainWrite = repository.beginWrite("main");
-        mainWrite.addNode("Person", Map.of("name", "Bob"));
+        mainWrite.addNode("Person", Colls.mapOf("name", "Bob"));
         mainWrite.commit("bob", "main change");
 
         GraphWriteTransaction featureWrite = repository.beginWrite("feature");
-        featureWrite.addNode("Person", Map.of("name", "Carol"));
+        featureWrite.addNode("Person", Colls.mapOf("name", "Carol"));
         featureWrite.commit("carol", "feature change");
 
         GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "merge feature");
@@ -65,15 +66,15 @@ class GraphVersionStoreTest {
     void checkoutIsReadOnlyAndDoesNotFollowBranchHead() {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction write = repository.beginWrite("main");
-        write.addNode("Person", Map.of("name", "Alice"));
+        write.addNode("Person", Colls.mapOf("name", "Alice"));
         GraphCommit oldHead = write.commit("alice", "old");
 
         assertThrows(UnsupportedOperationException.class,
                 () -> repository.checkout(oldHead.getId()).getStore()
-                        .addNode("Person", Map.of("name", "cannot write")));
+                        .addNode("Person", Colls.mapOf("name", "cannot write")));
 
         GraphWriteTransaction nextWrite = repository.beginWrite("main");
-        nextWrite.addNode("Person", Map.of("name", "Bob"));
+        nextWrite.addNode("Person", Colls.mapOf("name", "Bob"));
         nextWrite.commit("bob", "new");
 
         List<Map<String, Object>> oldRows = repository.checkout(oldHead.getId())
@@ -86,8 +87,8 @@ class GraphVersionStoreTest {
     void repositoryRestoresCommitsAndSnapshots(@TempDir Path repositoryDirectory) {
         GraphVersionStore repository = new GraphVersionStore(repositoryDirectory);
         GraphWriteTransaction write = repository.beginWrite("main");
-        write.addNode("Person", Map.of("name", "Persistent Alice", "age", 30,
-                "tags", List.of("graph", "storage"), "profile", Map.of("city", "Beijing")));
+        write.addNode("Person", Colls.mapOf("name", "Persistent Alice", "age", 30,
+                "tags", Colls.listOf("graph", "storage"), "profile", Colls.mapOf("city", "Beijing")));
         write.createPropertyIndex("Person", "age");
         GraphCommit commit = write.commit("alice", "persist graph");
 
@@ -102,25 +103,25 @@ class GraphVersionStoreTest {
         assertEquals("Persistent Alice", rows.get(0).get("name"));
         assertEquals(30, rows.get(0).get("age"));
         long nodeId = reopened.checkout(commit.getId()).getStore().getAllNodes().get(0).getId();
-        assertEquals(List.of("graph", "storage"), reopened.checkout(commit.getId()).getStore().getNode(nodeId).get("tags"));
-        assertEquals(Map.of("city", "Beijing"), reopened.checkout(commit.getId()).getStore().getNode(nodeId).get("profile"));
+        assertEquals(Colls.listOf("graph", "storage"), reopened.checkout(commit.getId()).getStore().getNode(nodeId).get("tags"));
+        assertEquals(Colls.mapOf("city", "Beijing"), reopened.checkout(commit.getId()).getStore().getNode(nodeId).get("profile"));
     }
 
     @Test
     void independentPropertyChangesAreMerged() {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction initialWrite = repository.beginWrite("main");
-        initialWrite.addNode("Person", Map.of("name", "Alice", "age", 30));
+        initialWrite.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
         GraphCommit base = initialWrite.commit("alice", "base");
         long nodeId = repository.checkout(base.getId()).getStore().getAllNodes().get(0).getId();
         repository.createBranch("feature", base.getId());
 
         GraphWriteTransaction mainWrite = repository.beginWrite("main");
-        mainWrite.updateNode(nodeId, Map.of("city", "Beijing"));
+        mainWrite.updateNode(nodeId, Colls.mapOf("city", "Beijing"));
         mainWrite.commit("main", "main property");
 
         GraphWriteTransaction featureWrite = repository.beginWrite("feature");
-        featureWrite.updateNode(nodeId, Map.of("age", 31));
+        featureWrite.updateNode(nodeId, Colls.mapOf("age", 31));
         featureWrite.commit("feature", "feature property");
 
         GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "merge properties");
@@ -133,17 +134,17 @@ class GraphVersionStoreTest {
     void conflictingChangesDoNotMoveTargetBranch() {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction initialWrite = repository.beginWrite("main");
-        initialWrite.addNode("Person", Map.of("name", "Alice", "age", 30));
+        initialWrite.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
         GraphCommit base = initialWrite.commit("alice", "base");
         long nodeId = repository.checkout(base.getId()).getStore().getAllNodes().get(0).getId();
         repository.createBranch("feature", base.getId());
 
         GraphWriteTransaction mainWrite = repository.beginWrite("main");
-        mainWrite.updateNode(nodeId, Map.of("age", 31));
+        mainWrite.updateNode(nodeId, Colls.mapOf("age", 31));
         GraphCommit mainHead = mainWrite.commit("main", "main age");
 
         GraphWriteTransaction featureWrite = repository.beginWrite("feature");
-        featureWrite.updateNode(nodeId, Map.of("age", 32));
+        featureWrite.updateNode(nodeId, Colls.mapOf("age", 32));
         featureWrite.commit("feature", "feature age");
 
         GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "conflicting merge");
@@ -174,7 +175,7 @@ class GraphVersionStoreTest {
         GraphQueryService query = new GraphQueryService(repository);
 
         GraphWriteTransaction write = query.beginWrite("main");
-        write.addNode("Person", Map.of("name", "Alice"));
+        write.addNode("Person", Colls.mapOf("name", "Alice"));
         GraphCommit commit = write.commit("alice", "service facade");
 
         assertEquals(commit.getId(), meta.head("main").getId());
@@ -188,10 +189,10 @@ class GraphVersionStoreTest {
         GraphVersionStore repository = new GraphVersionStore();
         GraphWriteTransaction stale = repository.beginWrite("main");
         GraphWriteTransaction winner = repository.beginWrite("main");
-        winner.addNode("Person", Map.of("name", "winner"));
+        winner.addNode("Person", Colls.mapOf("name", "winner"));
         winner.commit("winner", "advance branch");
 
-        stale.addNode("Person", Map.of("name", "stale"));
+        stale.addNode("Person", Colls.mapOf("name", "stale"));
         assertThrows(IllegalStateException.class, () -> stale.commit("stale", "must fail"));
     }
 }

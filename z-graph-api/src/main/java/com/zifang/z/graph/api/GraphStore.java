@@ -83,12 +83,12 @@ public interface GraphStore {
 
     /** 获取所有节点 ID，结果按节点 ID 升序排列。 */
     default List<Long> getAllNodeIds() {
-        return getAllNodes().stream().map(Node::getId).toList();
+        return getAllNodes().stream().map(Node::getId).collect(Colls.toUnmodifiableList());
     }
 
     /** 获取所有边 ID，结果按边 ID 升序排列。 */
     default List<Long> getAllEdgeIds() {
-        return getAllEdges().stream().map(Edge::getId).toList();
+        return getAllEdges().stream().map(Edge::getId).collect(Colls.toUnmodifiableList());
     }
 
     // ==================== 事务（简化）====================

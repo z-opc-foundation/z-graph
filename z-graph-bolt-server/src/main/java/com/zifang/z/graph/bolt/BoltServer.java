@@ -18,6 +18,7 @@ import org.apache.logging.log4j.Logger;
 
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /**
  * z-graph Bolt 4.4 服务端 — Netty 实现,POC 版本。
@@ -74,15 +75,27 @@ public class BoltServer {
 
         ChannelFuture f = b.bind(new InetSocketAddress(port)).sync();
         serverChannel = f.channel();
-        log.info("✅ z-graph BoltServer started on port {} (PID={})", port, ProcessHandle.current().pid());
+        log.info("✅ z-graph BoltServer started on port {} (PID={})", port, currentPid());
+    }
+
+    /** Java 8 没有 ProcessHandle：RuntimeMXBean 的名字形如 "&lt;pid&gt;@&lt;host&gt;"，取前缀即为 PID。 */
+    private static long currentPid() {
+        String runtimeName = java.lang.management.ManagementFactory.getRuntimeMXBean().getName();
+        int at = runtimeName.indexOf('@');
+        try {
+            return Long.parseLong(at > 0 ? runtimeName.substring(0, at) : runtimeName);
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
     }
 
     public int port() {
         if (serverChannel == null) {
             return port;
         }
-        if (serverChannel.localAddress() instanceof InetSocketAddress addr) {
-            return addr.getPort();
+        Object localAddress = serverChannel.localAddress();
+        if (localAddress instanceof InetSocketAddress) {
+            return ((InetSocketAddress) localAddress).getPort();
         }
         return port;
     }
@@ -102,7 +115,7 @@ public class BoltServer {
         String dataDirectory = System.getProperty("z.graph.dataDir");
         BoltServer server = dataDirectory == null
                 ? new BoltServer(port)
-                : new BoltServer(port, Path.of(dataDirectory));
+                : new BoltServer(port, Paths.get(dataDirectory));
         server.start();
         Runtime.getRuntime().addShutdownHook(new Thread(server::shutdown));
         // 阻塞直到 channel 关闭

@@ -30,7 +30,40 @@ import java.util.Set;
 public final class GraphDelta {
 
     /** 属性索引定义键。 */
-    public record IndexKey(String label, String propertyKey) {
+    public static final class IndexKey {
+        private final String label;
+        private final String propertyKey;
+
+        public IndexKey(String label, String propertyKey) {
+            this.label = label;
+            this.propertyKey = propertyKey;
+        }
+
+        public String label() { return label; }
+
+        public String propertyKey() { return propertyKey; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof IndexKey)) {
+                return false;
+            }
+            IndexKey other = (IndexKey) o;
+            return Objects.equals(label, other.label) && Objects.equals(propertyKey, other.propertyKey);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(label, propertyKey);
+        }
+
+        @Override
+        public String toString() {
+            return "IndexKey[label=" + label + ", propertyKey=" + propertyKey + "]";
+        }
     }
 
     private final LinkedHashMap<Long, Node> nodeUpserts = new LinkedHashMap<>();

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.*;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.zifang.z.graph.api.Colls;
 
 /**
  * InMemoryGraphStore 单元测试 — 覆盖节点/边/遍历/属性操作。
@@ -24,7 +25,7 @@ class InMemoryGraphStoreTest {
 
     @Test
     void addNodeAndRetrieve() {
-        Node n = store.addNode("Person", Map.of("name", "Alice", "age", 30));
+        Node n = store.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
         assertEquals(0, n.getId());
         assertTrue(n.hasLabel("Person"));
         assertEquals("Alice", n.get("name"));
@@ -33,9 +34,9 @@ class InMemoryGraphStoreTest {
 
     @Test
     void addMultipleNodes() {
-        store.addNode("Person", Map.of("name", "Alice"));
-        store.addNode("Person", Map.of("name", "Bob"));
-        store.addNode("City", Map.of("name", "Beijing"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Bob"));
+        store.addNode("City", Colls.mapOf("name", "Beijing"));
         assertEquals(3, store.getNodeCount());
         assertEquals(2, store.getNodeIdsByLabel("Person").size());
         assertEquals(1, store.getNodeIdsByLabel("City").size());
@@ -43,16 +44,16 @@ class InMemoryGraphStoreTest {
 
     @Test
     void updateNode() {
-        Node n = store.addNode("Person", Map.of("name", "Alice", "age", 30));
-        store.updateNode(n.getId(), Map.of("age", 31));
+        Node n = store.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
+        store.updateNode(n.getId(), Colls.mapOf("age", 31));
         assertEquals(31, store.getNode(n.getId()).get("age"));
     }
 
     @Test
     void removeNodeRemovesEdges() {
-        Node a = store.addNode("Person", Map.of("name", "Alice"));
-        Node b = store.addNode("Person", Map.of("name", "Bob"));
-        store.addEdge("FRIEND", a.getId(), b.getId(), Map.of());
+        Node a = store.addNode("Person", Colls.mapOf("name", "Alice"));
+        Node b = store.addNode("Person", Colls.mapOf("name", "Bob"));
+        store.addEdge("FRIEND", a.getId(), b.getId(), Colls.mapOf());
         assertEquals(1, store.getEdgeCount());
         store.removeNode(a.getId());
         assertEquals(0, store.getEdgeCount());
@@ -62,9 +63,9 @@ class InMemoryGraphStoreTest {
 
     @Test
     void addEdgeAndRetrieve() {
-        Node a = store.addNode("Person", Map.of("name", "Alice"));
-        Node b = store.addNode("Person", Map.of("name", "Bob"));
-        Edge e = store.addEdge("FRIEND", a.getId(), b.getId(), Map.of("since", 2020));
+        Node a = store.addNode("Person", Colls.mapOf("name", "Alice"));
+        Node b = store.addNode("Person", Colls.mapOf("name", "Bob"));
+        Edge e = store.addEdge("FRIEND", a.getId(), b.getId(), Colls.mapOf("since", 2020));
         assertEquals("FRIEND", e.getType());
         assertEquals(a.getId(), e.getStartNodeId());
         assertEquals(b.getId(), e.getEndNodeId());
@@ -73,28 +74,28 @@ class InMemoryGraphStoreTest {
 
     @Test
     void getOutEdgesAndInEdges() {
-        Node a = store.addNode("Person", Map.of("name", "Alice"));
-        Node b = store.addNode("Person", Map.of("name", "Bob"));
-        Node c = store.addNode("Person", Map.of("name", "Charlie"));
-        store.addEdge("FRIEND", a.getId(), b.getId(), Map.of());
-        store.addEdge("FRIEND", a.getId(), c.getId(), Map.of());
-        store.addEdge("FRIEND", b.getId(), c.getId(), Map.of());
+        Node a = store.addNode("Person", Colls.mapOf("name", "Alice"));
+        Node b = store.addNode("Person", Colls.mapOf("name", "Bob"));
+        Node c = store.addNode("Person", Colls.mapOf("name", "Charlie"));
+        store.addEdge("FRIEND", a.getId(), b.getId(), Colls.mapOf());
+        store.addEdge("FRIEND", a.getId(), c.getId(), Colls.mapOf());
+        store.addEdge("FRIEND", b.getId(), c.getId(), Colls.mapOf());
         assertEquals(2, store.getOutEdges(a.getId()).size());
         assertEquals(2, store.getInEdges(c.getId()).size());
     }
 
     @Test
     void addEdgeToNonExistentNodeThrows() {
-        Node a = store.addNode("Person", Map.of("name", "Alice"));
+        Node a = store.addNode("Person", Colls.mapOf("name", "Alice"));
         assertThrows(IllegalArgumentException.class,
-                () -> store.addEdge("FRIEND", a.getId(), 9999L, Map.of()));
+                () -> store.addEdge("FRIEND", a.getId(), 9999L, Colls.mapOf()));
     }
 
     @Test
     void removeEdge() {
-        Node a = store.addNode("Person", Map.of("name", "Alice"));
-        Node b = store.addNode("Person", Map.of("name", "Bob"));
-        Edge e = store.addEdge("FRIEND", a.getId(), b.getId(), Map.of());
+        Node a = store.addNode("Person", Colls.mapOf("name", "Alice"));
+        Node b = store.addNode("Person", Colls.mapOf("name", "Bob"));
+        Edge e = store.addEdge("FRIEND", a.getId(), b.getId(), Colls.mapOf());
         assertTrue(store.removeEdge(e.getId()));
         assertEquals(0, store.getEdgeCount());
     }
@@ -103,13 +104,13 @@ class InMemoryGraphStoreTest {
 
     @Test
     void traverse() {
-        Node a = store.addNode("City", Map.of("name", "A"));
-        Node b = store.addNode("City", Map.of("name", "B"));
-        Node c = store.addNode("City", Map.of("name", "C"));
-        Node d = store.addNode("City", Map.of("name", "D"));
-        store.addEdge("ROAD", a.getId(), b.getId(), Map.of());
-        store.addEdge("ROAD", b.getId(), c.getId(), Map.of());
-        store.addEdge("ROAD", c.getId(), d.getId(), Map.of());
+        Node a = store.addNode("City", Colls.mapOf("name", "A"));
+        Node b = store.addNode("City", Colls.mapOf("name", "B"));
+        Node c = store.addNode("City", Colls.mapOf("name", "C"));
+        Node d = store.addNode("City", Colls.mapOf("name", "D"));
+        store.addEdge("ROAD", a.getId(), b.getId(), Colls.mapOf());
+        store.addEdge("ROAD", b.getId(), c.getId(), Colls.mapOf());
+        store.addEdge("ROAD", c.getId(), d.getId(), Colls.mapOf());
 
         Set<Long> reachable = store.traverse(a.getId(), 2, "ROAD");
         assertTrue(reachable.contains(a.getId()));
@@ -122,9 +123,9 @@ class InMemoryGraphStoreTest {
 
     @Test
     void findNodesByProperty() {
-        store.addNode("Person", Map.of("name", "Alice", "age", 30));
-        store.addNode("Person", Map.of("name", "Bob", "age", 25));
-        store.addNode("Person", Map.of("name", "Charlie", "age", 30));
+        store.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
+        store.addNode("Person", Colls.mapOf("name", "Bob", "age", 25));
+        store.addNode("Person", Colls.mapOf("name", "Charlie", "age", 30));
         List<Long> result = store.findNodesByProperty("Person", "age", 30);
         assertEquals(2, result.size());
     }
@@ -133,15 +134,15 @@ class InMemoryGraphStoreTest {
 
     @Test
     void propertyIndexSupportsLookupAndUpdates() {
-        Node alice = store.addNode("Person", Map.of("name", "Alice", "city", "Beijing"));
-        store.addNode("Person", Map.of("name", "Bob", "city", "Shanghai"));
+        Node alice = store.addNode("Person", Colls.mapOf("name", "Alice", "city", "Beijing"));
+        store.addNode("Person", Colls.mapOf("name", "Bob", "city", "Shanghai"));
         assertTrue(store.createPropertyIndex("Person", "city"));
         assertTrue(store.hasPropertyIndex("Person", "city"));
-        assertEquals(List.of(alice.getId()), store.findNodesByProperty("Person", "city", "Beijing"));
+        assertEquals(Colls.listOf(alice.getId()), store.findNodesByProperty("Person", "city", "Beijing"));
 
-        store.updateNode(alice.getId(), Map.of("city", "Shenzhen"));
+        store.updateNode(alice.getId(), Colls.mapOf("city", "Shenzhen"));
         assertTrue(store.findNodesByProperty("Person", "city", "Beijing").isEmpty());
-        assertEquals(List.of(alice.getId()), store.findNodesByProperty("Person", "city", "Shenzhen"));
+        assertEquals(Colls.listOf(alice.getId()), store.findNodesByProperty("Person", "city", "Shenzhen"));
         assertTrue(store.dropPropertyIndex("Person", "city"));
     }
 
@@ -149,11 +150,11 @@ class InMemoryGraphStoreTest {
 
     @Test
     void getStats() {
-        store.addNode("Person", Map.of("name", "Alice"));
-        store.addNode("Person", Map.of("name", "Bob"));
+        store.addNode("Person", Colls.mapOf("name", "Alice"));
+        store.addNode("Person", Colls.mapOf("name", "Bob"));
         Node a = store.getNode(0);
         Node b = store.getNode(1);
-        store.addEdge("FRIEND", a.getId(), b.getId(), Map.of());
+        store.addEdge("FRIEND", a.getId(), b.getId(), Colls.mapOf());
         Map<String, Object> stats = store.getStats();
         assertEquals(2, stats.get("nodeCount"));
         assertEquals(1, stats.get("edgeCount"));
