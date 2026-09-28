@@ -197,6 +197,46 @@
         </dependencies>
     </dependencyManagement>
 
+    <build>
+        <plugins>
+            <!-- 常开，不挂 central profile：本仓原来压根没有顶层 `<build>`（source/javadoc/gpg/deploy 全在
+                 profile 里），所以发布的是**未 flatten 的 raw pom**。迁进 z-boot-parent 之后 raw pom 会带着
+                 `<parent>io.github.yuku123:z-boot-parent:1.0.19</parent>` 出厂，而本仓那些被删掉的版本键
+                 （netty/slf4j/log4j/junit…）已经不在自己 pom 里 ⇒ 已经发出去的这一版"到底锁哪些版本"
+                 要等消费者顺着 parent 链现读才能定，等于把发布件的依赖含义交给了以后还能不能取到那条链。
+                 flatten `oss` + updatePomFile 把链上的值**落成字面量**并剥掉 `<parent>`，
+                 保持 z-graph 1.0.7 现在的自包含形状（对照 z-cache/pom.xml 同一格的理由）。
+                 版本钉 1.5.0：门禁机 250（Maven 3.6.0）实测 1.5.0 rc=0，1.6.0/1.7.2 rc=1
+                 “requires Maven version 3.6.3”。 -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.5.0</version>
+                <inherited>true</inherited>
+                <configuration>
+                    <updatePomFile>true</updatePomFile>
+                    <flattenMode>oss</flattenMode>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>flatten.clean</id>
+                        <phase>clean</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
     <profiles>
         <profile>
             <id>central</id>
