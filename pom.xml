@@ -30,7 +30,7 @@
     <!-- ⚠ 1.0.6 在 Maven Central 上是**半成品**：那次 deploy 赶在 Java 8 移植的中途，
          api 已是 class-file 52(带 Colls)，core/bolt-server 仍是 61。Central 不允许同版重发，
          所以 Java 8 版只能走 1.0.7，1.0.6 这个号作废、不要用。 -->
-    <version>1.0.7</version>
+    <version>1.0.8</version>
     <packaging>pom</packaging>
     <name>z-graph</name>
     <description>独立图数据库工程：参考 NebulaGraph 的 Query、Storage、Meta 分层与 Bolt/OpenCypher 兼容能力    </description>
