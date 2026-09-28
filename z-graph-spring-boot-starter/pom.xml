@@ -50,7 +50,9 @@
 
     <properties>
         <!-- 与 z-boot-dependencies 的 pin 一致；starter 只编译期需要 Spring，故全部 optional -->
-        <spring-boot.version>2.7.12</spring-boot.version>
+        <!-- 2026-09-28「同坐标单版本」：2.7.12 → 2.7.18（2.7 线最后一版，Java 8 可用），
+             与 z-boot-dependencies 1.0.18 / z-opc 根 pom 同一口径；12→18 含 CVE 修复，纯上行。 -->
+        <spring-boot.version>2.7.18</spring-boot.version>
     </properties>
 
     <dependencies>
