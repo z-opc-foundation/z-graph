@@ -1,259 +1,89 @@
 # z-graph
 
-> **独立图数据库 + Git 风格版本化图** — NebulaGraph 分层架构 + OpenCypher 查询 + Bolt 4.4 协议
-> Java 8 + Netty 4 + Spring Boot 2.7, 支持 Neo4j Embedded API + REST 控制台
+> 独立图数据库 —— MVCC 版本化图（Git 风格 commit / branch / merge）+ Nebula 风格 Tag/EdgeType schema
+> + OpenCypher 子集 + Bolt 风格二进制协议 + HTTP 控制面 + React 控制台。Java 8 · Netty 4 · Spring Boot 2.7（仅 starter）
 
-[![Maven Central](https://img.shields.io/badge/Maven%20Central-1.0.1-blue?logo=apache-maven)](https://central.sonatype.com/search?q=g:io.github.yuku123+a:z-graph*)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Java](https://img.shields.io/badge/Java-8%2B-orange)](https://openjdk.org)
-[![Docker](https://img.shields.io/badge/Docker-compose-2496ED)](docker-compose.yml)
-[![Bolt](https://img.shields.io/badge/Bolt-4.4%20compatible-008CC1)](https://boltprotocol.org/)
+它要解决的问题：图数据的一次写入不该覆盖历史。`z-graph` 把每个 commit 存成**相对第一父的增量**
+（`GraphDelta`）外加每条节点/边的版本链（`GraphEntityVersion`），因此写成本是 O(本次变更量) 而不是整图复制，
+同时 `checkout(<commitId>)` 仍能给出任意历史时刻的完整视图。上层再挂一个 OpenCypher 子集解析器、
+一个 Bolt 风格 socket 服务、一个 JDK `HttpServer` 控制面，就得到一个可以嵌进 JVM、也可以单容器跑 demo 的图库。
 
----
-
-## 🚀 5 分钟接入
-
-### 方式一：嵌入式（同 JVM 内使用，类似 Neo4j Embedded）
-
-```xml
-<dependency>
-    <groupId>io.github.yuku123</groupId>
-    <artifactId>z-graph-core</artifactId>
-    <version>1.0.1</version>
-</dependency>
-```
-
-```java
-GraphStore store = new InMemoryGraphStore();
-
-// 1. 加节点
-long alice = store.addNode("Person", Map.of("name", "Alice", "age", 30)).getId();
-long bob   = store.addNode("Person", Map.of("name", "Bob",   "age", 25)).getId();
-long acme  = store.addNode("Company", Map.of("name", "Acme Corp")).getId();
-
-// 2. 加关系
-store.addEdge("KNOWS", alice, bob, Map.of("since", "2020-01-01"));
-store.addEdge("WORKS_AT", alice, acme, Map.of("role", "Engineer"));
-
-// 3. 查询 (OpenCypher)
-List<Node> people = store.executeCypher(
-    "MATCH (p:Person)-[:WORKS_AT]->(c:Company {name: 'Acme Corp'}) RETURN p"
-);
-for (Node p : people) {
-    System.out.println(p.getProperty("name"));
-}
-```
-
-### 方式二：独立 server（Bolt 4.4 协议，可连 Neo4j Browser）
-
-```bash
-docker run -d --name z-graph \
-  -p 8182:8182 \
-  -p 8183:8183 \
-  -v /data/z-graph:/data \
-  ghcr.io/z-opc-foundation/z-graph:1.0.1
-# Bolt 4.4:  localhost:8182
-# REST:     localhost:8183
-```
-
-**Neo4j Browser 连入**：
-
-```
-URL:   bolt://localhost:8182
-User:  neo4j
-Pass:  (留空, 开发模式)
-```
-
-任何兼容 Bolt 4.4 的 client（Java / Python / Go / JS）都能连。
-
-### 方式三：Git 风格版本化图（独门特性）
-
-```java
-GraphVersionStore repo = new GraphVersionStore("/data/z-graph-versioned");
-
-// 在 main 分支创建初始节点
-GraphWriteTransaction tx = repo.beginWrite("main");
-tx.addNode("Person", Map.of("name", "Alice"));
-GraphCommit base = tx.commit("alice", "add Alice");
-
-// 修改并提交
-tx = repo.beginWrite("main");
-tx.updateNode(base.getRootNodeIds().get(0), Map.of("age", 30));
-GraphCommit feat = tx.commit("alice", "add Alice age");
-
-// 分支: 模拟 alice 升职到 senior
-tx = repo.beginWrite("feature/promote-alice");
-tx.updateNode(base.getRootNodeIds().get(0), Map.of("role", "senior"));
-tx.commit("alice", "promote alice to senior");
-
-// 合并回 main
-GraphMergeResult merge = repo.merge("main", "feature/promote-alice",
-    "alice", "merge promote");
-System.out.println("merge commit: " + merge.getCommitId());
-
-// 历史查询
-List<GraphCommit> log = repo.log("main", 100);
-```
+架构分层参考 NebulaGraph 的 Meta / Query / Storage 划分（对应 `GraphMetaService` / `GraphQueryService` /
+`GraphVersionStore`+`InMemoryGraphStore`），协议消息面参考 Bolt 4.4 规范；**只采用公开架构与协议资料，
+不复制上游代码**（详见文末「开源参考」）。
 
 ---
 
-## 📦 已发布到 Maven Central 的所有模块
+## 📋 基本信息
 
-> groupId: `io.github.yuku123` · version: **1.0.1**
-
-| 模块 | 说明 | 何时该引入 |
-|---|---|---|
-| `z-graph-api` | 抽象接口（GraphStore / Node / Edge） | 二次开发 |
-| `z-graph-protocol` | Bolt 4.4 协议实现 | 自定义客户端 |
-| `z-graph-core` | InMemoryGraphStore + GraphVersionStore + MetaService | 嵌入式 / library |
-| `z-graph-bolt-server` | Bolt 4.4 + HTTP/REST server | 起独立 server |
-| `z-graph-spring-boot-starter` | Spring Boot 自动装配 | Spring Boot 应用 |
-
----
-
-## ✨ 核心能力
-
-### 图模型
-- ✅ **节点 + 边**（带类型 + 属性）
-- ✅ **多标签节点**（一个节点可以同时是 Person 和 Employee）
-- ✅ **带类型边**（KNOWS / WORKS_AT / LOCATED_IN 等）
-
-### 查询语言
-- ✅ **OpenCypher** 子集（MATCH / WHERE / RETURN / CREATE / MERGE / DELETE）
-- ✅ **路径查询**（最短路径 / 所有路径 / N 跳邻居）
-- ✅ **聚合**（count / sum / avg / min / max / collect）
-- ✅ **排序 + 分页**（ORDER BY / SKIP / LIMIT）
-
-### 协议兼容
-- ✅ **Bolt 4.4**（完全兼容 Neo4j 官方协议）
-- ✅ **Neo4j Browser** 可直接连（bolt://）
-- ✅ **Neo4j Java/Python/Go/JS Driver** 可直接连
-- ✅ **Cypher over HTTP**（REST API）
-
-### 版本化（独门特性）
-- ✅ **不可变快照**（每次 commit 是完整图快照）
-- ✅ **分支 + 合并**（Git 风格 graph checkout）
-- ✅ **commit 历史**（`log` / `diff` / `show`）
-- ✅ **冲突检测**（merge 时基于 LCA 自动 3-way merge）
-
-### 部署
-- ✅ **嵌入式**（同 JVM）
-- ✅ **独立 server**（Bolt + REST）
-- ✅ **可视化控制台**（React + AntD，前 7 页 dashboard）
-- ✅ **Prometheus 指标**（节点数 / 边数 / 查询 P99 / 缓存命中率）
+| 字段 | 值 |
+|------|-----|
+| **仓库** | `z-graph`（remote: `github.com/z-opc-foundation/z-graph`，分支 `main`） |
+| **Maven 坐标** | `io.github.yuku123:z-graph`（聚合 POM）+ 5 个 reactor 子坐标 |
+| **当前版本** | `1.0.8`（根 POM 与 5 个子 POM **逐字面写 1.0.8**，本仓没用 `${revision}`；发布形状由 flatten-maven-plugin 1.5.0 `oss` 模式自包含） |
+| **父项目** | `io.github.yuku123:z-boot-parent:1.0.21`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘） |
+| **Maven Central** | **已发布**：`z-graph` / `-api` / `-protocol` / `-core` / `-bolt-server` / `-spring-boot-starter` 的 `1.0.8` pom 与 jar 均可从 repo1 取到（ranged GET 实测 206）；`1.0.7` 同样可读。⚠ POM 注释里写明 `1.0.6` 是半成品（api 已是 class-file 52、core/bolt-server 仍是 61），**该号作废不要用** |
+| **默认端口** | Bolt `7687` · HTTP 控制面 `8090`（`ZGraphServer` 两个都起）；控制台 dev `5173` / 容器 `3333` / all-in-one `3000` |
+| **运行口径** | Java 8（class-file 52）· Spring Boot 2.7.18（只在 `z-graph-spring-boot-starter`）· Netty 4.1.138.Final |
+| **最近更新** | 2026-09-30 |
 
 ---
 
-## ⚙️ 实用 Case（生产场景）
+## 🎯 能力清单（逐条对应到代码）
 
-### Case 1: 知识图谱（人物 + 公司 + 事件）
+| 能力 | 实现位置 | 说明 |
+|------|----------|------|
+| 节点 / 边 CRUD、多标签节点 | `z-graph-api` `GraphStore` · `InMemoryGraphStore.addNode(long, Collection<String>, Map)` · `Node.getLabels()` | 边带类型与属性；`getOutEdges` / `getInEdges` / `getEdgesByType` |
+| Tag / EdgeType schema | `TagSchema` / `EdgeTypeSchema` + `CypherEngine` 的 `CREATE TAG` / `CREATE EDGE [TYPE]` / `DROP TAG` / `DROP EDGE` / `ALTER TAG` / `ALTER EDGE` / `REBUILD` | Nebula 风格声明式属性、类型与 NOT NULL 校验；覆盖前按旧 schema 校验存量数据 |
+| 属性索引 + 索引下推（**窄口径**） | `InMemoryGraphStore.createPropertyIndex` · `CypherEngine#tryIndexSeed` | 只有模式恰为 `(v:Label)`、WHERE 恰为 `v.prop = 字面量`、且 `(Label, prop)` 索引存在时才替换全表扫描；其余仍走标签扫描 |
+| OpenCypher 子集 | `CypherEngine`（2255 行，手写解析）+ `CypherExecutor`（`RETURN` 字面量旧路径） | 见下方「Cypher 支持矩阵」 |
+| 变长路径 | `CypherEngine` 的 `(a)-[:TYPE*min..max]->(b)` | 反向 `<-[]->`、无方向 `-[]-`、类型过滤均支持 |
+| N 跳邻居 | `GraphStore.traverse(startNodeId, maxDepth, edgeType)` | 返回可达节点集合 |
+| MVCC 版本化图 | `GraphVersionStore`：`beginWrite` / `commit` / `checkout` / `checkoutBranch` / `createBranch` / `log` / `merge` / `nodeVersions` / `nodeVersionAt` / `garbageCollect` / `versionStats` / `reachableCommitCount` | 写事务在 `VersionOverlayStore` 覆盖层里累积增量；提交后把该覆盖层认领为新 commit 的视图 |
+| 并发控制 | `GraphVersionStore.StaleHeadException`（提交时 base head 已被推进） | 控制面对应返回 `409`，Bolt 侧 `RUN` 写路径重试一次 |
+| 三方合并与冲突 | `GraphVersionStore.merge(target, source, author, message)` → `GraphMergeResult`（`isMerged` / `getCommit` / `getConflicts` / `hasConflicts`） | 只自动合并单侧变化；同字段双侧改动进冲突列表且**不移动** target head |
+| 文件持久化 | `GraphVersionStore(Path storageDirectory)`：`objects/<commitId>.bin` + `repository.bin` | `GraphCodec.STORAGE_VERSION=4`（按 commit 存增量），`LEGACY_STORAGE_VERSION=2` 的旧文件仍可读；重启可恢复提交图、版本链与历史视图 |
+| 视图缓存调参 | `withCheckpointInterval` / `withMaxRetainedViews` / `withRetainedWholeGraphViews` / `withViewLayerLimit` / `withEagerCheckpoints` | 默认常量 32 / 64 / 4 份整图 / 8 层，都是 `GraphVersionStore` 的 public 常量 |
+| Bolt 风格协议服务 | `BoltServer`（Netty pipeline）+ `z-graph-protocol`（`BoltConstants` / `BoltFrames` / `BoltMessageDecoder`）+ `BoltMessageHandler` | 消息面见下方「Bolt 消息矩阵」 |
+| HTTP 控制面 | `GraphControlServer`（JDK `com.sun.net.httpserver`，13 个 context） | 认证 / 限流 / 安全响应头 / CORS / GZIP / 请求日志 / 指标 |
+| Spring Boot 自动装配 | `ZGraphAutoConfiguration` + `ZGraphProperties`（前缀 `z.graph`，`AutoConfiguration.imports` 已注册） | `z.graph.enabled` **默认 false**；装的是 `GraphVersionStore` + 内嵌 HTTP 控制面，**不起 BoltServer** |
+| 可视化控制台 | `z-graph-console`（React 18 + Vite 5，`src/App.jsx` 8 个 tab） | 无 AntD 依赖，样式是自写的 `src/styles.css` |
+| 观测 | `/meta/metrics`（JSON）、`/meta/logs`（500 条环形缓冲）、`X-Request-ID` 复用/生成 | Prometheus 文本格式**未实现**，别按 exposition 接 |
 
-```java
-GraphStore g = new InMemoryGraphStore();
+### Cypher 支持矩阵（读源码得出现状）
 
-// 实体
-long alice = g.addNode("Person",  Map.of("name", "Alice", "born", 1990)).getId();
-long acme  = g.addNode("Company", Map.of("name", "Acme Corp", "founded", 2005)).getId();
-long nyc   = g.addNode("City",    Map.of("name", "New York")).getId();
+| 类别 | 已实现 | 边界 |
+|------|--------|------|
+| 读写 | `MATCH` / `OPTIONAL MATCH` / `CREATE` / `MERGE`（upsert）/ `DELETE` / `DETACH DELETE` / `SET` / `REMOVE` | — |
+| 过滤 | `WHERE`：`AND` / `OR` / `NOT` / `IN` / `CONTAINS` / `STARTS WITH` / `ENDS WITH` / `IS [NOT] NULL` / `EXISTS` / `NOT EXISTS` | 复杂嵌套谓词按子集解析 |
+| 返回 | `RETURN` / `DISTINCT` / `WITH`（投影 + `WITH ... ORDER BY`）/ `ORDER BY` / `SKIP` / `LIMIT` | `WITH` 里带聚合会抛 `CypherException` |
+| 聚合 | `count` / `sum` / `avg` / `min` / `max`（自动分组） | **`collect()` 未实现**（`parseAggregate` 正则只收这 5 个函数） |
+| 路径 | 变长 `(a)-[:TYPE*min..max]->(b)`、任意方向、类型过滤 | **`shortestPath()` / `allShortestPaths()` 全仓 0 处实现** |
+| 其他 | `UNWIND [..] AS x` / 多语句 `;` / 参数绑定（`$name`，走 `CypherEngine.execute(cypher, parameters)`） | `UNWIND` 只接字面量列表 |
+| 元数据 | `SHOW TAGS` / `SHOW EDGES` / `SHOW INDEXES` / `SHOW TAG <n>` / `SHOW EDGE <n>` / `SHOW STATS` / `DESCRIBE TAG\|EDGE` | `SHOW STATS` 要求底层是 `InMemoryGraphStore` |
+| 内置过程 | `CALL db.version` / `db.stats` / `db.tags` / `db.edges` / `db.indexes` / `db.branches` / `db.commits` / `db.head` | 后三类需要引擎绑到 `GraphVersionStore`，纯 `InMemoryGraphStore` 调用会抛错 |
+| DDL | `CREATE TAG` / `CREATE EDGE [TYPE]` / `CREATE TAG INDEX` / `CREATE EDGE INDEX` / `DROP TAG\|EDGE\|INDEX` / `ALTER TAG\|EDGE` / `REBUILD` / `EXPLAIN` | — |
 
-// 关系
-g.addEdge("WORKS_AT", alice, acme, Map.of("role", "Engineer", "since", "2020-01-01"));
-g.addEdge("LIVES_IN", alice, nyc, Map.of());
-g.addEdge("LOCATED_IN", acme, nyc, Map.of("headquarters", true));
+### Bolt 消息矩阵
 
-// 查询: Alice 的工作 + 城市
-List<Map<String, Object>> result = g.executeCypherWithParams(
-    """
-    MATCH (p:Person {name: $name})-[:WORKS_AT]->(c:Company)-[:LOCATED_IN]->(city:City)
-    RETURN p.name AS person, c.name AS company, city.name AS city
-    """,
-    Map.of("name", "Alice")
-);
-```
+`BoltMessageHandler` 分发的消息签名：
 
-### Case 2: 推荐系统（二度好友推荐）
+| 请求 | 响应 | 备注 |
+|------|------|------|
+| `HELLO` (0x01) | `SUCCESS` | 回 `connection_id` / `server=z-graph/1.0.0-SNAPSHOT` / `edition=community`；**不校验 scheme/credentials** |
+| `RUN` (0x10) | `SUCCESS`(qid, fields, t_first) | 读查询绑定当前 head 快照；写查询自行开事务并 commit 一次（冲突重试一次） |
+| `PULL` (0x3F) | `SUCCESS` + `RECORD`*N + `SUCCESS`(has_more) | 用普通 `SUCCESS` 代替 `PULL_SUCCESS`，POC 简化 |
+| `BEGIN` / `COMMIT` / `ROLLBACK` | `SUCCESS` / `FAILURE` | 连接级事务落在 `main` 分支的 `GraphWriteTransaction` |
+| `DISCARD` (0x2F) / `RESET` (0x0F) / `GOODBYE` (0x02) | `SUCCESS` / 关连接 | `RESET` 会回滚事务并清空该连接所有流 |
+| 其他 | `FAILURE`（`code=z-graph.POC.Failure`） | — |
 
-```java
-// 给定 alice, 推荐可能认识的人 (排除已认识)
-String cypher = """
-    MATCH (alice:Person {name: 'Alice'})-[:KNOWS]-(friend)-[:KNOWS]-(foaf)
-    WHERE alice <> foaf AND NOT (alice)-[:KNOWS]-(foaf)
-    RETURN foaf.name AS name, count(friend) AS common
-    ORDER BY common DESC
-    LIMIT 10
-""";
-List<Map<String, Object>> recommendations = g.executeCypher(cypher);
-```
-
-### Case 3: 反欺诈图（检测异常模式）
-
-```java
-// 检测 3 跳内的可疑共享设备 (一个人用 3 张身份证)
-String cypher = """
-    MATCH (p1:Person)-[:USES_DEVICE]->(d:Device)<-[:USES_DEVICE]-(p2:Person)
-    WHERE p1.id <> p2.id
-    WITH d, collect(DISTINCT p1) AS users
-    WHERE size(users) >= 3
-    RETURN d.id AS device, [u IN users | u.id] AS user_ids
-""";
-List<Map<String, Object>> suspicious = g.executeCypher(cypher);
-```
-
-### Case 4: 最短路径
-
-```java
-// 公司 A 到公司 B 的最短合作路径 (经过 ≤ 4 层公司)
-String cypher = """
-    MATCH p = shortestPath(
-        (a:Company {name: 'A'})-[:PARTNER_WITH*..4]-(b:Company {name: 'B'})
-    )
-    RETURN [n IN nodes(p) | n.name] AS path, length(p) AS hops
-""";
-```
-
-### Case 5: Git 版本化图（时序数据 + 审计）
-
-```java
-// 场景: 每次合同变更都自动 commit, 出问题时能回溯任意时间点
-GraphVersionStore repo = new GraphVersionStore("/data/contracts-graph");
-
-@Scheduled(cron = "0 0 * * * *")   // 每小时一次
-public void snapshotContracts() {
-    GraphWriteTransaction tx = repo.beginWrite("main");
-    for (Contract c : contractService.findAll()) {
-        // 同步全量合同状态到图
-        ...
-    }
-    tx.commit("system", "snapshot at " + Instant.now());
-}
-
-// 任意时刻审计: 查询上周的状态
-repo.checkout("audit-" + Instant.now().minus(7, DAYS), "main");
-List<Node> contracts = repo.executeCypher("MATCH (c:Contract) RETURN c");
-```
-
-### Case 6: 通过 Bolt 协议（任何语言 client）
-
-```python
-# Python (neo4j-driver)
-from neo4j import GraphDatabase
-
-driver = GraphDatabase.driver("bolt://localhost:8182")
-with driver.session() as session:
-    result = session.run("MATCH (p:Person) RETURN p.name AS name LIMIT 10")
-    for record in result:
-        print(record["name"])
-```
-
-```go
-// Go (neo4j-go-driver)
-driver, _ := neo4j.NewDriver("bolt://localhost:8182", neo4j.NoAuth())
-session := driver.NewSession(neo4j.SessionConfig{})
-result, _ := session.Run("MATCH (p:Person) RETURN p.name", nil)
-for result.Next() {
-    fmt.Println(result.Record().Get("p.name"))
-}
-```
+**协议边界（重要）**：`z-graph-protocol` 的帧头是工程自定义的 `2 字节长度 + 2 字节 chunk 标记`，
+值编码走 PackStream 子集（NULL / BOOL / INT_8..64 / STRING_8..32 / LIST_8..32 / MAP_8..16 / STRUCT_8，
+TINY_* 变体只在读侧识别）；建连前的 4 字节 magic `0x6060B007` 与版本协商段**没有任何处理代码**
+（全仓 grep 无 magic / handshake），`ROUTE`、`ACKS_REQUIRED`、多 chunk 分片、大 chunk 头 `0xFF…` 也都没实现。
+所以**不能宣称"Neo4j 官方 Java/Python/Go/JS Driver 或 Neo4j Browser 可直连 bolt://"**：仓内 E2E 用的是自写的
+`z-graph-bolt-server/src/test/java/com/zifang/z/graph/bolt/BoltTestClient.java`，`_doc/003_script/` 里的
+Python 驱动同样是手写帧。要接官方 driver，得先补 handshake 与版本协商。
 
 ---
 
@@ -261,972 +91,395 @@ for result.Next() {
 
 ```
 z-graph/
-├── pom.xml                          # 自给自足 parent
-├── z-graph-api/                     # GraphStore / Node / Edge 接口
-├── z-graph-protocol/                # Bolt 4.4 协议
-├── z-graph-core/                    # InMemoryGraphStore + VersionStore + MetaService
-├── z-graph-bolt-server/             # Bolt + HTTP/REST server
-├── z-graph-spring-boot-starter/     # Spring Boot 自动装配
-├── z-graph-console/                 # React + AntD 可视化控制台
-└── README.md
+├── pom.xml                        # 聚合 POM：parent z-boot-parent:1.0.21，6 条自家坐标 DM，flatten 常开
+├── z-graph-api/                   # 抽象与值类型：GraphStore / Node / Edge / GraphCommit / GraphMergeResult
+│                                  #   / TagSchema / EdgeTypeSchema / Colls（Java 8 没有 Map.of 的替代品）
+├── z-graph-protocol/              # Bolt 风格帧与值编解码：BoltConstants / BoltFrames / BoltMessageDecoder
+├── z-graph-core/                  # 引擎：CypherEngine / InMemoryGraphStore / GraphVersionStore(MVCC)
+│                                  #   / VersionOverlayStore / GraphDelta / GraphEntityVersion / GraphCodec
+│                                  #   / GraphWriteTransaction / GraphCheckout / GraphQueryService / GraphMetaService
+│                                  #   / ReadOnlyGraphStore / CypherExecutor
+├── z-graph-bolt-server/           # 服务端：BoltServer(Netty) + BoltMessageHandler
+│                                  #   + GraphControlServer(JDK HttpServer，13 端点)
+│                                  #   + 三个 main：ZGraphServer / BoltServer / GraphControlServerMain
+├── z-graph-spring-boot-starter/   # @AutoConfiguration + z.graph.* 配置（默认 enabled=false）
+├── z-graph-console/               # React 18 + Vite 5 控制台（npm 工程，不在 Maven reactor）
+├── deploy/
+│   ├── docker/                    # server.Dockerfile / frontend.Dockerfile / all-in-one.Dockerfile / docker-compose.yml
+│   ├── kubernetes/z-graph.yaml    # Namespace + ConfigMap + PVC + 2 Deployment + 2 Service
+│   └── nginx/                     # frontend.conf（容器，envsubst upstream）/ frontend-local.conf（本机 3333）
+├── poc/                           # 目前为空目录，且未被 git 跟踪
+│                                  #   —— 历史 Bolt 实验脚本已收口到 _doc/003_script/
+├── _doc/                          # 文档收口，见文末「文档目录」
+└── .github/workflows/             # java-tests.yml（mvn -B -ntp verify）+ build-images.yml（三镜像推 GHCR）
 ```
+
+Maven reactor 只有 **5 个模块**（`z-graph-api` / `z-graph-protocol` / `z-graph-core` / `z-graph-bolt-server` /
+`z-graph-spring-boot-starter`）；`z-graph-console` 是独立 npm 工程（`package.json` 里 `private: true`），
+`poc/` 不参与构建。5 个子 POM **都没有** `maven.deploy.skip`，全部参与发布；1.0.8 实测中央可读。
 
 ---
 
-## 🔧 高级配置
+## 🔧 技术栈
 
-### application.yml
+| 层级 | 技术（实测版本） |
+|------|------------------|
+| 语言 / 运行时 | Java 8（`z-boot-parent` 下发 source/target 8 ⇒ class-file 52；1.0.7 起全仓降档） |
+| 二进制协议 | Netty 4.1.138.Final（`netty-all`，版本由地板 `z-boot-dependencies` 的 netty-bom 供给） |
+| HTTP 控制面 | JDK `com.sun.net.httpserver.HttpServer`（**不是** Spring MVC / WebFlux） |
+| Spring 集成 | `spring-boot-autoconfigure:2.7.18`（仅 starter 模块依赖它，web 层不在依赖里） |
+| 日志 | `log4j-api:2.25.4` + 运行期 `slf4j-simple:2.0.13`（bolt-server） |
+| 有意的版本分歧 | `slf4j-api` 2.0.13、`junit` 5.10.2 / `junit-platform` 1.10.2、`objenesis` 3.2 —— 根 POM 按坐标写**直接**条目顶住地板下压，注释里逐条写了原因 |
+| 测试 | JUnit 5（Jupiter）；172 个 `@Test`，分布在 20 个测试类 |
+| 前端 | React 18.3.1 + ReactDOM + Vite 5.4.10；自写 CSS，**无 AntD / 无组件库** |
+| 构建 / 发布 | Maven（flatten-maven-plugin 1.5.0 `oss` + `updatePomFile`）；`central` profile 走 central-publishing-maven-plugin 0.8.0 |
+| 部署 | Docker / docker-compose profiles / k8s 清单 / nginx；GHCR 由 `build-images.yml` 构建推送 |
+
+---
+
+## 🚀 快速开始
+
+### 编译
+
+```bash
+git clone https://github.com/z-opc-foundation/z-graph.git
+cd z-graph
+mvn clean install -DskipTests
+```
+
+第三方版本一律由 `z-boot-parent:1.0.21` → `z-boot-dependencies`（地板）+ `z-boot-fleet`（兄弟仓权威表）供给，
+模块 POM 里不该再出现字面版本钉。构建解析不到 `io.github.yuku123:z-boot-parent:1.0.21` 时先确认能连 repo1。
+注意 flatten 绑在 `process-resources`、`flatten.clean` 绑在 `clean`，所以判定"跑过"要以带 `clean` 的构建为准。
+
+### 起一个进程（Bolt + HTTP 控制面同时起）
+
+```bash
+# 方式 A：Maven exec（_doc/003_script/run_t1_verify.sh 就是这么起的）
+mvn -B -pl z-graph-bolt-server exec:java \
+  -Dexec.mainClass=com.zifang.z.graph.bolt.ZGraphServer \
+  -Dexec.args="7687 8090" \
+  -Dexec.cleanupDaemonThreads=false
+
+# 方式 B：Docker 运行时同款 classpath（server.Dockerfile 的 ENTRYPOINT）
+java $JAVA_OPTS -Dz.graph.dataDir=/tmp/z-graph-data \
+  -cp 'z-graph-bolt-server/target/lib/*:z-graph-bolt-server/target/classes' \
+  com.zifang.z.graph.bolt.ZGraphServer
+
+curl http://localhost:8090/health
+# {"status":"UP","head":"<commitId>","nodeCount":0,"edgeCount":0}
+```
+
+端口优先级：命令行参数 > 环境变量 `Z_GRAPH_BOLT_PORT` / `Z_GRAPH_HTTP_PORT` > 系统属性
+`z.graph.boltPort` / `z.graph.httpPort` > 默认 7687 / 8090。只跑控制面就换
+`-Dexec.mainClass=...GraphControlServerMain`，只跑 Bolt 就用 `...BoltServer`（默认 7687）。
+不指定数据目录时全在内存，进程退出即丢。
+
+### 嵌入式（Java 8 可编译的真实 API）
+
+```java
+import com.zifang.z.graph.api.*;
+import com.zifang.z.graph.core.*;
+import java.util.*;
+
+GraphVersionStore repo = new GraphVersionStore();        // 纯内存；new GraphVersionStore(Paths.get(dir)) 落盘
+GraphWriteTransaction tx = repo.beginWrite("main");      // 构造时已建好 main 分支的 root commit
+Node alice = tx.addNode("Person",  Colls.mapOf("name", "Alice", "age", 30));
+Node acme  = tx.addNode("Company", Colls.mapOf("name", "Acme Corp"));
+tx.addEdge("WORKS_AT", alice.getId(), acme.getId(), Colls.mapOf("role", "Engineer"));
+GraphCommit base = tx.commit("alice", "add Alice + Acme");   // 提交即推进 head
+
+// 多标签：InMemoryGraphStore 上有 addNode(id, Collection<String> labels, props)，Node#getLabels() 返回 Set
+// Cypher 走 CypherEngine —— GraphStore 接口本身没有 executeCypher 方法
+List<Map<String, Object>> rows = new CypherEngine(repo.checkoutBranch("main").getStore(), repo)
+        .execute("MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name AS person, c.name AS company");
+```
+
+> 属性字面量用 `Colls.mapOf(k1,v1,...)`（最多 5 对）与 `Colls.listOf(...)`：本仓口径是 Java 8，
+> `Map.of` / `List.of` 与文本块 `"""` 都编译不过。
+
+### 分支 / 合并 / 历史读取
+
+```java
+repo.createBranch("feature/promote-alice", base.getId());     // 第二个参数是 commit ID，返回该 base GraphCommit
+GraphWriteTransaction featureTx = repo.beginWrite("feature/promote-alice");
+featureTx.updateNode(alice.getId(), Colls.mapOf("role", "senior"));
+featureTx.commit("alice", "promote alice to senior");
+
+GraphMergeResult merge = repo.merge("main", "feature/promote-alice", "alice", "merge promote");
+if (merge.isMerged()) {
+    String newHead = merge.getCommit().getId();               // 未移动 head（含纯冲突情形）时 getCommit() 可为 null
+} else {
+    List<String> conflicts = merge.getConflicts();            // 同字段双侧改动 → 人工处理，head 不动
+}
+
+List<GraphCommit> history = repo.log("main");                 // ref 可以是分支名或 commit ID（沿第一父链）
+List<Map<String, Object>> asOf = repo.checkout(base.getId())
+        .query("MATCH (n:Person) RETURN n.name AS name");
+```
+
+审计场景按 `checkout(commitId)` 读历史快照即可，不需要为时间点复制整图；`nodeVersions(id)` /
+`nodeVersionAt(id, ref)` 给单节点多版本链，`garbageCollect(keepBranches...)` 回收不可达 commit，
+`exportSnapshot(commitId, target)` / `importSnapshot(...)` 做仓库级搬运。
+
+### 控制台
+
+```bash
+cd z-graph-console
+npm install && npm run dev        # http://localhost:5173，/api 由 Vite 代理到 8090
+npm run build                     # 产物 dist/；npm run preview 走 4173
+```
+
+代理目标用 `VITE_API_PROXY_TARGET` 覆盖（默认 `http://127.0.0.1:8090`）；也可用 `VITE_API_BASE`
+或页面注入 `window.__Z_GRAPH_API__` 改成绝对地址。8 个 tab：总览、图视图、分支、提交历史、Cypher 查询、
+Schema、请求日志、API 文档（`src/App.jsx` 的 `TABS`，页面实现在 `src/pages/`）。
+
+---
+
+## 🔌 HTTP API
+
+`GraphControlServer` 注册 **13 个 context**（控制台的 `src/pages/ApiDocs.jsx` 文档化了其中 12 个业务端点，
+不含 `/options`）：
+
+| 路径 | 方法 | 说明 |
+|------|------|------|
+| `/health` | GET | `status` / `head` / `nodeCount` / `edgeCount`；**认证与限流均豁免** |
+| `/query` | GET / POST | `?cypher=&branch=&commit=` 或同名字段的 JSON body；返回**裸数组**，耗时写 `X-Response-Time` |
+| `/query/batch` | POST | 多条语句顺序执行，逐条回 `statementIndex` + `elapsedMs`；非 POST → 405 |
+| `/query/explain` | POST | 查询计划（读写判定、是否可走索引、是否含变长路径）；不执行写操作；非 POST → 405 |
+| `/meta/branches` | GET | 分支名列表 |
+| `/meta/commits` | GET | commit 列表（id / parents / branch / author / message / node / edge 计数） |
+| `/meta/schema` | GET | `?branch=main`，内部用 `SHOW TAGS` / `SHOW EDGES` |
+| `/meta/stats` | GET | `?branch=main`，内部 `CALL db.stats()` |
+| `/meta/metrics` | GET | JSON：uptimeMs / uptimeSeconds / uptimeFormatted / totalRequests / errorResponses / errorRate / rateLimitedRequests / authFailures / apiTokenEnabled / rateLimitPerMinute / activeRateBuckets / jvmMemory / availableProcessors |
+| `/meta/logs` | GET | 环形缓冲最多 500 条；`?limit&offset&method&status=4xx\|5xx\|2xx\|精确码&path&requestId` |
+| `/meta/export` | GET | `?branch=` 导出节点 + 按类型取的边 + schema |
+| `/meta/import` | POST | body 的 `nodes` / `edges` 段以 Cypher `CREATE` 落地；非 POST → 405 |
+| `/options` | OPTIONS | 204 + CORS 头；其他方法 405 |
+
+统一行为：安全响应头 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
+`X-XSS-Protection: 1; mode=block`、`Referrer-Policy: strict-origin-when-cross-origin`；
+`X-Request-ID` 缺省生成 16 字符、客户端传入则复用；`Accept-Encoding: gzip` 且响应 >256 字节才压缩；
+CORS 白名单命中时回显具体 origin 并带 `Vary: Origin`，`*` 时直接 `*`。
+
+状态码如实分类（1.0.3 的修正）：分支 / commit 不存在 → `404`，参数错 → `400`，写冲突 → `409`，
+限流 → `429` + `Retry-After: 60`，未授权 → `401`，其余才 `500`；判据是异常类型而非消息文本。
+
+注意 `/query` **不做参数绑定**（body 只按字符串解析，执行时传空参数表）；`$name` 绑定要在
+`CypherEngine.execute(cypher, parameters)` 或 Bolt `RUN` 那一层用。
+
+---
+
+## ⚙️ 配置与安全
+
+### 进程 / 控制面环境变量
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `Z_GRAPH_BOLT_PORT` | `7687` | Bolt 端口（首个命令行参数可覆盖） |
+| `Z_GRAPH_HTTP_PORT` | `8090` | 控制面端口（第二个命令行参数可覆盖） |
+| `Z_GRAPH_DATA_DIR` | 未设 = 纯内存 | 版本仓库目录；容器里默认 `/var/lib/z-graph` |
+| `Z_GRAPH_API_TOKEN` | 未设 = 不鉴权 | 设置后启用 Bearer 校验（`Authorization: Bearer <token>` 或 `?token=`）。**值一律由部署侧注入，禁止写进 yml / 镜像 / 文档** |
+| `Z_GRAPH_RATE_LIMIT` | `0`（不限） | 每 IP 每分钟请求上限，1 分钟窗口，超限返回 429 |
+| `Z_GRAPH_CORS_ALLOWED_ORIGINS` | `*` | 逗号分隔 origin；系统属性 `z.graph.cors.allowedOrigins` 优先级更高 |
+| `JAVA_OPTS` | 空 | 容器 ENTRYPOINT 透传给 `java` |
+| `Z_GRAPH_API_UPSTREAM` | `z-graph-server:8090` | 前端镜像 nginx upstream（`deploy/nginx/frontend.conf` 里 envsubst） |
+
+对应系统属性：`z.graph.boltPort` / `z.graph.httpPort` / `z.graph.dataDir` / `z.graph.cors.allowedOrigins`。
+
+### Spring Boot starter
 
 ```yaml
 z:
   graph:
-    enabled: true
-    mode: server              # embedded / server
-    host: 0.0.0.0
-    bolt-port: 8182
-    rest-port: 8183
-    persistence:
-      enabled: false          # 内存模式, 重启丢失
-      data-dir: /data/z-graph
-    cache:
-      max-size: 10000
-      ttl-seconds: 600
+    enabled: false                 # 默认 false：不装任何 Bean、不碰磁盘和网络
+    port: 8090                     # 0 = 让内核分配，此时必须读 graphControlServer.port()
+    data-dir:                      # 留空 = 内存仓库，不落盘、不建目录
+    checkpoint-interval: 32
+    max-retained-views: 64
+    retained-whole-graph-views: 4
+    view-layer-limit: 8
 ```
 
-### Persistence（持久化到磁盘）
+这 7 个键就是 `ZGraphProperties` 的全部字段。**没有** `mode`、`host`、`bolt-port`、`rest-port`、
+`persistence.enabled`、`persistence.data-dir`、`cache.max-size`、`cache.ttl-seconds` 这些键
+（旧 README 的 yml 样例是模板猜的：控制面 bind 通配地址所以没有 host，starter 也压根不起 Bolt）。
+`GraphControlServer` 在构造函数里就 bind，端口被占则容器启动直接失败；Bean 配 `destroyMethod = "stop"`。
 
-```java
-// 自动快照 + WAL
-GraphStore store = new InMemoryGraphStore.Builder()
-    .dataDir("/data/z-graph")
-    .snapshotInterval(Duration.ofMinutes(5))
-    .enableWal(true)
-    .build();
+### 优雅关闭
 
-// 启动时自动从快照 + WAL 恢复
-```
+`GraphControlServer.start()` 注册 shutdown hook，SIGTERM/SIGINT 时 `server.stop(5)`（最多等 5 秒）；
+`ZGraphServer` 的 hook 同时 `bolt.shutdown()`（Netty `shutdownGracefully()`）+ `control.stop()`（`stop(0)`，
+用于测试里的即时释放）。
 
 ---
 
-## 🐳 Docker / k3s 部署
-
-### Docker Compose
-
-```yaml
-services:
-  z-graph:
-    image: ghcr.io/z-opc-foundation/z-graph:1.0.1
-    ports:
-      - "8182:8182"    # Bolt
-      - "8183:8183"    # REST
-    volumes:
-      - ./data:/data/z-graph
-    environment:
-      JAVA_OPTS: "-Xms1g -Xmx2g"
-
-  console:
-    image: ghcr.io/z-opc-foundation/z-graph-console:1.0.1
-    ports: ["3000:3000"]
-    depends_on: [z-graph]
-```
-
-`docker compose up -d`，访问 http://localhost:3000 看可视化控制台，Neo4j Browser 风格界面。
-
-### k3s
-
-```yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: z-graph
-  namespace: z-graph
-spec:
-  replicas: 1
-  selector:
-    matchLabels: {app: z-graph}
-  template:
-    metadata:
-      labels: {app: z-graph}
-    spec:
-      containers:
-        - name: z-graph
-          image: ghcr.io/z-opc-foundation/z-graph:1.0.1
-          ports: [{containerPort: 8182}, {containerPort: 8183}]
-          volumeMounts:
-            - name: data
-              mountPath: /data/z-graph
-  volumeClaimTemplates:
-    - metadata: {name: data}
-      spec:
-        accessModes: [ReadWriteOnce]
-        resources:
-          requests: {storage: 50Gi}
-```
-
----
-
-## 📊 性能基准（4 核 8G，100万节点 / 500万边）
-
-| 操作 | QPS | P99 |
-|---|---|---|
-| 单节点 add | 80,000 | 1ms |
-| 单边 add | 65,000 | 1.5ms |
-| MATCH (3 跳) | 12,000 | 8ms |
-| shortestPath (≤5 跳) | 3,500 | 28ms |
-| 2 度邻居 | 18,000 | 5ms |
-| 版本化 commit | 1,200 | 80ms |
-
----
-
-## 🧪 完整测试覆盖
-
-```
-单元测试:       148 PASS
-集成测试:       43 PASS  (含 Bolt server live + Neo4j driver 兼容性)
-Spring Boot:   8 PASS   (context load + AutoConfiguration)
-Bolt 协议:      21 PASS  (对比 Neo4j 5.x Bolt 4.4)
-Cypher 兼容性:  27 PASS  (OpenCypher TCK 子集)
-版本化:         19 PASS  (commit / branch / merge / conflict)
-```
-
----
-
-## 📚 详细文档
-
-- [完整架构](docs/ARCHITECTURE.md)
-- [OpenCypher 语法支持](docs/CYPHER.md)
-- [Git 版本化图模型](docs/GIT_VERSIONING.md)
-- [Bolt 4.4 协议](docs/BOLT_PROTOCOL.md)
-- [REST API](docs/REST_API.md)
-- [可视化控制台](docs/CONSOLE.md)
-- [性能基准](docs/BENCHMARK.md)
-- [从 Neo4j 迁移](docs/MIGRATE_FROM_NEO4J.md)
-- [运维手册](docs/OPERATIONS.md)
-
----
-
-## 🤝 贡献
+## 🧪 测试
 
 ```bash
-mvn clean verify
-docker compose up -d    # 起 server + console
-# 访问 Neo4j Browser: bolt://localhost:8182
-# 或 console UI:    http://localhost:3000
+mvn test                     # 172 个 @Test / 20 个测试类，不需要外部依赖
+mvn -pl z-graph-core test    # 只跑引擎：138 个用例
 ```
 
----
+分布：`z-graph-core` 13 个测试类共 138 个用例（`MvccVersioningTest` 17、`CypherEngineTest` 15、
+`ExplainAndDescribeTest` 13、`DdlAndPathTest` 13、`ShowAndAggregationTest` 12、`SchemaManagementTest` 12、
+`IndexOptimizerAndAlterTest` 12、`InMemoryGraphStoreTest` 12、`CypherExecutorTest` 11、
+`OrderLimitWithAndSnapshotTest` 9、`GraphVersionStoreTest` 9、`VersionedSchemaTest` 3，另有无用例的
+`MvccStressHarness`）；`z-graph-bolt-server` 28 个（`BoltFramesTest` 14、`BoltServerE2ETest` 11、
+`GraphControlServerTest` 2、`ZGraphServerTest` 1；`BoltTestClient` 是测试客户端不是用例）；
+`z-graph-spring-boot-starter` 6 个。`z-graph-api` / `z-graph-protocol` 没有自己的测试源码目录，
+协议编解码用例放在 bolt-server 模块下。
 
-## 📄 许可证
-
-[MIT License](LICENSE)
-
----
-
-## 🔗 相关项目
-
-| 项目 | 关系 |
-|---|---|
-| [z-cache](https://github.com/z-opc-foundation/z-cache) | 同系列 — 分布式缓存 |
-| [z-mq](https://github.com/z-opc-foundation/z-mq) | 同系列 — 分布式消息队列 |
-| [z-kb](https://github.com/z-opc-foundation/z-kb) | z-graph 是 z-kb 的图谱检索后端 |
-| [z-vector](https://github.com/z-opc-foundation/z-vector) | z-graph 属性索引可走 z-vector |
-| [z-rpc](https://github.com/z-opc-foundation/z-rpc) | 同系列 — RPC 框架 |
-| [z-boot](https://github.com/z-opc-foundation/z-boot) | 同系列 — Spring Boot Starter 聚合 + BOM |
-
-> **通过 [z-boot-graph-starter](https://central.sonatype.com/artifact/io.github.yuku123/z-boot-graph-starter) 可以一行 import 集成 z-graph + 自动锁定版本**
-
----
-
-## 📮 联系
-
-- GitHub Issues: 提交 bug / feature request
-- Email: yuku123@users.noreply.github.com
-
-[![Tests](https://img.shields.io/badge/tests-148%20passing-brightgreen)]()
-[![Java](https://img.shields.io/badge/Java-17-orange)]()
-[![Maven](https://img.shields.io/badge/Maven-3.9+-blue)]()
-[![Docker](https://img.shields.io/badge/Docker-ready-blue)]()
-[![License](https://img.shields.io/badge/license-Apache%202.0-green)]()
-
----
-
-## 目录
-
-- [特性一览](#特性一览)
-- [架构设计](#架构设计)
-- [快速开始](#快速开始)
-- [HTTP API 参考](#http-api-参考)
-- [Cypher 查询语言](#cypher-查询语言)
-- [前端控制台](#前端控制台)
-- [安全特性](#安全特性)
-- [生产部署](#生产部署)
-- [环境变量](#环境变量)
-- [性能基准](#性能基准)
-- [Git 版本化图模型](#git-版本化图模型)
-- [可观测性](#可观测性)
-- [开发指南](#开发指南)
-- [故障排查](#故障排查)
-- [开源参考](#开源参考)
-
----
-
-## 特性一览
-
-### 核心能力
-- 🗂️ **OpenCypher 子集**：MATCH/RETURN/CREATE/MERGE/DELETE/SET/WHERE/ORDER BY/LIMIT/SKIP/WITH/UNWIND/OPTIONAL MATCH/聚合
-- 🏷️ **Tag / EdgeType Schema**：声明式属性、类型校验、NOT NULL 约束
-- 🌳 **Git 风格版本化**：分支、commit、merge、回滚、不可变快照
-- 🔍 **索引下推**：标签属性索引加速查找
-- 🔗 **变长路径匹配**：`(a)-[*1..3]->(b)` 任意跳数
-- 🔄 **Bolt 4.4 协议**：HELLO/RUN/PULL/BEGIN/COMMIT/ROLLBACK 等完整支持
-- 🛡️ **并发控制**：写事务冲突检测（StaleHeadException）
-
-### HTTP 控制面（14 个端点）
-- 健康检查、Cypher 查询、批量执行、查询计划
-- 分支、提交、Schema、统计、指标、日志
-- 数据导入导出、CORS 预检
-
-### 生产特性
-- 🔐 **API Token 认证**：Bearer Token / Query 参数
-- 🚦 **速率限制**：滑动窗口 per-IP
-- 🔒 **安全响应头**：X-Content-Type-Options、X-Frame-Options、X-XSS-Protection
-- 🆔 **请求追踪 ID**：X-Request-ID 自动生成/复用
-- 📦 **GZIP 压缩**：响应自动压缩 60-73%
-- 🛑 **优雅关闭**：SIGTERM 等待 5 秒完成请求
-- 📊 **环形日志缓冲**：最近 500 条请求可查询
-
-### 前端控制台（8 个页面）
-- 总览、图视图、分支、提交历史
-- Cypher 查询（语法高亮 + 自动补全 + 导出）
-- Schema、请求日志、API 文档
-
----
-
-## 架构设计
-
-### 分层架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      客户端层 (Clients)                      │
-│  ┌────────────┐  ┌────────────┐  ┌────────────────────┐   │
-│  │  Web UI    │  │  Bolt 驱动 │  │  HTTP/REST 客户端  │   │
-│  │  (React)   │  │  (Neo4j 等)│  │  (curl/SDK)        │   │
-│  └─────┬──────┘  └──────┬─────┘  └──────────┬─────────┘   │
-└────────┼────────────────┼──────────────────┼──────────────┘
-         │                │                  │
-         ▼                ▼                  ▼
-┌─────────────────────────────────────────────────────────────┐
-│                       协议层 (Protocol)                     │
-│  ┌──────────────────────┐  ┌────────────────────────────┐   │
-│  │  z-graph-protocol    │  │  GraphControlServer        │   │
-│  │  Bolt 4.4 PackStream │  │  HTTP API (14 端点)        │   │
-│  │  + Netty 服务端      │  │  + 安全/限流/GZIP/日志     │   │
-│  └──────────┬───────────┘  └────────────┬───────────────┘   │
-└─────────────┼─────────────────────────────┼──────────────────┘
-              │                             │
-              ▼                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     服务层 (Services)                        │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌────────────┐   │
-│  │  CypherEngine   │  │  GraphQuery-    │  │  GraphMeta-│   │
-│  │  OpenCypher     │  │  Service        │  │  Service   │   │
-│  │  解析/执行/计划 │  │  写事务/快照   │  │  head/分支 │   │
-│  └────────┬────────┘  └────────┬────────┘  └─────┬──────┘   │
-└───────────┼────────────────────┼────────────────┼──────────┘
-            │                    │                │
-            ▼                    ▼                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      存储层 (Storage)                        │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │              InMemoryGraphStore                      │   │
-│  │  节点 + 边 + Tag/EdgeType schema + 索引 + 遍历      │   │
-│  └──────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │              GraphVersionStore                       │   │
-│  │  不可变快照 + commit/branch/merge + 可选持久化       │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 模块结构
-
-```
-z-graph/
-├── z-graph-api/                # 公共 API（GraphCommit 等）
-├── z-graph-core/               # 核心引擎（Cypher/VersionStore/MetaService）
-├── z-graph-protocol/           # Bolt 4.4 协议（PackStream 编解码）
-├── z-graph-bolt-server/        # 服务端（Netty Bolt + HTTP 控制面）
-├── z-graph-spring-boot-starter/# Spring Boot 自动装配（可选）
-├── z-graph-console/            # React 前端控制台
-├── deploy/
-│   ├── docker/                 # Dockerfile + docker-compose
-│   ├── kubernetes/             # K8s manifests
-│   └── nginx/                  # Nginx 配置模板
-└── .github/workflows/          # GitHub Actions CI/CD
-```
-
----
-
-## 快速开始
-
-### 方式 1：本地 Maven 运行
+MVCC 压力/性能台是**带 verdict 的门禁**，不是报告生成器（任一场景判红即非 0 退出，可当 CI 卡口）：
 
 ```bash
-# 克隆仓库
-git clone https://github.com/z-opc-foundation/z-graph.git
-cd z-graph
-
-# 构建（跳过测试约 30 秒）
-mvn package -DskipTests
-
-# 启动服务
-mvn -pl z-graph-bolt-server exec:java \
-  -Dexec.mainClass=com.zifang.z.graph.bolt.ZGraphServer \
-  -Dexec.jvmArgs="-Dz.graph.dataDir=/tmp/z-graph-data"
-
-# 验证
-curl http://localhost:8090/health
-# {"status":"UP","head":"...","nodeCount":0,"edgeCount":0}
+java -Xms1g -Xmx8g -cp target/classes:target/test-classes \
+  com.zifang.z.graph.bench.MvccStressHarness --profile=full \
+  --workdir=/tmp/zgraph-stress --json=/tmp/zgraph-stress/results.jsonl
 ```
 
-### 方式 2：Docker Compose（推荐）
+Bolt 端到端（需要本机 `python3`，并且要先起服务；`neo4j` driver 那一支还需要 `pip install neo4j`）：
 
 ```bash
-# 启动分布式部署（server + frontend）
+python3 _doc/003_script/test_bolt_raw.py            # HELLO → RUN(RETURN 1 AS n) → PULL 最小往返
+python3 _doc/003_script/test_bolt_full.py           # 7 类 RETURN 字面量场景，每场景独立 TCP 连接验幂等
+python3 _doc/003_script/test_bolt_error.py          # 错误路径：未知签名 / 非法 qid / DISCARD / RESET / GOODBYE
+NUM_CLIENTS=100 QUERIES_PER_CLIENT=5 python3 _doc/003_script/test_bolt_concurrent.py
+```
+
+驱动脚本读 `Z_GRAPH_HOST` / `Z_GRAPH_PORT`（默认 `localhost:7687`）。
+
+⚠ 两个编排脚本目前跑不通，是**脚本债不是代码债**：`run_e2e.sh` 把 `cd "$(dirname "$0")/.."` 当仓库根、
+`run_t1_verify.sh` 把 `$(dirname "$0")/.."` 当仓库根并拼 `$Z_GRAPH_DIR/poc/test_bolt_*.py` —— 两者都还假设自己
+躺在根 `poc/` 下，而脚本现在住在 `_doc/003_script/`，于是工作目录落到 `_doc`、驱动路径也指空。修好之前请按上面的
+启动命令起服务，再直跑 `python3 _doc/003_script/test_bolt_*.py`。
+
+`_doc/003_script/test_bolt_poc.py` 走官方 `neo4j` driver 连 `bolt://localhost:7687`；按上面的协议边界
+（服务端不处理 magic 与版本协商），这一支现在**预期失败**，它保留的是"官方 driver 接不进来"这个待办，
+别把它当兼容性证明。
+
+---
+
+## 🐳 部署
+
+三个 Dockerfile（都在 `deploy/docker/`，多阶段构建，build context 是仓库根）：
+
+| 文件 | 产物 | 运行时 |
+|------|------|--------|
+| [`server.Dockerfile`](deploy/docker/server.Dockerfile) | `z-graph-server`：bolt-server jar + `target/lib/` 依赖 | `eclipse-temurin:17-jre-jammy`，非 root（uid 10001），`EXPOSE 7687 8090`，`HEALTHCHECK` 打 `/health`，ENTRYPOINT 跑 `ZGraphServer` |
+| [`frontend.Dockerfile`](deploy/docker/frontend.Dockerfile) | `z-graph-frontend`：nginx + 控制台静态资源 + `/api` 反代 | `node:20-alpine` 构建 → `nginx:1.27-alpine`，模板 `deploy/nginx/frontend.conf` 经 envsubst 注入 `${Z_GRAPH_API_UPSTREAM}` |
+| [`all-in-one.Dockerfile`](deploy/docker/all-in-one.Dockerfile) | `z-graph-all-in-one`：Java 服务 + nginx 同容器 | 入口脚本 [`_doc/003_script/all-in-one-entrypoint.sh`](_doc/003_script/all-in-one-entrypoint.sh)（拷前端产物并并行拉起两个进程） |
+
+> 基础镜像是 JDK 17 运行时，而**字节码口径是 Java 8**（class-file 52），两者不矛盾：产物跑在 8 与 17 上都行。
+
+```bash
+# 分布式：server 无 profile 恒启，frontend 属于 distributed / frontend profile
 docker compose -f deploy/docker/docker-compose.yml --profile distributed up -d
-
-# 访问控制台
-open http://localhost:3333
-
-# 查看日志
-docker compose -f deploy/docker/docker-compose.yml logs -f
-```
-
-### 方式 3：单容器 All-in-One
-
-```bash
+# 单容器 demo：控制台 http://localhost:3000，同时暴露 7687 / 8090
 docker compose -f deploy/docker/docker-compose.yml --profile all-in-one up -d
-# 访问 http://localhost:3000（前端 + API + Bolt 同端口）
-```
-
-### 第一个查询
-
-```bash
-# 创建节点
-curl -X POST http://localhost:8090/query \
-  -H 'Content-Type: application/json' \
-  -d '{"cypher":"CREATE (n:Person {name: \"Alice\", age: 30}) RETURN n"}'
-
-# 查询节点
-curl -X POST http://localhost:8090/query \
-  -H 'Content-Type: application/json' \
-  -d '{"cypher":"MATCH (n:Person) RETURN n.name AS name, n.age AS age"}'
-
-# 创建关系
-curl -X POST http://localhost:8090/query \
-  -H 'Content-Type: application/json' \
-  -d '{"cypher":"MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) CREATE (a)-[:KNOWS]->(b)"}'
-```
-
----
-
-## HTTP API 参考
-
-### 通用说明
-
-所有响应包含：
-- `Content-Type: application/json; charset=utf-8`
-- `X-Response-Time: <毫秒>ms`
-- `X-Request-ID: <16字符>`
-- 支持 `Accept-Encoding: gzip` 自动压缩（>256 字节）
-
-写查询会在指定分支产生新 commit，返回值包含 head 推进信息。
-
-### 端点清单
-
-| 端点 | 方法 | 功能 |
-|------|------|------|
-| `/health` | GET | 健康检查 |
-| `/query` | GET/POST | 执行 Cypher |
-| `/query/batch` | POST | 批量执行 |
-| `/query/explain` | POST | 查询计划 |
-| `/meta/branches` | GET | 分支列表 |
-| `/meta/commits` | GET | 提交历史 |
-| `/meta/schema` | GET | Schema 信息 |
-| `/meta/stats` | GET | 统计摘要 |
-| `/meta/metrics` | GET | 运行指标 |
-| `/meta/logs` | GET | 请求日志 |
-| `/meta/export` | GET | 导出图数据 |
-| `/meta/import` | POST | 导入节点 |
-| `/options` | OPTIONS | CORS 预检 |
-
-### 示例：执行查询
-
-```bash
-# POST /query（推荐）
-curl -X POST http://localhost:8090/query \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "cypher": "MATCH (n:Person) WHERE n.age > 20 RETURN n.name AS name, n.age AS age ORDER BY age DESC LIMIT 10",
-    "branch": "main"
-  }'
-
-# 返回
-[
-  {"name": "Alice", "age": 30},
-  {"name": "Carol", "age": 28}
-]
-```
-
-### 示例：批量执行
-
-```bash
-curl -X POST http://localhost:8090/query/batch \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "statements": [
-      {"cypher": "MATCH (n:Person) RETURN count(n) AS cnt"},
-      {"cypher": "CALL db.branches()"}
-    ]
-  }'
-
-# 返回
-{
-  "results": [
-    {"rows": [{"cnt": 3}], "statementIndex": 0},
-    {"rows": [{"Name": "main", "Head": "..."}], "statementIndex": 1}
-  ],
-  "elapsedMs": 12
-}
-```
-
-### 示例：查询计划
-
-```bash
-curl -X POST http://localhost:8090/query/explain \
-  -H 'Content-Type: application/json' \
-  -d '{"cypher": "MATCH (n:Person) WHERE n.age > 20 RETURN n"}'
-
-# 返回
-{
-  "plan": {
-    "queryType": "READ",
-    "steps": [
-      {"operation": "Scan", "description": "遍历节点和边"},
-      {"operation": "Filter", "description": "过滤不满足条件的记录"},
-      {"operation": "Project", "description": "投影返回字段"}
-    ],
-    "estimatedComplexity": "LOW"
-  }
-}
-```
-
-### 示例：运行指标
-
-```bash
-curl http://localhost:8090/meta/metrics
-
-# 返回
-{
-  "uptimeMs": 3600000,
-  "uptimeFormatted": "1h 0m 0s",
-  "totalRequests": 1234,
-  "errorResponses": 5,
-  "errorRate": "0.41%",
-  "rateLimitedRequests": 0,
-  "authFailures": 0,
-  "jvmMemory": {
-    "maxBytes": 1073741824,
-    "totalBytes": 268435456,
-    "usedBytes": 134217728,
-    "freeBytes": 134217728
-  },
-  "availableProcessors": 8
-}
-```
-
----
-
-## Cypher 查询语言
-
-### 完整支持清单
-
-| 类别 | 子句/特性 |
-|------|----------|
-| **读写** | MATCH / CREATE / MERGE / DELETE / DETACH DELETE / SET / REMOVE |
-| **过滤** | WHERE (AND/OR/NOT/IN/CONTAINS/STARTS WITH/ENDS WITH/IS NULL/EXISTS) |
-| **返回** | RETURN / WITH / DISTINCT / ORDER BY (ASC/DESC) / SKIP / LIMIT |
-| **聚合** | count / sum / avg / min / max / collect（自动 GROUP BY） |
-| **路径** | 任意方向 / 反向匹配 / 变长 `*min..max` / 类型过滤 `[:TYPE]` |
-| **高级** | OPTIONAL MATCH / UNWIND / 多语句 `;` / 参数绑定 |
-| **元数据** | SHOW TAGS / SHOW EDGES / SHOW INDEXES / CALL db.* |
-| **DDL** | CREATE TAG / DROP TAG / CREATE EDGE / DROP EDGE / CREATE INDEX / ALTER |
-
-### 示例
-
-```cypher
--- 创建 Tag Schema
-CREATE TAG Person (name STRING, age INT NOT NULL);
-
--- 创建索引
-CREATE TAG INDEX idx_person_name ON Person(name);
-
--- 插入数据
-CREATE (n:Person {name: 'Alice', age: 30});
-CREATE (n:Person {name: 'Bob', age: 25});
-
--- 创建关系
-MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
-CREATE (a)-[:KNOWS {since: 2020}]->(b);
-
--- 复杂查询
-MATCH (a:Person)-[:KNOWS]->(b:Person)
-WHERE a.age > 20 AND b.name CONTAINS 'o'
-RETURN a.name AS friend, b.name AS buddy, b.age AS age
-ORDER BY age DESC LIMIT 10;
-
--- 变长路径
-MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b:Person)
-RETURN DISTINCT b.name AS friend;
-
--- 聚合
-MATCH (n:Person)
-RETURN n.age AS age, count(n) AS total, collect(n.name) AS names
-ORDER BY age;
-
--- 内置过程
-CALL db.version();
-CALL db.branches();
-CALL db.head('main');
-CALL db.stats();
-
--- 元数据查询
-SHOW TAGS;
-SHOW EDGES;
-SHOW INDEXES;
-```
-
----
-
-## 前端控制台
-
-### 8 个页面
-
-| 页面 | 功能 |
-|------|------|
-| **总览** | KPI 卡片 + 实时 SVG 图表（请求速率 + JVM 内存） + Schema 概览 + 快捷操作 |
-| **图视图** | SVG 力导向布局可视化（节点着色、边箭头、点击交互、图例） |
-| **分支** | 分支列表与管理 |
-| **提交历史** | 完整 commit 记录 |
-| **Cypher 查询** | 语法高亮 + 自动补全（50+ 建议） + 查询计时 + 历史 + CSV/JSON 导出 |
-| **Schema** | DDL 快捷操作（12 个按钮）+ Schema 浏览 |
-| **请求日志** | 实时自动刷新 + 过滤器（method/status/path/requestId）+ 详情面板 |
-| **API 文档** | 14 个端点交互式文档（参数表 + 交互测试） |
-
-### Cypher 编辑器
-
-- **语法高亮**：关键字（紫色）、字符串（绿色）、数字（黄色）、注释（灰色）、内置过程（青色）、操作符（红色）
-- **自动补全**：输入 1+ 字符时弹出建议
-  - `Tab` / `Enter` 选择
-  - `↑` / `↓` 导航
-  - `Esc` 关闭
-- **建议分类**：keyword / builtin / function / pattern / ddl，带中文描述
-- **快捷键**：`Ctrl+Enter` 执行查询
-
-### 开发与构建
-
-```bash
-cd z-graph-console
-npm install
-npm run dev        # 开发服务器 (http://localhost:5173)
-npm run build      # 生产构建 (产物 dist/)
-```
-
----
-
-## 安全特性
-
-| 特性 | 实现 |
-|------|------|
-| **API Token 认证** | 环境变量 `Z_GRAPH_API_TOKEN` 启用，支持 `Authorization: Bearer <token>` 或 `?token=<token>` |
-| **速率限制** | `Z_GRAPH_RATE_LIMIT` 设置每 IP 每分钟最大请求数（滑动窗口），超限返回 429 + `Retry-After: 60` |
-| **安全响应头** | `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`X-XSS-Protection: 1; mode=block`、`Referrer-Policy: strict-origin-when-cross-origin` |
-| **CORS** | 默认 `*`，可通过 `Z_GRAPH_CORS_ALLOWED_ORIGINS` 收紧（如 `https://app.example.com,https://admin.example.com`） |
-| **请求追踪** | 每个请求自动生成 16 字符 `X-Request-ID`，支持客户端传入复用（分布式追踪） |
-| **GZIP 压缩** | 服务端自动检测 `Accept-Encoding: gzip`，>256 字节时压缩 |
-| **优雅关闭** | 收到 SIGTERM/SIGINT 时等待 5 秒完成现有请求，避免客户端断连 |
-| **请求日志** | nginx 风格 access log + 环形缓冲区（最近 500 条） |
-
-### 启用 Token 认证
-
-```bash
-export Z_GRAPH_API_TOKEN="your-secret-token-here"
-export Z_GRAPH_RATE_LIMIT=600  # 600 req/min/IP
-
-# 客户端调用
-curl -H "Authorization: Bearer your-secret-token-here" http://localhost:8090/health
-# 或
-curl "http://localhost:8090/health?token=your-secret-token-here"
-```
-
----
-
-## 生产部署
-
-### 三种 Docker 镜像
-
-| 镜像 | 用途 | 内容 |
-|------|------|------|
-| `z-graph-server` | 服务端独立部署 | Bolt 4.4 + HTTP 控制面，JRE 多阶段构建，非 root 用户 |
-| `z-graph-frontend` | 前端独立部署 | Nginx + React，`/api` 反代到 server |
-| `z-graph-all-in-one` | 单容器 demo | JRE + Nginx，同进程 server + 前端 |
-
-### Docker Compose profiles
-
-```bash
-# 分布式（server + frontend）
-docker compose -f deploy/docker/docker-compose.yml --profile distributed up -d
-
-# 单容器一体机
-docker compose -f deploy/docker/docker-compose.yml --profile all-in-one up -d
-
-# 多副本拓扑示例
+# 多副本拓扑示例（node-2 → 7688/8091，node-3 → 7689/8092；只是并列实例，没有集群协商）
 docker compose -f deploy/docker/docker-compose.yml --profile cluster up -d
 ```
 
-### Docker 生产配置
+compose 实测：项目名 `z-graph`；镜像名 `ghcr.io/z-opc-foundation/z-graph-{server,frontend,all-in-one}:${Z_GRAPH_IMAGE_TAG:-latest}`；
+server 限 `2.0 CPU / 1024M`、frontend `0.5 CPU / 128M`；日志 `json-file 10m × 3`；
+`Z_GRAPH_DATA_DIR=/var/lib/z-graph` 挂 named volume；`JAVA_OPTS` 带
+`-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:MaxGCPauseMillis=200`；
+frontend `depends_on: z-graph-server (service_healthy)`；健康检查 10s 间隔 / 15s 启动宽限。
 
-| 配置项 | 值 |
-|--------|-----|
-| **资源限制** | server 2 CPU / 1GB 内存，frontend 0.5 CPU / 128MB |
-| **JVM 调优** | `-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:MaxGCPauseMillis=200` |
-| **日志轮转** | json-file 驱动，10MB × 3 文件 |
-| **健康检查** | 10s 间隔 wget `/health`，15s 启动宽限期 |
-| **优雅关闭** | SIGTERM 等待 5 秒 |
-
-### Nginx 优化
-
-| 优化 | 效果 |
-|------|------|
-| **GZIP 压缩** | JS 194KB → 63KB (68%)，CSS 8.5KB → 2.3KB (73%) |
-| **静态资源缓存** | `/assets/*` 1 年 `immutable` 缓存 |
-| **HTML no-cache** | `index.html` 始终获取最新版本 |
-| **安全响应头** | X-Content-Type-Options、X-Frame-Options 等 |
-
-### Kubernetes
+k8s 清单 [`deploy/kubernetes/z-graph.yaml`](deploy/kubernetes/z-graph.yaml)：`Namespace z-graph` +
+`ConfigMap z-graph-config` + `PersistentVolumeClaim z-graph-data` + `Deployment z-graph-server`（replicas 1，
+容器端口 bolt 7687 / http 8090）+ `Service z-graph-server` + `Deployment z-graph-frontend`（replicas 2，
+`Z_GRAPH_API_UPSTREAM` 指向 server）+ `Service z-graph-frontend`。
 
 ```bash
 kubectl apply -f deploy/kubernetes/z-graph.yaml
-kubectl port-forward -n z-graph svc/z-graph-frontend 8080:80
+kubectl -n z-graph port-forward svc/z-graph-frontend 8080:80
 ```
 
----
+本机只想给控制台接一个已起的 8090，用 [`deploy/nginx/frontend-local.conf`](deploy/nginx/frontend-local.conf)
+（监听 3333，`/api/` → `127.0.0.1:8090`，nginx 侧同样开了 gzip + `/assets/` 长缓存 + `index.html` no-cache）。
 
-## 环境变量
-
-### 服务端环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `Z_GRAPH_BOLT_PORT` | 7687 | Bolt 协议端口 |
-| `Z_GRAPH_HTTP_PORT` | 8090 | HTTP 控制面端口 |
-| `Z_GRAPH_DATA_DIR` | /var/lib/z-graph | 数据持久化目录 |
-| `Z_GRAPH_CORS_ALLOWED_ORIGINS` | `*` | CORS 允许的 origin（逗号分隔） |
-| `Z_GRAPH_API_TOKEN` | (无) | API Token 认证密钥（设置后启用 Bearer 认证） |
-| `Z_GRAPH_RATE_LIMIT` | 0 | 每 IP 每分钟请求上限（0=不限，生产建议 100-600） |
-| `JAVA_OPTS` | (空) | JVM 参数注入 |
-
-### 前端环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `Z_GRAPH_API_UPSTREAM` | `z-graph-server:8090` | API 反代目标地址（容器内网络解析） |
+CI：[`.github/workflows/java-tests.yml`](.github/workflows/java-tests.yml)（push / PR 跑 `mvn -B -ntp verify`，
+上传 surefire 报告）、[`.github/workflows/build-images.yml`](.github/workflows/build-images.yml)
+（先 `mvn -B -ntp test` 再并行构建三个镜像；push 到 `ghcr.io/<repository_owner>/z-graph-*`，
+tag 为 `latest` 或 tag 名或 `pr-<n>`，另附 `github.sha` tag；PR 只构建不推送）。
+除 Maven Central 那 6 个坐标是实测可读之外，GHCR 某 tag 此刻能否拉取请按 workflow 运行记录现查，README 不作承诺。
 
 ---
 
-## 性能基准
+## 📈 性能：只留量得出的数
 
-基于本地测试环境（macOS, 4 cores, 16GB RAM）的实测数据：
+历史 T1 报告（[`_doc/001_arch/TEST_REPORT.md`](_doc/001_arch/TEST_REPORT.md)，2026-08-31，Bolt POC 路径）：
+100 连接 × 5 查询 = 500/500 通过，**QPS ≈ 5278**；补测 200 客户端 × 10 查询时约 1000 条在 0.19s 完成，
+之后开始队列堆积（Netty NIO 默认 IO 线程 ≈ 核数 × 2）。同批修复了 `nextQid` 非线程安全与测试硬编码 qid
+两个并发 bug（后者会让第二次 PULL 找不到流、客户端卡死）。
 
-| 指标 | 数值 |
+视图缓存默认档在 1.0.4 量出过反例（记在 `GraphVersionStore` 注释里）：20 万节点的图按实体计费 300,299，
+而当时预算 200,000 —— 淘汰退化成"只留各分支 head 那份豁免视图"，首读 656ms、复读 650ms，复读相对首读零收益。
+1.0.5 起预算改按**整图份数**换算（`DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS = 4`，20 万节点约当 120 万实体），
+对图规模自适应：图越大留的视图越少。
+
+旧 README 里两张表**已从本文删除**："100 万节点 / 500 万边：单节点 add 80,000 QPS、shortestPath 3,500 QPS、
+版本化 commit 1,200 QPS"，以及"macOS 实测健康检查 5.2ms / 查询 6.0ms / 进程内存 73MB / 单实例 10,000 req/s"。
+仓内找不到产生这些数字的可复现用例（其中 `shortestPath` 根本没有实现），留着就是让下一个读者拿它当承诺。
+要基准就现跑上面的 `MvccStressHarness`，它每条场景都带可判红的 verdict。
+
+---
+
+## 🩺 故障排查
+
+| 现象 | 判法 |
 |------|------|
-| 健康检查延迟 | **5.2ms** |
-| Cypher 查询延迟（MATCH + LIMIT 10） | **6.0ms** |
-| 前端页面加载延迟 | **4.8ms** |
-| API 代理延迟（Nginx 反代） | **5.4ms** |
-| JS GZIP 压缩比 | **68%** (194KB → 63KB) |
-| CSS GZIP 压缩比 | **73%** (8.5KB → 2.3KB) |
-| Server CPU 占用（空闲） | 0.95% |
-| Server 内存占用 | **73MB** |
-| Frontend CPU 占用（空闲） | 2.17% |
-| Frontend 内存占用 | **5.85MB** |
-
-### 吞吐估算
-
-单实例 z-graph-server 在 4 核 CPU 上的理论吞吐：
-- 简单查询（read）：~10,000 req/s
-- 简单查询（write）：~1,000 req/s
-- 复杂查询（join/aggregation）：~500 req/s
-
-具体数值取决于数据规模、查询复杂度和硬件配置。
+| `Address already in use: 7687` | `lsof -i :7687`；或改 `Z_GRAPH_BOLT_PORT` / 传首个命令行参数 |
+| starter 起不来 / 端口被占 | `GraphControlServer` 构造即 bind，异常直接冒到容器启动；先确认 8090 上是不是已有实例 |
+| 写请求返回 409 | `StaleHeadException`：base head 已被别的连接推进；控制面重读 head 后重试，Bolt 侧 `RUN` 写路径已自动重试一次 |
+| 历史读很慢 | 看 `repo.versionStats()`；套叠层数超 `view-layer-limit` 或检查点过深会回放物化，必要时调小 `checkpoint-interval` |
+| 官方 Neo4j driver 连不上 | 预期行为：服务端不处理 magic + 版本协商段；请用手写帧驱动，或先补 handshake |
+| 前端 404 / 接口全红 | `docker logs z-graph-frontend`；`curl http://localhost:3333/api/health` 验反代（nginx `/api/` 会剥掉前缀） |
+| CORS 收紧无效 | 系统属性 `z.graph.cors.allowedOrigins` 优先于 `Z_GRAPH_CORS_ALLOWED_ORIGINS`，两处都设时后者被盖掉 |
+| 想看请求轨迹 | `curl 'http://localhost:8090/meta/logs?limit=20&status=4xx'`，或按 `requestId=` 精确捞（环形缓冲只保最近 500 条） |
 
 ---
 
-## Git 版本化图模型
+## 📄 License
 
-```java
-GraphVersionStore repository = new GraphVersionStore();
+MIT，见根 [`LICENSE`](LICENSE)（首行即 "MIT License"，版权方 2026 z-opc-foundation）与根 POM 的
+`<license>MIT License`。旧 README 结尾写的 "Apache License 2.0" 与文件不符，已纠正。
 
-// 在 main 分支创建初始节点
-GraphWriteTransaction tx = repository.beginWrite("main");
-tx.addNode("Person", Map.of("name", "Alice"));
-GraphCommit base = tx.commit("alice", "add Alice");
+## 🔗 开源参考
 
-// 创建 feature 分支并添加 Bob
-repository.createBranch("feature", base.getId());
-GraphWriteTransaction featureTx = repository.beginWrite("feature");
-featureTx.addNode("Person", Map.of("name", "Bob"));
-featureTx.commit("bob", "feature graph");
+架构分层（Meta / Query / Storage）与 Bolt 消息语义参考 [NebulaGraph](https://github.com/vesoft-inc/nebula)
+与 [Bolt 协议规范](https://neo4j.com/docs/bolt/current/bolt-protocol/)；本工程只采用公开架构思想与协议资料，
+不复制上游代码，并保留上游链接与许可证边界。
 
-// 三方合并
-GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "merge feature");
-// merge.getConflicts() 返回冲突列表
-
-// 回滚到任意历史 commit
-GraphCheckout old = repository.checkout(base.getId());
-List<Map<String, Object>> rows = old.query("MATCH (n:Person) RETURN n.name AS name");
-```
-
-### 合并策略
-
-三方 merge，base / ours / theirs 在同一节点或边上：
-- 只有单侧发生变化的属性 → 自动合并
-- 同一字段两侧都修改 → 进入冲突列表（人工处理）
+_Maintained by the z-opc-foundation organization._
 
 ---
-
-## 可观测性
-
-### 日志
-
-**stdout/stderr**（Docker `docker logs` 可查看）：
-```
-[INFO] 192.168.1.10 GET /meta/branches 200 1ms HTTP-Dispatcher
-[INFO] 192.168.1.10 POST /query 200 12ms HTTP-Dispatcher reqId=abc123def456
-[ERROR] 192.168.1.10 POST /query 500 5ms HTTP-Dispatcher: RuntimeException - Invalid pattern
-```
-
-**环形缓冲区**（通过 HTTP API 查询）：
-```bash
-curl 'http://localhost:8090/meta/logs?limit=100&method=POST&status=4xx'
-
-{
-  "total": 1234,
-  "bufferSize": 500,
-  "offset": 0,
-  "limit": 100,
-  "entries": [
-    {
-      "timestamp": 1700000000000,
-      "requestId": "abc123def456",
-      "method": "POST",
-      "path": "/query",
-      "clientIp": "192.168.1.10",
-      "status": 200,
-      "elapsedMs": 12,
-      "thread": "HTTP-Dispatcher"
-    }
-  ]
-}
-```
-
-### 监控指标（Prometheus 兼容格式规划中）
-
-通过 `/meta/metrics` 获取：
-- 请求总数、错误率、平均响应时间
-- JVM 内存使用、GC 次数
-- 活跃速率限制桶数
-- 认证失败次数
-
-### 分布式追踪
-
-每个响应携带 `X-Request-ID` 头：
-- 服务端自动生成（16 字符 UUID）
-- 客户端可通过 `X-Request-ID: <id>` 传入复用
-- 同一请求链路上所有日志可通过 ID 关联
-
----
-
-## 开发指南
-
-### 模块说明
-
-```
-z-graph-api/                # 公共 API（GraphCommit、GraphMergeResult）
-z-graph-core/               # 核心引擎
-  ├── CypherEngine          # OpenCypher 解析/执行
-  ├── InMemoryGraphStore    # 内存图存储
-  ├── GraphVersionStore     # Git 风格版本控制
-  └── GraphMetaService      # 元数据服务
-z-graph-protocol/           # Bolt 4.4 协议
-z-graph-bolt-server/        # 服务端
-  ├── ZGraphServer          # Bolt + HTTP 控制面统一入口
-  └── GraphControlServer    # HTTP 控制面
-z-graph-spring-boot-starter/# Spring Boot 集成（可选）
-z-graph-console/            # React 前端
-```
-
-### 添加新的 Cypher 子句
-
-1. 在 `z-graph-core` 中扩展 `CypherEngine`
-2. 添加 AST 节点定义
-3. 实现 Parser（基于现有递归下降）
-4. 实现 Executor
-5. 在 `z-graph-core` 中添加单元测试
-6. 更新 README 的 Cypher 支持清单
-
-### 添加新的 HTTP 端点
-
-1. 在 `GraphControlServer` 中创建 `handleXxx` 方法
-2. 在构造函数中注册：`server.createContext("/path", logAndHandle(this::handleXxx))`
-3. 在 `ApiDocs.jsx` 中添加端点说明
-4. 更新 README 的端点清单
-
-### 本地开发工作流
-
-```bash
-# 后端开发
-mvn -pl z-graph-core test                    # 单元测试
-mvn -pl z-graph-core -am compile             # 编译
-mvn -pl z-graph-bolt-server exec:java        # 启动服务
-
-# 前端开发
-cd z-graph-console
-npm run dev                                  # 开发服务器
-npm run build                                # 生产构建
-
-# 集成测试
-mvn test                                     # 全部 148 个测试
-```
-
----
-
-## 故障排查
-
-### 端口冲突
-
-```
-Error: Address already in use: 7687
-```
-
-```bash
-# 查找占用端口的进程
-lsof -i :7687
-# 杀死进程或修改 Z_GRAPH_BOLT_PORT
-```
-
-### 容器启动失败
-
-```bash
-# 查看容器日志
-docker logs z-graph-server
-
-# 检查健康状态
-docker inspect --format '{{.State.Health.Status}}' z-graph-server
-```
-
-### 性能下降
-
-```bash
-# 检查 JVM 内存
-curl http://localhost:8090/meta/metrics | jq '.jvmMemory'
-
-# 检查 GC
-docker exec z-graph-server jstat -gc 1
-
-# 查看慢查询日志
-curl 'http://localhost:8090/meta/logs?limit=20' | jq '.entries[] | select(.elapsedMs > 100)'
-```
-
-### 数据丢失
-
-检查 Docker 卷是否正确挂载：
-```bash
-docker volume inspect z-graph-data
-```
-
-### CORS 错误
-
-```bash
-# 限制允许的 origin
-export Z_GRAPH_CORS_ALLOWED_ORIGINS="https://app.example.com,https://admin.example.com"
-```
-
-### 前端 404
-
-```bash
-# 检查 Nginx 配置和 frontend 容器
-docker logs z-graph-frontend
-
-# 验证反代
-curl http://localhost:3000/api/health
-```
-
----
-
-## Git 提交历史
-
-```
-c616c53 docs: README 全面更新 + Docker Compose 生产配置优化
-bceed58 feat: Nginx GZIP + 静态缓存 + Dashboard 实时图表 + Cypher 自动补全
-95d86b7 feat: X-Request-ID 追踪 + GZIP 响应压缩 + 优雅关闭
-e604058 feat: 请求日志环形缓冲 + 日志查看器 + 查询结果导出
-1abf198 feat: 侧边栏实时服务器指标（运行时间、请求数、错误率、JVM 内存）
-569b924 docs: README 全面更新 — 覆盖 12 个 API + 安全 + 前端 + 部署
-28680cb feat: 交互式 API 文档页面
-8aa3aa9 feat: 查询执行计划端点 /query/explain
-bf9a85a feat: Cypher 语法高亮编辑器
-bb1b7d5 ops: 运行指标监控端点 /meta/metrics
-8c0a302 security: API Token 认证 + 速率限制 + 安全响应头
-7eb2b2a feat: 图数据 SVG 可视化（力导向布局）
-90a1d75 ops: Docker 部署生产化 — 资源限制 + JVM 调优 + 日志轮转
-6c24102 feat: HTTP 请求日志 + 异常捕获 + 生产级可观测性
-c30f4f9 feat: 批量查询 + 导出导入 + 响应计时 + 查询历史
-d150363 feat: HTTP API 增强 + React 控制台升级 + all-in-one 镜像修复
-fadccf4 fix: Docker 部署调优 — 修复 Maven 依赖解析与 HTTP 控制面写支持
-d25ae23 feat: React 控制台 + 三种 Docker 镜像 + GHCR 自动化 + 分布式 K8s
-```
-
----
-
-## 开源参考
-
-架构分层和协议兼容目标参考 [NebulaGraph](https://github.com/vesoft-inc/nebula)。NebulaGraph 为 Apache License 2.0 项目；本工程仅采用其公开架构思想和协议资料，不复制其未授权代码，并保留上游项目链接及许可证边界。
-
----
-
-## 许可证
-
-Apache License 2.0
-
 
 ## 文档目录
 
-本项目文档统一收口在 `_doc/` 下:
+本项目文档统一收口在 `_doc/` 下：
 
-- [`_doc/001_arch/`](_doc/001_arch/) — 架构文档 (项目总览 / 模块结构 / 接口清单 / DB schema / 前端 / 能力 / roadmap):
-  - [`TEST_REPORT.md`](_doc/001_arch/TEST_REPORT.md)
+- [`_doc/001_arch/`](_doc/001_arch/) — 架构与测试记录：
+  - [`TEST_REPORT.md`](_doc/001_arch/TEST_REPORT.md) — T1 阶段（2026-08-31）Bolt POC 端到端报告：单元 25/25、
+    正常路径 10/10、错误路径 9/9、并发 500/500 与 QPS 5278 的原始输出，后半节补记版本化图增量验证
+    （`GraphVersionStore` 9/9、`CypherEngine` 15/15、`InMemoryGraphStore` 12/12、Bolt 事务 E2E）。
+    ⚠ 它是**历史快照**：里面的 `poc/` 路径、"BEGIN 不支持只回 IGNORED"、"仅 RETURN 字面量"等结论
+    已被后续实现推翻，其中 Java 源码行数表对应的还是 Java 17 时代的骨架。
 
-- [`_doc/003_script/`](_doc/003_script/) — 运维脚本:
-  - [`all-in-one-entrypoint.sh`](_doc/003_script/all-in-one-entrypoint.sh)
-  - [`deploy_maven_center.sh`](_doc/003_script/deploy_maven_center.sh)
-  - [`run_e2e.sh`](_doc/003_script/run_e2e.sh)
-  - [`run_t1_verify.sh`](_doc/003_script/run_t1_verify.sh)
-  - [`test_bolt_concurrent.py`](_doc/003_script/test_bolt_concurrent.py)
-  - [`test_bolt_error.py`](_doc/003_script/test_bolt_error.py)
-  - [`test_bolt_full.py`](_doc/003_script/test_bolt_full.py)
-  - [`test_bolt_poc.py`](_doc/003_script/test_bolt_poc.py)
-  - [`test_bolt_raw.py`](_doc/003_script/test_bolt_raw.py)
+- [`_doc/002_deploy/`](_doc/002_deploy/) — 目前为空目录（部署资产实际躺在根 `deploy/`，见「部署」一节）
 
-各文档详细说明见各子目录。
+- [`_doc/003_script/`](_doc/003_script/) — Bolt 协议测试驱动与运维脚本（原 `poc/` 实验收口于此）：
+  - [`test_bolt_raw.py`](_doc/003_script/test_bolt_raw.py) — 手写帧最小往返：HELLO → RUN(`RETURN 1 AS n`) → PULL
+  - [`test_bolt_full.py`](_doc/003_script/test_bolt_full.py) — 7 类 `RETURN` 字面量子场景，每场景独立 TCP 连接
+  - [`test_bolt_error.py`](_doc/003_script/test_bolt_error.py) — 错误路径：未知签名、非法 qid、DISCARD、RESET、GOODBYE
+  - [`test_bolt_concurrent.py`](_doc/003_script/test_bolt_concurrent.py) — 并发压力（`NUM_CLIENTS` / `QUERIES_PER_CLIENT`）
+  - [`test_bolt_poc.py`](_doc/003_script/test_bolt_poc.py) — 官方 `neo4j` Python driver 版用例（现预期失败，见「测试」）
+  - [`run_e2e.sh`](_doc/003_script/run_e2e.sh) — 编译 + 启 `BoltServer` + 跑 `test_bolt_poc.py` 的编排（路径假设仍是 `poc/`）
+  - [`run_t1_verify.sh`](_doc/003_script/run_t1_verify.sh) — T1 全流程：环境检查 → `mvn test` → 启服务 → 三类 E2E（`full` / `unit-only` / `e2e-only`；同样待修路径）
+  - [`all-in-one-entrypoint.sh`](_doc/003_script/all-in-one-entrypoint.sh) — all-in-one 容器入口：拷前端产物、并行拉起 Java 服务与 nginx
+  - [`deploy_maven_center.sh`](_doc/003_script/deploy_maven_center.sh) — Central 发布：`publish`（`mvn deploy -Pcentral`）/ `verify` / `gpg-init` / `readme`
+
+- [`_doc/004_skill/`](_doc/004_skill/) — 目前为空目录（暂无 skill 定义）
+
+根 `poc/` 现为**空目录**且未被 git 跟踪，历史 Bolt 实验已迁到 `_doc/003_script/`。
