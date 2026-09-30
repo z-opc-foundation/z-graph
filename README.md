@@ -82,7 +82,7 @@
 TINY_* 变体只在读侧识别）；建连前的 4 字节 magic `0x6060B007` 与版本协商段**没有任何处理代码**
 （全仓 grep 无 magic / handshake），`ROUTE`、`ACKS_REQUIRED`、多 chunk 分片、大 chunk 头 `0xFF…` 也都没实现。
 所以**不能宣称"Neo4j 官方 Java/Python/Go/JS Driver 或 Neo4j Browser 可直连 bolt://"**：仓内 E2E 用的是自写的
-`z-graph-bolt-server/src/test/java/com/zifang/z/graph/bolt/BoltTestClient.java`，`_doc/003_script/` 里的
+`z-graph-bolt-server/src/test/java/com/zifang/z/graph/bolt/BoltTestClient.java`，[`_doc/003_script/`](_doc/003_script/) 里的
 Python 驱动同样是手写帧。要接官方 driver，得先补 handshake 与版本协商。
 
 ---
@@ -350,7 +350,7 @@ NUM_CLIENTS=100 QUERIES_PER_CLIENT=5 python3 _doc/003_script/test_bolt_concurren
 
 ⚠ 两个编排脚本目前跑不通，是**脚本债不是代码债**：`run_e2e.sh` 把 `cd "$(dirname "$0")/.."` 当仓库根、
 `run_t1_verify.sh` 把 `$(dirname "$0")/.."` 当仓库根并拼 `$Z_GRAPH_DIR/poc/test_bolt_*.py` —— 两者都还假设自己
-躺在根 `poc/` 下，而脚本现在住在 `_doc/003_script/`，于是工作目录落到 `_doc`、驱动路径也指空。修好之前请按上面的
+躺在根 `poc/` 下，而脚本现在住在 [`_doc/003_script/`](_doc/003_script/)，于是工作目录落到 `_doc`、驱动路径也指空。修好之前请按上面的
 启动命令起服务，再直跑 `python3 _doc/003_script/test_bolt_*.py`。
 
 `_doc/003_script/test_bolt_poc.py` 走官方 `neo4j` driver 连 `bolt://localhost:7687`；按上面的协议边界
@@ -467,7 +467,7 @@ _Maintained by the z-opc-foundation organization._
     ⚠ 它是**历史快照**：里面的 `poc/` 路径、"BEGIN 不支持只回 IGNORED"、"仅 RETURN 字面量"等结论
     已被后续实现推翻，其中 Java 源码行数表对应的还是 Java 17 时代的骨架。
 
-- [`_doc/002_deploy/`](_doc/002_deploy/) — 目前为空目录（部署资产实际躺在根 `deploy/`，见「部署」一节）
+- `_doc/002_deploy/` — 目前为空目录（部署资产实际躺在根 `deploy/`，见「部署」一节）
 
 - [`_doc/003_script/`](_doc/003_script/) — Bolt 协议测试驱动与运维脚本（原 `poc/` 实验收口于此）：
   - [`test_bolt_raw.py`](_doc/003_script/test_bolt_raw.py) — 手写帧最小往返：HELLO → RUN(`RETURN 1 AS n`) → PULL
@@ -480,6 +480,6 @@ _Maintained by the z-opc-foundation organization._
   - [`all-in-one-entrypoint.sh`](_doc/003_script/all-in-one-entrypoint.sh) — all-in-one 容器入口：拷前端产物、并行拉起 Java 服务与 nginx
   - [`deploy_maven_center.sh`](_doc/003_script/deploy_maven_center.sh) — Central 发布：`publish`（`mvn deploy -Pcentral`）/ `verify` / `gpg-init` / `readme`
 
-- [`_doc/004_skill/`](_doc/004_skill/) — 目前为空目录（暂无 skill 定义）
+- `_doc/004_skill/` — 目前为空目录（暂无 skill 定义）
 
-根 `poc/` 现为**空目录**且未被 git 跟踪，历史 Bolt 实验已迁到 `_doc/003_script/`。
+根 `poc/` 现为**空目录**且未被 git 跟踪，历史 Bolt 实验已迁到 [`_doc/003_script/`](_doc/003_script/)。
