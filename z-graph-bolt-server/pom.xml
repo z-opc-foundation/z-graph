@@ -73,10 +73,7 @@
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-simple</artifactId>
-            <scope>runtime</scope>
-        </dependency>
+        <!-- 原 slf4j-simple 声明已删（2026-10-02）：main/test 零用 slf4j，纯漏；runtime 域以前是
+             让消费方 server 自跑自带的「愚巧」，库件不该替应用写日志栈。 -->
     </dependencies>
 </project>
