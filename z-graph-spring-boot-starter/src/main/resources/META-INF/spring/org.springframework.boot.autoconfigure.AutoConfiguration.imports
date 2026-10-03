@@ -1,1 +1,2 @@
 com.zifang.z.graph.starter.autoconfigure.ZGraphAutoConfiguration
+com.zifang.z.graph.starter.host.GraphHostAutoConfiguration
