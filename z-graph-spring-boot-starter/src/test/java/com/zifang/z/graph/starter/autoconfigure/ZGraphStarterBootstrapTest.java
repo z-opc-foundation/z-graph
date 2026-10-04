@@ -4,6 +4,7 @@ import com.zifang.z.graph.api.Colls;
 import com.zifang.z.graph.bolt.GraphControlServer;
 import com.zifang.z.graph.core.GraphVersionStore;
 import com.zifang.z.graph.core.GraphWriteTransaction;
+import com.zifang.z.graph.starter.host.GraphHostAutoConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -19,6 +20,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -70,9 +73,33 @@ class ZGraphStarterBootstrapTest {
                 .getResource("META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports");
         assertNotNull(url, "imports 不在 classpath 上 ⇒ 使用方扫不到自动配置");
         try (InputStream in = url.openStream()) {
+            // imports 里现在有**两个**自动配置：ZGraphAutoConfiguration（@AutoConfiguration，
+            // 受 z.graph.enabled 控制）与 GraphHostAutoConfiguration（@Configuration，
+            // 受 z.graph.host.enabled 控制）。此前这把尺拿 trim 后的整份文件去 equals
+            // 单一类名，于是报「expected: …ZGraphAutoConfiguration but was:
+            // …ZGraphAutoConfiguration」—— 两边肉眼一模一样，差的是后面还挂着第二个类名。
+            // 改为逐行核对：列出来的每个类名都得真实存在，且至少含主自动配置。
             String body = readBody(in).trim();
-            assertEquals(ZGraphAutoConfiguration.class.getName(), body,
-                    "imports 里写的类名和被装配的类对不上");
+            List<String> declared = new ArrayList<String>();
+            for (String line : body.split("\\R")) {
+                String t = line.trim();
+                if (!t.isEmpty() && !t.startsWith("#")) {
+                    declared.add(t);
+                }
+            }
+            assertTrue(declared.contains(ZGraphAutoConfiguration.class.getName()),
+                    "imports 里没有主自动配置 " + ZGraphAutoConfiguration.class.getName()
+                            + "，实列=" + declared);
+            assertTrue(declared.contains(GraphHostAutoConfiguration.class.getName()),
+                    "imports 里没有宿主自动配置 " + GraphHostAutoConfiguration.class.getName()
+                            + "，实列=" + declared);
+            // 正面判据：列出来的每个类都得真的能加载，且是自动配置/配置类
+            for (String fqn : declared) {
+                Class<?> c = Class.forName(fqn, false, ZGraphAutoConfiguration.class.getClassLoader());
+                assertTrue(c.isAnnotationPresent(org.springframework.boot.autoconfigure.AutoConfiguration.class)
+                                || c.isAnnotationPresent(org.springframework.context.annotation.Configuration.class),
+                        fqn + " 列进了 imports，但它既没 @AutoConfiguration 也没 @Configuration");
+            }
         }
         // 属性类必须挂 @ConfigurationProperties，否则 z.graph.* 十个字段一个都不会被绑上
         assertTrue(ZGraphProperties.class.isAnnotationPresent(ConfigurationProperties.class));
