@@ -106,6 +106,13 @@ public final class StorageEngine {
         return header.allocateCommitSeq();
     }
 
+    /** 迁移回放时保留旧仓库的序号水位：next 至少越过 seq。 */
+    public synchronized void reserveCommitSeq(long seq) {
+        while (header.nextCommitSeq() <= seq) {
+            header.allocateCommitSeq();
+        }
+    }
+
     // ==================== 写：指令集落盘 ====================
 
     /**

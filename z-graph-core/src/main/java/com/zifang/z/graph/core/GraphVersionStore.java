@@ -98,6 +98,7 @@ public final class GraphVersionStore {
         Path commitsDir = dir.resolve("commits");
         try {
             recoverCompactionCrash(dir);
+            LegacyMigrator.migrateIfNeeded(dir);
             boolean existing = Files.exists(storeDir.resolve("header.bin"));
             if (existing) {
                 this.engine = StorageEngine.open(storeDir);
@@ -497,7 +498,7 @@ public final class GraphVersionStore {
             if (version < GraphCodec.LEGACY_STORAGE_VERSION || version > GraphCodec.STORAGE_VERSION) {
                 throw new IllegalArgumentException("Snapshot version unsupported: " + version);
             }
-            full = version >= GraphCodec.STORAGE_VERSION
+            full = version >= GraphCodec.DELTA_SNAPSHOT_VERSION
                     ? GraphDelta.readFrom(in)
                     : GraphDelta.between(EMPTY_VIEW, readLegacySnapshot(in, version));
         }
@@ -1024,9 +1025,22 @@ public final class GraphVersionStore {
     private CommitObjectStore.CommitMeta requireCommit(String id, String description) {
         CommitObjectStore.CommitMeta meta = commits.get(id);
         if (meta == null) {
+            meta = findByLegacyId(id);
+        }
+        if (meta == null) {
             throw new UnknownReferenceException("Unknown " + description);
         }
         return meta;
+    }
+
+    /** v4→v5 迁移后历史 commit id 全变；按旧 id（legacyId）反查新 commit。 */
+    private CommitObjectStore.CommitMeta findByLegacyId(String legacyId) {
+        for (CommitObjectStore.CommitMeta meta : commits.values()) {
+            if (meta.legacyId != null && meta.legacyId.equals(legacyId)) {
+                return meta;
+            }
+        }
+        return null;
     }
 
     private String requireCommitId(String id, String description) {

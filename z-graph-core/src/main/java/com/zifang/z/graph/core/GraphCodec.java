@@ -17,10 +17,12 @@ import java.util.Map;
 public final class GraphCodec {
 
     public static final int STORAGE_MAGIC = 0x5A475246;
-    /** V4 起仓库按 commit 存增量，不再内联整图快照。 */
-    public static final int STORAGE_VERSION = 4;
+    /** V4 起仓库按 commit 存增量；V5 = 版本链引擎时代的导出文件版本号。 */
+    public static final int STORAGE_VERSION = 5;
     /** 仍可读取的历史格式下界。 */
     public static final int LEGACY_STORAGE_VERSION = 2;
+    /** V4 起快照正文改为 delta 编码（V2/V3 是内联整图），按它分流读取。 */
+    public static final int DELTA_SNAPSHOT_VERSION = 4;
 
     private GraphCodec() {
     }
