@@ -1,16 +1,20 @@
 # z-graph
 
-> 独立图数据库 —— MVCC 版本化图（Git 风格 commit / branch / merge）+ Nebula 风格 Tag/EdgeType schema
-> + OpenCypher 子集 + Bolt 风格二进制协议 + HTTP 控制面 + React 控制台。Java 8 · Netty 4 · Spring Boot 2.7（仅 starter）
+> 独立图数据库 —— 引擎原生 MVCC 版本链（Git 思想：内容哈希 commit / branch / merge / GC，无 Git 依赖）
+> + Nebula 风格 Tag/EdgeType schema + OpenCypher 子集 + Bolt 风格二进制协议 + HTTP 控制面 + React 控制台。
+> Java 8 · Netty 4 · Spring Boot 2.7（仅 starter）
 
-它要解决的问题：图数据的一次写入不该覆盖历史。`z-graph` 把每个 commit 存成**相对第一父的增量**
-（`GraphDelta`）外加每条节点/边的版本链（`GraphEntityVersion`），因此写成本是 O(本次变更量) 而不是整图复制，
-同时 `checkout(<commitId>)` 仍能给出任意历史时刻的完整视图。上层再挂一个 OpenCypher 子集解析器、
-一个 Bolt 风格 socket 服务、一个 JDK `HttpServer` 控制面，就得到一个可以嵌进 JVM、也可以单容器跑 demo 的图库。
+它要解决的问题：图数据的一次写入不该覆盖历史。v5 存储引擎把图数据**只**存成磁盘上的追加式版本链——
+每条节点/边/schema 一条版本链（undo log 语义，沿 `prevVersionId` 回溯）+ 四族版本化倒排 postings
+（labels / adj-out / adj-in / edge-types），**没有"当前态镜像"、没有应用层物化**：任何 ref（main head、
+分支 head、任意历史 commit）都由引擎按「commitSeq ∈ 该 ref 的祖先闭包」即时解析出完整图视图，
+所以"在面板上切到任意 commit"是引擎读路径本身，不是某个缓存命中。commit id 是整个 commit object
+规范化字节的 SHA-256 截 40 hex（对齐 Git：同对象必同 id、落盘即不可变），分支是纯指针文件，
+ref 原子替换就是提交点。写成本 = O(本次变更量)。
 
 架构分层参考 NebulaGraph 的 Meta / Query / Storage 划分（对应 `GraphMetaService` / `GraphQueryService` /
-`GraphVersionStore`+`InMemoryGraphStore`），协议消息面参考 Bolt 4.4 规范；**只采用公开架构与协议资料，
-不复制上游代码**（详见文末「开源参考」）。
+`GraphVersionStore`+storage 包），版本化思想对齐 Git（思想而非实现，零 Git 依赖），协议消息面参考
+Bolt 4.4 规范；**只采用公开架构与协议资料，不复制上游代码**（详见文末「开源参考」）。
 
 ---
 
@@ -20,12 +24,12 @@
 |------|-----|
 | **仓库** | `z-graph`（remote: `github.com/z-opc-foundation/z-graph`，分支 `main`） |
 | **Maven 坐标** | `io.github.yuku123:z-graph`（聚合 POM）+ 5 个 reactor 子坐标 |
-| **当前版本** | `1.0.8`（根 POM 与 5 个子 POM **逐字面写 1.0.8**，本仓没用 `${revision}`；发布形状由 flatten-maven-plugin 1.5.0 `oss` 模式自包含） |
-| **父项目** | `io.github.yuku123:z-boot-parent:1.0.21`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘） |
-| **Maven Central** | **已发布**：`z-graph` / `-api` / `-protocol` / `-core` / `-bolt-server` / `-spring-boot-starter` 的 `1.0.8` pom 与 jar 均可从 repo1 取到（ranged GET 实测 206）；`1.0.7` 同样可读。⚠ POM 注释里写明 `1.0.6` 是半成品（api 已是 class-file 52、core/bolt-server 仍是 61），**该号作废不要用** |
+| **当前版本** | `1.1.0`（v5 存储引擎版本；根 POM 与 5 个子 POM **逐字面写 1.1.0**，本仓没用 `${revision}`；发布形状由 flatten-maven-plugin 1.5.0 `oss` 模式自包含） |
+| **父项目** | `io.github.yuku123:z-boot-parent:1.1.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘；旧 README 写的 1.0.21 是过期记录） |
+| **Maven Central** | 实测 2026-10-09：`1.0.8` 及更早在 repo1 可读（ranged GET 200）；**`1.1.0` 尚未发布**（repo1 直连 404），发布走 `deploy_maven_center.sh` 并以 `/deployments` 状态为准 |
 | **默认端口** | Bolt `7687` · HTTP 控制面 `8090`（`ZGraphServer` 两个都起）；控制台 dev `5173` / 容器 `3333` / all-in-one `3000` |
 | **运行口径** | Java 8（class-file 52）· Spring Boot 2.7.18（只在 `z-graph-spring-boot-starter`）· Netty 4.1.138.Final |
-| **最近更新** | 2026-09-30 |
+| **最近更新** | 2026-10-09 |
 
 ---
 
@@ -39,11 +43,11 @@
 | OpenCypher 子集 | `CypherEngine`（2255 行，手写解析）+ `CypherExecutor`（`RETURN` 字面量旧路径） | 见下方「Cypher 支持矩阵」 |
 | 变长路径 | `CypherEngine` 的 `(a)-[:TYPE*min..max]->(b)` | 反向 `<-[]->`、无方向 `-[]-`、类型过滤均支持 |
 | N 跳邻居 | `GraphStore.traverse(startNodeId, maxDepth, edgeType)` | 返回可达节点集合 |
-| MVCC 版本化图 | `GraphVersionStore`：`beginWrite` / `commit` / `checkout` / `checkoutBranch` / `createBranch` / `log` / `merge` / `nodeVersions` / `nodeVersionAt` / `garbageCollect` / `versionStats` / `reachableCommitCount` | 写事务在 `VersionOverlayStore` 覆盖层里累积增量；提交后把该覆盖层认领为新 commit 的视图 |
+| MVCC 版本化图 | `GraphVersionStore`：`beginWrite` / `commit` / `checkout` / `checkoutBranch` / `createBranch` / `log` / `merge` / `nodeVersions` / `nodeVersionAt` / `garbageCollect` / `versionStats` / `reachableCommitCount` | 写事务（`TxBuffer`，原 VersionOverlayStore）只是暂存指令集的缓冲，**永不充当视图**；提交 = 版本链追加 + 内容哈希 commit object 落盘 + ref 原子移动（提交点）。读一律由 `RefViewGraphStore` 沿链按 ancestry 解析，引擎堆内不存在整图状态对象（`NoMirrorTest` 结构断言常驻） |
 | 并发控制 | `GraphVersionStore.StaleHeadException`（提交时 base head 已被推进） | 控制面对应返回 `409`，Bolt 侧 `RUN` 写路径重试一次 |
-| 三方合并与冲突 | `GraphVersionStore.merge(target, source, author, message)` → `GraphMergeResult`（`isMerged` / `getCommit` / `getConflicts` / `hasConflicts`） | 只自动合并单侧变化；同字段双侧改动进冲突列表且**不移动** target head |
-| 文件持久化 | `GraphVersionStore(Path storageDirectory)`：`objects/<commitId>.bin` + `repository.bin` | `GraphCodec.STORAGE_VERSION=4`（按 commit 存增量），`LEGACY_STORAGE_VERSION=2` 的旧文件仍可读；重启可恢复提交图、版本链与历史视图 |
-| 视图缓存调参 | `withCheckpointInterval` / `withMaxRetainedViews` / `withRetainedWholeGraphViews` / `withViewLayerLimit` / `withEagerCheckpoints` | 默认常量 32 / 64 / 4 份整图 / 8 层，都是 `GraphVersionStore` 的 public 常量 |
+| 三方合并与冲突 | `GraphVersionStore.merge(target, source, author, message)` → `GraphMergeResult`（`isMerged` / `getCommit` / `getConflicts` / `hasConflicts`） | commit 级 replay：只对两侧自 merge-base 以来**触碰过的实体**做三方字段判定（不物化任何整图）；单侧变化自动合并，同字段双侧改动进冲突列表且不移动 target head；target 无分叉时 fast-forward，source 无新工作时原地不动 |
+| 磁盘存储（追加式版本链） | `com.zifang.z.graph.core.storage` 包：`StorageEngine` 门面 + `VersionStore` / `PostingStore` / `FixedRecordFile`（mmap 窗口）/ `AppendSegment` / `EntityHeadTable` 槽表 / `NameDictionary` / `CommitObjectStore` / `RefStore` / `AncestryIndex` | 布局见下方「存储架构（v5）」；`GraphCodec.STORAGE_VERSION=5`；v4 仓（`objects/`+`repository.bin`）open 时自动迁移并保留 legacyId 反查 |
+| GC 与压实 | `garbageCollect(keepBranches...)` | 不可达 commit object 删除 + 可达 delta 按 commitSeq 序重放进新引擎目录、原子换名；`versionRecordCount`/`payloadBytes` 回落到可达历史真实规模，保留分支的全部历史视图照常可读 |
 | Bolt 风格协议服务 | `BoltServer`（Netty pipeline）+ `z-graph-protocol`（`BoltConstants` / `BoltFrames` / `BoltMessageDecoder`）+ `BoltMessageHandler` | 消息面见下方「Bolt 消息矩阵」 |
 | HTTP 控制面 | `GraphControlServer`（JDK `com.sun.net.httpserver`，13 个 context） | 认证 / 限流 / 安全响应头 / CORS / GZIP / 请求日志 / 指标 |
 | Spring Boot 自动装配 | `ZGraphAutoConfiguration` + `ZGraphProperties`（前缀 `z.graph`，`AutoConfiguration.imports` 已注册） | `z.graph.enabled` **默认 false**；装的是 `GraphVersionStore` + 内嵌 HTTP 控制面，**不起 BoltServer** |
@@ -60,8 +64,8 @@
 | 聚合 | `count` / `sum` / `avg` / `min` / `max`（自动分组） | **`collect()` 未实现**（`parseAggregate` 正则只收这 5 个函数） |
 | 路径 | 变长 `(a)-[:TYPE*min..max]->(b)`、任意方向、类型过滤 | **`shortestPath()` / `allShortestPaths()` 全仓 0 处实现** |
 | 其他 | `UNWIND [..] AS x` / 多语句 `;` / 参数绑定（`$name`，走 `CypherEngine.execute(cypher, parameters)`） | `UNWIND` 只接字面量列表 |
-| 元数据 | `SHOW TAGS` / `SHOW EDGES` / `SHOW INDEXES` / `SHOW TAG <n>` / `SHOW EDGE <n>` / `SHOW STATS` / `DESCRIBE TAG\|EDGE` | `SHOW STATS` 要求底层是 `InMemoryGraphStore` |
-| 内置过程 | `CALL db.version` / `db.stats` / `db.tags` / `db.edges` / `db.indexes` / `db.branches` / `db.commits` / `db.head` | 后三类需要引擎绑到 `GraphVersionStore`，纯 `InMemoryGraphStore` 调用会抛错 |
+| 元数据 | `SHOW TAGS` / `SHOW EDGES` / `SHOW INDEXES` / `SHOW TAG <n>` / `SHOW EDGE <n>` / `SHOW STATS` / `DESCRIBE TAG\|EDGE` | `SHOW STATS` 走视图计数与引擎统计，任何 `GraphStore` 视图上都可用 |
+| 内置过程 | `CALL db.version` / `db.stats` / `db.tags` / `db.edges` / `db.indexes` / `db.branches` / `db.commits` / `db.head` | 后三类需要引擎绑到 `GraphVersionStore`；checkout 视图同样携带仓库引用，`db.branches` / `db.head` 在历史视图上照常可用 |
 | DDL | `CREATE TAG` / `CREATE EDGE [TYPE]` / `CREATE TAG INDEX` / `CREATE EDGE INDEX` / `DROP TAG\|EDGE\|INDEX` / `ALTER TAG\|EDGE` / `REBUILD` / `EXPLAIN` | — |
 
 ### Bolt 消息矩阵
@@ -82,8 +86,47 @@
 TINY_* 变体只在读侧识别）；建连前的 4 字节 magic `0x6060B007` 与版本协商段**没有任何处理代码**
 （全仓 grep 无 magic / handshake），`ROUTE`、`ACKS_REQUIRED`、多 chunk 分片、大 chunk 头 `0xFF…` 也都没实现。
 所以**不能宣称"Neo4j 官方 Java/Python/Go/JS Driver 或 Neo4j Browser 可直连 bolt://"**：仓内 E2E 用的是自写的
-`z-graph-bolt-server/src/test/java/com/zifang/z/graph/bolt/BoltTestClient.java`，[`_doc/003_script/`](_doc/003_script/) 里的
-Python 驱动同样是手写帧。要接官方 driver，得先补 handshake 与版本协商。
+`z-graph-bolt-server/src/test/java/com/zifang/z/graph/bolt/BoltTestClient.java`。要接官方 driver，得先补 handshake 与版本协商（v1 明确不做）。
+
+---
+
+## 🗄️ 存储架构（v5）
+
+思想对齐 Git、实现全自管：**不用 JGit/libgit2，不用外部数据库**，就是一批带布局约定的本地文件。
+
+```
+<dataDir>/
+├── store/                        # 引擎文件（唯一图数据基底，没有任何"当前态镜像"）
+│   ├── header.bin                # 64B 定长头：magic + layout v5 + id/序号分配器水位 + CRC32（原子重写）
+│   ├── versions.idx              # 64B 定长版本记录区（offset = versionId × 64）
+│   ├── versions.bin              # 变长 payload 追加区（完整实体记录：labels + properties / 边四元组）
+│   ├── node-heads.tbl / edge-heads.tbl / label-schema-heads.tbl / etype-schema-heads.tbl / index-schema-heads.tbl
+│   │                             # 定长槽表：slot = entityId×8 → headVersionId（纯索引，不是数据）
+│   ├── labels.post / adj-out.post / adj-in.post / edge-types.post
+│   │                             # 四族版本化倒排：40B 定长条目追加，删除 = 墓碑条目（undo log），
+│   │                             # 解析 = ancestry 内 commitSeq 最大且非墓碑者胜（latest-wins）
+│   ├── *.dict / *-heads.tbl      # 名称字典与 posting 槽表
+├── commits/<commitId>.bin        # commit object（Git 式：整体规范化字节，id = SHA-256 截 40 hex）
+├── refs/heads/<branch>           # 纯文本指针文件；ref 临时文件 + ATOMIC_MOVE = 提交点
+└── HEAD                          # ref: refs/heads/main
+```
+
+读路径（引擎原生，唯一路径）：`RefViewGraphStore` 绑定 ref + `AncestryIndex` 闭包。`getNode` 走
+entity-heads 槽取链头、沿 `prevVersionId` 回溯取第一条 ancestry 内可见的版本；邻接/label/属性索引
+走 postings 段过滤；frontier head 读因链头必在自身闭包内而 O(1)/实体。**main head 与任意历史 commit
+走同一条解析路径**——没有第二套"最新态"代码。
+
+写路径：`TxBuffer` 读穿透绑定的 head 视图、写进暂存 delta；提交时校验 head 未被推进（`StaleHeadException`
+乐观并发）→ 版本记录 + postings 追加 → commit object 内容寻址落盘 → 数据 force → ref 原子移动。
+崩溃序：ref 指向的 commit 必完整，孤儿对象由 GC 收。
+
+GC：不可达 commit 删除 + 可达 delta 按 commitSeq 序**重放进新引擎目录**、原子换名（两步 move 之间的
+崩溃由 open 守卫收尾）。压实后墓碑与不可达版本消失，可达历史逐 commit 仍可读、reopen 幂等。
+
+v4 → v5 迁移：open 见 `repository.bin`（v4 布局）而无 `store/header.bin` 时自动执行——v4 的每个 commit
+delta 按 commitSequence 升序重放，commit object 以内容哈希重写（parents 映射到新 id，**旧 id 记进
+legacyId**）；`checkout(<v4旧id>)` / HTTP `?commit=<旧id>` 按 legacyId 反查继续可用。v4 源归档为
+`objects.v4.bak` / `repository.v4.bak`，不删。中途崩溃的下次 open 从 v4 源整体重来（幂等）。
 
 ---
 
@@ -91,12 +134,15 @@ Python 驱动同样是手写帧。要接官方 driver，得先补 handshake 与�
 
 ```
 z-graph/
-├── pom.xml                        # 聚合 POM：parent z-boot-parent:1.0.21，6 条自家坐标 DM，flatten 常开
+├── pom.xml                        # 聚合 POM：parent z-boot-parent:1.1.0，6 条自家坐标 DM，flatten 常开
 ├── z-graph-api/                   # 抽象与值类型：GraphStore / Node / Edge / GraphCommit / GraphMergeResult
 │                                  #   / TagSchema / EdgeTypeSchema / Colls（Java 8 没有 Map.of 的替代品）
 ├── z-graph-protocol/              # Bolt 风格帧与值编解码：BoltConstants / BoltFrames / BoltMessageDecoder
-├── z-graph-core/                  # 引擎：CypherEngine / InMemoryGraphStore / GraphVersionStore(MVCC)
-│                                  #   / VersionOverlayStore / GraphDelta / GraphEntityVersion / GraphCodec
+├── z-graph-core/                  # 引擎：CypherEngine / InMemoryGraphStore（测试镜像与等价对照基线，不再是视图载体）
+│                                  #   / storage 包（VersionStore / PostingStore / StorageEngine / CommitObjectStore
+│                                  #   / RefStore / AncestryIndex / RefViewGraphStore / PayloadCodec / FixedRecordFile
+│                                  #   / AppendSegment / StoreHeader / NameDictionary / Visibility / LegacyMigrator）
+│                                  #   / TxBuffer / GraphDelta / GraphCommit / GraphCodec / LegacyMigrator
 │                                  #   / GraphWriteTransaction / GraphCheckout / GraphQueryService / GraphMetaService
 │                                  #   / ReadOnlyGraphStore / CypherExecutor
 ├── z-graph-bolt-server/           # 服务端：BoltServer(Netty) + BoltMessageHandler
@@ -147,8 +193,8 @@ cd z-graph
 mvn clean install -DskipTests
 ```
 
-第三方版本一律由 `z-boot-parent:1.0.21` → `z-boot-dependencies`（地板）+ `z-boot-fleet`（兄弟仓权威表）供给，
-模块 POM 里不该再出现字面版本钉。构建解析不到 `io.github.yuku123:z-boot-parent:1.0.21` 时先确认能连 repo1。
+第三方版本一律由 `z-boot-parent:1.1.0` → `z-boot-dependencies`（地板）+ `z-boot-fleet`（兄弟仓权威表）供给，
+模块 POM 里不该再出现字面版本钉。构建解析不到 `io.github.yuku123:z-boot-parent:1.1.0` 时先确认能连 repo1。
 注意 flatten 绑在 `process-resources`、`flatten.clean` 绑在 `clean`，所以判定"跑过"要以带 `clean` 的构建为准。
 
 ### 起一个进程（Bolt + HTTP 控制面同时起）
@@ -172,7 +218,7 @@ curl http://localhost:8090/health
 端口优先级：命令行参数 > 环境变量 `Z_GRAPH_BOLT_PORT` / `Z_GRAPH_HTTP_PORT` > 系统属性
 `z.graph.boltPort` / `z.graph.httpPort` > 默认 7687 / 8090。只跑控制面就换
 `-Dexec.mainClass=...GraphControlServerMain`，只跑 Bolt 就用 `...BoltServer`（默认 7687）。
-不指定数据目录时全在内存，进程退出即丢。
+不指定数据目录时引擎落到进程临时目录（磁盘追加式，进程退出即弃），不占用户指定路径。
 
 ### 嵌入式（Java 8 可编译的真实 API）
 
@@ -181,7 +227,7 @@ import com.zifang.z.graph.api.*;
 import com.zifang.z.graph.core.*;
 import java.util.*;
 
-GraphVersionStore repo = new GraphVersionStore();        // 纯内存；new GraphVersionStore(Paths.get(dir)) 落盘
+GraphVersionStore repo = new GraphVersionStore();        // 不传目录 = 进程临时目录（引擎是磁盘追加式）；new GraphVersionStore(Path) 落指定目录
 GraphWriteTransaction tx = repo.beginWrite("main");      // 构造时已建好 main 分支的 root commit
 Node alice = tx.addNode("Person",  Colls.mapOf("name", "Alice", "age", 30));
 Node acme  = tx.addNode("Company", Colls.mapOf("name", "Acme Corp"));
@@ -277,7 +323,7 @@ CORS 白名单命中时回显具体 origin 并带 `Vary: Origin`，`*` 时直接
 |----------|------|------|
 | `Z_GRAPH_BOLT_PORT` | `7687` | Bolt 端口（首个命令行参数可覆盖） |
 | `Z_GRAPH_HTTP_PORT` | `8090` | 控制面端口（第二个命令行参数可覆盖） |
-| `Z_GRAPH_DATA_DIR` | 未设 = 纯内存 | 版本仓库目录；容器里默认 `/var/lib/z-graph` |
+| `Z_GRAPH_DATA_DIR` | 未设 = 进程临时目录 | 版本仓库目录；容器里默认 `/var/lib/z-graph` |
 | `Z_GRAPH_API_TOKEN` | 未设 = 不鉴权 | 设置后启用 Bearer 校验（`Authorization: Bearer <token>` 或 `?token=`）。**值一律由部署侧注入，禁止写进 yml / 镜像 / 文档** |
 | `Z_GRAPH_RATE_LIMIT` | `0`（不限） | 每 IP 每分钟请求上限，1 分钟窗口，超限返回 429 |
 | `Z_GRAPH_CORS_ALLOWED_ORIGINS` | `*` | 逗号分隔 origin；系统属性 `z.graph.cors.allowedOrigins` 优先级更高 |
@@ -293,17 +339,15 @@ z:
   graph:
     enabled: false                 # 默认 false：不装任何 Bean、不碰磁盘和网络
     port: 8090                     # 0 = 让内核分配，此时必须读 graphControlServer.port()
-    data-dir:                      # 留空 = 内存仓库，不落盘、不建目录
-    checkpoint-interval: 32
-    max-retained-views: 64
-    retained-whole-graph-views: 4
-    view-layer-limit: 8
+    data-dir:                      # 留空 = 进程临时目录（引擎是磁盘追加式，不占用户指定路径）
 ```
 
-这 7 个键就是 `ZGraphProperties` 的全部字段。**没有** `mode`、`host`、`bolt-port`、`rest-port`、
-`persistence.enabled`、`persistence.data-dir`、`cache.max-size`、`cache.ttl-seconds` 这些键
-（旧 README 的 yml 样例是模板猜的：控制面 bind 通配地址所以没有 host，starter 也压根不起 Bolt）。
-`GraphControlServer` 在构造函数里就 bind，端口被占则容器启动直接失败；Bean 配 `destroyMethod = "stop"`。
+这 3 个键就是 `ZGraphProperties` 的全部字段。**1.1.0 起删掉了** `checkpoint-interval` /
+`max-retained-views` / `retained-whole-graph-views` / `view-layer-limit` 四个视图缓存键——视图缓存与
+检查点在 v5 引擎里已不存在（读一律即时解析），留着只会骗人；也没有 `mode`、`host`、`bolt-port`、
+`rest-port`、`persistence.*`、`cache.*` 这些键（控制面 bind 通配地址所以没有 host，starter 也压根不起
+Bolt）。`GraphControlServer` 在构造函数里就 bind，端口被占则容器启动直接失败；Bean 配
+`destroyMethod = "stop"`。
 
 ### 优雅关闭
 
@@ -316,46 +360,49 @@ z:
 ## 🧪 测试
 
 ```bash
-mvn test                     # 172 个 @Test / 20 个测试类，不需要外部依赖
-mvn -pl z-graph-core test    # 只跑引擎：138 个用例
+mvn test                     # 195 个 @Test / 25 个测试类，不需要外部依赖
+mvn -pl z-graph-core test    # 只跑引擎：161 个用例
 ```
 
-分布：`z-graph-core` 13 个测试类共 138 个用例（`MvccVersioningTest` 17、`CypherEngineTest` 15、
-`ExplainAndDescribeTest` 13、`DdlAndPathTest` 13、`ShowAndAggregationTest` 12、`SchemaManagementTest` 12、
-`IndexOptimizerAndAlterTest` 12、`InMemoryGraphStoreTest` 12、`CypherExecutorTest` 11、
-`OrderLimitWithAndSnapshotTest` 9、`GraphVersionStoreTest` 9、`VersionedSchemaTest` 3，另有无用例的
-`MvccStressHarness`）；`z-graph-bolt-server` 28 个（`BoltFramesTest` 14、`BoltServerE2ETest` 11、
-`GraphControlServerTest` 2、`ZGraphServerTest` 1；`BoltTestClient` 是测试客户端不是用例）；
-`z-graph-spring-boot-starter` 6 个。`z-graph-api` / `z-graph-protocol` 没有自己的测试源码目录，
-协议编解码用例放在 bolt-server 模块下。
+分布：`z-graph-core` 19 个测试类共 161 个用例（`MvccVersioningTest` 16、`CypherEngineTest` 15、
+`GraphVersionStoreTest` 13（含 FF/删除传播/modify-delete 冲突等 merge 语义）、`ExplainAndDescribeTest` 13、
+`DdlAndPathTest` 13、`InMemoryGraphStoreTest` 12、`IndexOptimizerAndAlterTest` 12、`SchemaManagementTest` 12、
+`ShowAndAggregationTest` 12、`CypherExecutorTest` 11、`DiskStoreTest` 10（record 往返/reopen 幂等/链回溯/
+postings 墓碑 latest-wins/remap 跨界/ancestry 过滤矩阵）、`OrderLimitWithAndSnapshotTest` 9、
+`ContentHashTest` 4（同对象必同 id / 改元数据必换 id / 篡改即拒读）、`VisibilityMatrixTest` 3
+（分叉 A/B 互不可见、merge 后互见）、`LegacyMigrationTest` 2（v4 逐字节构造→无损迁移→legacyId 反查）、
+`VersionedSchemaTest` 3、`NoMirrorTest` 1（反射扫 `GraphVersionStore` 对象图，断言堆内不存在整图状态集合，
+防物化回潮）、另有无用例的 `MvccStressHarness`）；`z-graph-bolt-server` 28 个（`BoltFramesTest` 14、
+`BoltServerE2ETest` 11、`GraphControlServerTest` 2、`ZGraphServerTest` 1）；`z-graph-spring-boot-starter`
+6 个。`z-graph-api` / `z-graph-protocol` 没有自己的测试源码目录，协议编解码用例放在 bolt-server 模块下。
 
-MVCC 压力/性能台是**带 verdict 的门禁**，不是报告生成器（任一场景判红即非 0 退出，可当 CI 卡口）：
+MVCC 压力/性能台是**带 verdict 的门禁**（12 条，任一判红即非 0 退出，可当 CI 卡口）：
+提交成本平坦（S2 双口径 ≤3x）、时间旅行正确（S3 采样回放 0 错）、并发 StaleHead 乐观失败（S5 三臂）、
+落盘重启一致（S6 抽检 + 追加量）、GC 真回收（S7 released>0）、**读等价铁律**（S8：同一条 delta 序列
+喂给版本仓库与 `InMemoryGraphStore` 镜像，13 个 ref 上节点属性/标签/邻接/label 索引逐实体比对，
+0 走样；`--sabotage=equivalence` 故意错位一轮可自证该闸必红）。
 
 ```bash
-java -Xms1g -Xmx8g -cp target/classes:target/test-classes \
+java -Xms1g -Xmx8g -cp z-graph-core/target/classes:z-graph-core/target/test-classes:z-graph-api/target/classes:z-graph-protocol/target/classes \
   com.zifang.z.graph.bench.MvccStressHarness --profile=full \
   --workdir=/tmp/zgraph-stress --json=/tmp/zgraph-stress/results.jsonl
 ```
 
-Bolt 端到端（需要本机 `python3`，并且要先起服务；`neo4j` driver 那一支还需要 `pip install neo4j`）：
+HTTP 控制面端到端（标准库，无第三方依赖；先起 `ZGraphServer`，覆盖 /health、写查询、commit 图、
+`?commit=` 时间旅行、DDL schema、kill -9 重启幂等）：
 
 ```bash
-python3 _doc/003_script/test_bolt_raw.py            # HELLO → RUN(RETURN 1 AS n) → PULL 最小往返
-python3 _doc/003_script/test_bolt_full.py           # 7 类 RETURN 字面量场景，每场景独立 TCP 连接验幂等
-python3 _doc/003_script/test_bolt_error.py          # 错误路径：未知签名 / 非法 qid / DISCARD / RESET / GOODBYE
-NUM_CLIENTS=100 QUERIES_PER_CLIENT=5 python3 _doc/003_script/test_bolt_concurrent.py
+Z_GRAPH_SERVER_PID=<pid> Z_GRAPH_RESTART_CMD='<重启命令模板，含 {port}>（kill -9 重启腿用）' \
+  python3 _doc/003_script/test_http_control_plane.py 8090
 ```
 
-驱动脚本读 `Z_GRAPH_HOST` / `Z_GRAPH_PORT`（默认 `localhost:7687`）。
+Bolt 端到端（`_doc/003_script/test_bolt_*.py`）当前**全部跑不通，且是历史债不是 v5 回归**：协议模块与
+这批脚本自仓初始化以来零改动（`git diff 97f99c2` 可证），死因是服务端从未实现 Bolt handshake（v1
+非目标）——官方 `neo4j` driver 卡死在版本协商，手写帧脚本的 HELLO 载荷也与 `BoltMessageDecoder`
+的 struct 契约对不上。Bolt 协议面的回归保障是 bolt-server 单元/E2E 测试（`BoltTestClient` 直灌正确帧）。
 
-⚠ 两个编排脚本目前跑不通，是**脚本债不是代码债**：`run_e2e.sh` 把 `cd "$(dirname "$0")/.."` 当仓库根、
-`run_t1_verify.sh` 把 `$(dirname "$0")/.."` 当仓库根并拼 `$Z_GRAPH_DIR/poc/test_bolt_*.py` —— 两者都还假设自己
-躺在根 `poc/` 下，而脚本现在住在 [`_doc/003_script/`](_doc/003_script/)，于是工作目录落到 `_doc`、驱动路径也指空。修好之前请按上面的
-启动命令起服务，再直跑 `python3 _doc/003_script/test_bolt_*.py`。
-
-`_doc/003_script/test_bolt_poc.py` 走官方 `neo4j` driver 连 `bolt://localhost:7687`；按上面的协议边界
-（服务端不处理 magic 与版本协商），这一支现在**预期失败**，它保留的是"官方 driver 接不进来"这个待办，
-别把它当兼容性证明。
+**重启幂等与时间旅行的线级证据**见 `test_http_control_plane.py`：kill -9 后 reopen 的 head 指纹逐字节
+一致（内容寻址的直接推论），历史 commit 视图读数与重启前一致。
 
 ---
 
@@ -409,15 +456,21 @@ tag 为 `latest` 或 tag 名或 `pr-<n>`，另附 `github.sha` tag；PR 只构�
 
 ## 📈 性能：只留量得出的数
 
-历史 T1 报告（[`_doc/001_arch/TEST_REPORT.md`](_doc/001_arch/TEST_REPORT.md)，2026-08-31，Bolt POC 路径）：
-100 连接 × 5 查询 = 500/500 通过，**QPS ≈ 5278**；补测 200 客户端 × 10 查询时约 1000 条在 0.19s 完成，
-之后开始队列堆积（Netty NIO 默认 IO 线程 ≈ 核数 × 2）。同批修复了 `nextQid` 非线程安全与测试硬编码 qid
-两个并发 bug（后者会让第二次 PULL 找不到流、客户端卡死）。
+v5 引擎口径（2026-10-09，`MvccStressHarness --profile=full` 12/12 PASS，M3 Max / JDK 24 跑 Java 8 字节码；
+每条数字背后都有可复现场景与 verdict，重新跑一遍即可对账）：
 
-视图缓存默认档在 1.0.4 量出过反例（记在 `GraphVersionStore` 注释里）：20 万节点的图按实体计费 300,299，
-而当时预算 200,000 —— 淘汰退化成"只留各分支 head 那份豁免视图"，首读 656ms、复读 650ms，复读相对首读零收益。
-1.0.5 起预算改按**整图份数**换算（`DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS = 4`，20 万节点约当 120 万实体），
-对图规模自适应：图越大留的视图越少。
+| 场景 | 实测 |
+|------|------|
+| 批量导入（10 万节点 + 5 万边，201 commits） | 无索引 48,327 ent/s；带 (Person,name) 索引 49,629 ent/s——索引下推不是平方级（保留比 103%） |
+| 提交成本随图规模（1k→20 万节点） | commit p50 增长 1.1x、整事务 1.2x（门槛 ≤3x）：写成本平坦，不随图变大 |
+| 时间旅行（2 万节点 × 2000 commits） | 采样 25 个深度回放，节点数不符 0 次；历史视图打开即解析，无缓存预热 |
+| 落盘重启（500 提交 / 2 万节点） | 每提交追加约 208B（对照：每 commit 全量副本约 1.4MiB，追加量差约 7000x）；重启加载 21ms，抽检 25 个历史视图 0 不符 |
+| GC 压实 | 丢 6 条分支 240 个 commit 后回收，版本记录 30,239 → 29,999，保留分支视图与分支指针无损 |
+| 并发 | 8 线程同分支乐观写：冲突如实拒绝、0 丢失更新；8 分支并行 400/400 成功 |
+| 读等价 | 13 个 ref 上引擎解析视图与内存镜像逐实体比对 0 走样 |
+
+历史 T1 报告（[`_doc/001_arch/TEST_REPORT.md`](_doc/001_arch/TEST_REPORT.md)，2026-08-31，Bolt POC 路径）
+的 500/500 与 QPS 5278 属于**旧协议路径**的历史快照，不描述当前引擎，别拿它当现况。
 
 旧 README 里两张表**已从本文删除**："100 万节点 / 500 万边：单节点 add 80,000 QPS、shortestPath 3,500 QPS、
 版本化 commit 1,200 QPS"，以及"macOS 实测健康检查 5.2ms / 查询 6.0ms / 进程内存 73MB / 单实例 10,000 req/s"。
@@ -430,14 +483,32 @@ tag 为 `latest` 或 tag 名或 `pr-<n>`，另附 `github.sha` tag；PR 只构�
 
 | 现象 | 判法 |
 |------|------|
-| `Address already in use: 7687` | `lsof -i :7687`；或改 `Z_GRAPH_BOLT_PORT` / 传首个命令行参数 |
+| `Address already in use: 7687` / `8090` | `lsof -i :<port>`——注意 Docker 端口映射的属主进程是 `com.docke`；或改 `Z_GRAPH_BOLT_PORT` / 传首个命令行参数 |
 | starter 起不来 / 端口被占 | `GraphControlServer` 构造即 bind，异常直接冒到容器启动；先确认 8090 上是不是已有实例 |
 | 写请求返回 409 | `StaleHeadException`：base head 已被别的连接推进；控制面重读 head 后重试，Bolt 侧 `RUN` 写路径已自动重试一次 |
-| 历史读很慢 | 看 `repo.versionStats()`；套叠层数超 `view-layer-limit` 或检查点过深会回放物化，必要时调小 `checkpoint-interval` |
-| 官方 Neo4j driver 连不上 | 预期行为：服务端不处理 magic + 版本协商段；请用手写帧驱动，或先补 handshake |
+| 历史 commit 打不开（Unknown commit） | v4→v5 迁移后历史 id 全变（内容哈希）；用新 id 或直接用旧 id——`requireCommit` 会按 legacyId 反查，反查不到说明该 commit 已被 GC |
+| 磁盘上出现 `objects.v4.bak` / `repository.v4.bak` | 正常：v4 仓迁移成功后的归档，确认无误后可手动删 |
+| `store.compacting/` 残留 | 上次 GC 压实中途崩溃的孤儿目录，下次 open 会自动清理；`store.retired.*` 同理 |
+| 官方 Neo4j driver 连不上 | 预期行为：服务端不处理 magic + 版本协商段（v1 非目标）；HTTP 控制面不受影响 |
 | 前端 404 / 接口全红 | `docker logs z-graph-frontend`；`curl http://localhost:3333/api/health` 验反代（nginx `/api/` 会剥掉前缀） |
 | CORS 收紧无效 | 系统属性 `z.graph.cors.allowedOrigins` 优先于 `Z_GRAPH_CORS_ALLOWED_ORIGINS`，两处都设时后者被盖掉 |
 | 想看请求轨迹 | `curl 'http://localhost:8090/meta/logs?limit=20&status=4xx'`，或按 `requestId=` 精确捞（环形缓冲只保最近 500 条） |
+
+## ⚠️ 1.1.0（v5 引擎）breaking 清单
+
+- **磁盘布局换代**：`objects/` + `repository.bin` → `store/` + `commits/` + `refs/`。v4 仓 open 时自动迁移
+  （见「存储架构」），无需手工操作，但**升级前请照常备份**。
+- **历史 commit id 全变**：v4 的 id 是应用层拼的，v5 是内容哈希。迁移器把旧 id 存进 legacyId，
+  `checkout(旧id)` / HTTP `?commit=旧id` 自动反查；但自己持久化过 v4 id 的下游系统要换成新 id。
+- **starter 配置键删除**：`checkpoint-interval` / `max-retained-views` / `retained-whole-graph-views` /
+  `view-layer-limit` 四键随视图缓存一起消失；挂着它们的 yml 不报错（Spring 忽略未知键），但不再有任何效果。
+- **`withCheckpointInterval` 等五个调参器删除**：`GraphVersionStore` 不再有视图缓存可调。
+- **`versionStats()` 字段语义更换**：`commitCount` / `branchCount` / `versionRecordCount` /
+  `nextNodeId` / `nextEdgeId` / `nextCommitSeq` / `versionPayloadBytes` / `ancestryCachedClosures`；
+  不再有缓存命中类字段。
+- **属性值不再有有损兜底**：payload 编码认 NULL / BOOL / INT(Integer/Short/Byte→int、Long) /
+  DOUBLE(Float/Double) / STRING / MAP（嵌套，自包含长度前缀）/ LIST / BINARY，未知类型 fail-fast
+  抛异常，不再 `toString()` 塞字符串。
 
 ---
 
@@ -469,14 +540,17 @@ _Maintained by the z-opc-foundation organization._
 
 - `_doc/002_deploy/` — 目前为空目录（部署资产实际躺在根 `deploy/`，见「部署」一节）
 
-- [`_doc/003_script/`](_doc/003_script/) — Bolt 协议测试驱动与运维脚本（原 `poc/` 实验收口于此）：
-  - [`test_bolt_raw.py`](_doc/003_script/test_bolt_raw.py) — 手写帧最小往返：HELLO → RUN(`RETURN 1 AS n`) → PULL
-  - [`test_bolt_full.py`](_doc/003_script/test_bolt_full.py) — 7 类 `RETURN` 字面量子场景，每场景独立 TCP 连接
-  - [`test_bolt_error.py`](_doc/003_script/test_bolt_error.py) — 错误路径：未知签名、非法 qid、DISCARD、RESET、GOODBYE
-  - [`test_bolt_concurrent.py`](_doc/003_script/test_bolt_concurrent.py) — 并发压力（`NUM_CLIENTS` / `QUERIES_PER_CLIENT`）
-  - [`test_bolt_poc.py`](_doc/003_script/test_bolt_poc.py) — 官方 `neo4j` Python driver 版用例（现预期失败，见「测试」）
-  - [`run_e2e.sh`](_doc/003_script/run_e2e.sh) — 编译 + 启 `BoltServer` + 跑 `test_bolt_poc.py` 的编排（路径假设仍是 `poc/`）
-  - [`run_t1_verify.sh`](_doc/003_script/run_t1_verify.sh) — T1 全流程：环境检查 → `mvn test` → 启服务 → 三类 E2E（`full` / `unit-only` / `e2e-only`；同样待修路径）
+- [`_doc/003_script/`](_doc/003_script/) — E2E 驱动与运维脚本：
+  - [`test_http_control_plane.py`](_doc/003_script/test_http_control_plane.py) — HTTP 控制面端到端（标准库，
+    无第三方依赖）：/health、写查询、commit 图、`?commit=` 时间旅行、DDL schema、kill -9 重启幂等
+  - [`test_bolt_raw.py`](_doc/003_script/test_bolt_raw.py) — 手写帧驱动（当前跑不通，死因见「测试」节）
+  - [`test_bolt_full.py`](_doc/003_script/test_bolt_full.py) — 7 类 `RETURN` 字面量子场景（同上，历史债）
+  - [`test_bolt_error.py`](_doc/003_script/test_bolt_error.py) — 错误路径用例（同上，历史债）
+  - [`test_bolt_concurrent.py`](_doc/003_script/test_bolt_concurrent.py) — 并发压力（同上，历史债）
+  - [`test_bolt_poc.py`](_doc/003_script/test_bolt_poc.py) — 官方 `neo4j` Python driver 版用例（预期失败：
+    服务端无 handshake，v1 非目标）
+  - [`run_e2e.sh`](_doc/003_script/run_e2e.sh) — 编排脚本（路径假设过期为 `poc/` 时代，历史债）
+  - [`run_t1_verify.sh`](_doc/003_script/run_t1_verify.sh) — T1 全流程编排（同上，历史债）
   - [`all-in-one-entrypoint.sh`](_doc/003_script/all-in-one-entrypoint.sh) — all-in-one 容器入口：拷前端产物、并行拉起 Java 服务与 nginx
   - [`deploy_maven_center.sh`](_doc/003_script/deploy_maven_center.sh) — Central 发布：`publish`（`mvn deploy -Pcentral`）/ `verify` / `gpg-init` / `readme`
 

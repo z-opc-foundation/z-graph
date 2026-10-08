@@ -3,9 +3,11 @@ package com.zifang.z.graph.bench;
 import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.api.GraphStore;
 import com.zifang.z.graph.api.Node;
+import com.zifang.z.graph.api.Edge;
 import com.zifang.z.graph.core.GraphCheckout;
 import com.zifang.z.graph.core.GraphVersionStore;
 import com.zifang.z.graph.core.GraphWriteTransaction;
+import com.zifang.z.graph.core.InMemoryGraphStore;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -34,15 +36,19 @@ import com.zifang.z.graph.api.Colls;
  * <p>不是"跑出数字给人看"的报告生成器：每条场景都会落一个可判红的 VERDICT，
  * 任一 verdict 失败进程以非 0 退出，因此可以被 CI 直接当门禁使用。</p>
  *
- * <p>旧方案（每个 commit 存一份整图副本）不会"删了就测不到"：
- * {@code checkpointInterval=1 + eagerCheckpoints} 让当前实现走出"每次提交物化一份
- * 全量视图"的成本曲线，等价于旧方案的写放大，所有 A/B 对比都跑在真实代码路径上。</p>
+ * <p>v5 引擎（版本链 + postings，零物化）的口径：提交成本平坦、时间旅行正确、
+ * 重启幂等、GC 真回收、并发 StaleHead 乐观失败；S8 是阳面对照铁律——同一条
+ * delta 序列喂给版本仓库（RefViewGraphStore 解析读）与裸内存镜像
+ * （InMemoryGraphStore），多个 ref 上逐实体读数必须一致，防解析读静默走样。</p>
  *
  * <pre>
  * java -Xms1g -Xmx8g -cp target/classes:target/test-classes \
  *   com.zifang.z.graph.bench.MvccStressHarness --profile=full \
  *   --workdir=/tmp/zgraph-stress --json=/tmp/zgraph-stress/results.jsonl
  * </pre>
+ *
+ * <p>{@code --sabotage=equivalence} 故意让 S8 对照错位一轮，用于验证这条
+ * 铁律闸真的有牙（必须 FAIL 且进程非 0 退出）。</p>
  */
 public final class MvccStressHarness {
 
@@ -62,23 +68,13 @@ public final class MvccStressHarness {
         int concurrentOps = 50;
         int persistCommits = 500;
         int persistGraphNodes = 20_000;
-        int[] budgetCurveSizes = {50_000, 200_000};
-        int budgetCommits = 300;
-        int budgetProbes = 8;
-        int preyGraphNodes = 10_000;
-        int preyCommits = 30;
+        int equivalenceRounds = 60;
     }
-
-    /**
-     * "打开历史视图"一步复读必须比首读便宜的倍数。实测默认档在 2 万~20 万节点上是
-     * 100~250 倍，而驻留 1 份整图时只有 1.4 倍（见 {@code s8_cache_probe_has_prey}），
-     * 20 倍落在两个量级的正中间：既不会因为机器慢而误判，也绝不可能放过"缓存其实不在"。
-     */
-    /** 冷开至少要花多少微秒，否则两边的比值是噪声里的空跑。 */
-    private static final int PREY_COLD_OPEN_MIN_MICROS = 100;
 
     private final Config config;
     private final Path workdir;
+    /** 阳性对照自检开关：让 S8 对照错位一轮，验证铁律闸本身会红。 */
+    private boolean sabotageEquivalence;
     private final List<String> jsonLines = new ArrayList<>();
     private final Map<String, String> verdicts = new LinkedHashMap<>();
     private final long startedAt = System.nanoTime();
@@ -107,15 +103,13 @@ public final class MvccStressHarness {
             config.concurrentOps = 25;
             config.persistCommits = 120;
             config.persistGraphNodes = 2_000;
-            config.budgetCurveSizes = new int[]{5_000, 20_000};
-            config.budgetCommits = 60;
-            config.budgetProbes = 4;
-            config.preyGraphNodes = 2_000;
+            config.equivalenceRounds = 24;
         }
         Path workdir = argValue(args, "--workdir", Paths.get(System.getProperty("java.io.tmpdir"), "zgraph-stress"));
         Files.createDirectories(workdir);
 
         MvccStressHarness harness = new MvccStressHarness(config, workdir);
+        harness.sabotageEquivalence = Arrays.asList(args).contains("--sabotage=equivalence");
         int code = harness.runAll(smoke);
         Path json = argValue(args, "--json", null);
         if (json != null) {
@@ -152,6 +146,7 @@ public final class MvccStressHarness {
         concurrency();
         persistence();
         versionGc();
+        readEquivalence();
         System.out.printf("%n全部场景耗时 %.1fs%n", (System.nanoTime() - t0) / 1e9);
 
         System.out.println("\n=== VERDICTS ===");
@@ -599,6 +594,152 @@ public final class MvccStressHarness {
                         && repository.listBranches().size() == 1,
                 String.format("回收 %d/%d commit，版本记录 %d -> %d（压实重放），"
                         + "保留分支视图与分支指针正确", collected, branches * 40, beforeVersions, afterVersions));
+    }
+
+    // ==================== S8 读等价铁律（引擎解析视图 vs 内存镜像） ====================
+
+    /**
+     * 阳面对照铁律：同一条 delta 序列分别提交进版本仓库（RefViewGraphStore 解析读）
+     * 与写入内存镜像（InMemoryGraphStore 裸状态），每个 commit 的视图上逐实体比对
+     * ——节点属性/标签、边邻接、label 索引、计数。引擎解析读任何走样都直接红；
+     * 这条臂是"读必须等于写"的正确性闸，不是性能口径。{@code --sabotage=equivalence}
+     * 故意让镜像在中位轮错位，用来自证闸有牙。
+     */
+    private void readEquivalence() throws Exception {
+        System.out.println("\n--- S8 读等价（RefViewGraphStore vs InMemoryGraphStore） ---");
+        GraphVersionStore repository = new GraphVersionStore();
+        InMemoryGraphStore mirror = new InMemoryGraphStore();
+        Map<String, InMemoryGraphStore> mirrorHistory = new LinkedHashMap<>();
+        Random random = new Random(42);
+        List<GraphCommit> commits = new ArrayList<>();
+        long nextNodeId = 1;
+        // 采样步长是 5，sabotage 轮必须落在采样点上，否则自检永远空转。
+        int sabotageRound = ((config.equivalenceRounds - 1) / 5) * 5;
+
+        for (int round = 0; round < config.equivalenceRounds; round++) {
+            GraphWriteTransaction write = repository.beginWrite("main");
+            int mutations = 1 + random.nextInt(4);
+            for (int i = 0; i < mutations; i++) {
+                int roll = random.nextInt(10);
+                if (roll < 5 || mirror.getNodeCount() < 4) {
+                    Node added = write.addNode("Person", Colls.mapOf(
+                            "name", "p" + nextNodeId, "round", round, "flag", nextNodeId % 2 == 0));
+                    mirror.addNode(added.getId(), added.getLabels(), added.getProperties());
+                    nextNodeId++;
+                } else if (roll < 8) {
+                    Node victim = pick(mirror, random);
+                    write.updateNode(victim.getId(), Colls.mapOf("round", round));
+                    mirror.updateNode(victim.getId(), Colls.mapOf("round", round));
+                } else {
+                    Node victim = pick(mirror, random);
+                    write.removeNode(victim.getId());
+                    mirror.removeNode(victim.getId());
+                }
+            }
+            if (mirror.getNodeCount() >= 2 && random.nextBoolean()) {
+                Node start = pick(mirror, random);
+                Node end = pick(mirror, random);
+                if (start.getId() != end.getId()) {
+                    Edge edge = write.addEdge("KNOWS", start.getId(), end.getId(),
+                            Colls.mapOf("since", round));
+                    mirror.addEdge(edge.getId(), edge.getType(), edge.getStartNodeId(),
+                            edge.getEndNodeId(), edge.getProperties());
+                }
+            }
+            GraphCommit commit = write.commit("eq", "round " + round);
+            commits.add(commit);
+            InMemoryGraphStore snapshot = mirror.copy();
+            if (sabotageEquivalence && round == sabotageRound) {
+                // 自检：故意让镜像错位回上一轮，闸必须红。
+                snapshot = mirrorHistory.get(commits.get(commits.size() - 2).getId());
+            }
+            mirrorHistory.put(commit.getId(), snapshot);
+        }
+
+        List<String> mismatches = new ArrayList<>();
+        int comparedRefs = 0;
+        for (int i = 0; i < commits.size(); i += 5) {
+            mismatches.addAll(compareRef("commit@" + i,
+                    repository.checkout(commits.get(i).getId()).getStore(),
+                    mirrorHistory.get(commits.get(i).getId())));
+            comparedRefs++;
+        }
+        mismatches.addAll(compareRef("head",
+                repository.checkoutBranch("main").getStore(), mirror));
+        comparedRefs++;
+
+        record("s8_equivalence", "refs", "compared", (long) comparedRefs);
+        verdict("s8_read_equivalence", mismatches.isEmpty(),
+                mismatches.isEmpty()
+                        ? String.format("%d 个 ref 上节点属性/标签/邻接/label 索引全部等价", comparedRefs)
+                        : "读走样 " + mismatches.size() + " 处，如 " + mismatches.get(0));
+    }
+
+    /** 两个视图的逐实体比对；每处不符产出一条描述。 */
+    private static List<String> compareRef(String label, GraphStore engineView, GraphStore mirrorView) {
+        List<String> mismatches = new ArrayList<>();
+        Map<Long, Node> engineNodes = new LinkedHashMap<>();
+        for (Node node : engineView.getAllNodes()) {
+            engineNodes.put(node.getId(), node);
+        }
+        Map<Long, Node> mirrorNodes = new LinkedHashMap<>();
+        for (Node node : mirrorView.getAllNodes()) {
+            mirrorNodes.put(node.getId(), node);
+        }
+        if (!engineNodes.keySet().equals(mirrorNodes.keySet())) {
+            mismatches.add(label + ": node id set differs (engine=" + engineNodes.size()
+                    + ", mirror=" + mirrorNodes.size() + ")");
+            return mismatches;
+        }
+        for (Map.Entry<Long, Node> entry : engineNodes.entrySet()) {
+            Node engineNode = entry.getValue();
+            Node mirrorNode = mirrorNodes.get(entry.getKey());
+            if (!engineNode.getLabels().equals(mirrorNode.getLabels())) {
+                mismatches.add(label + ": node " + entry.getKey() + " labels differ");
+            }
+            if (!engineNode.getProperties().equals(mirrorNode.getProperties())) {
+                mismatches.add(label + ": node " + entry.getKey() + " properties differ: "
+                        + engineNode.getProperties() + " != " + mirrorNode.getProperties());
+            }
+            List<Edge> engineEdges = sortedEdges(engineView.getOutEdges(entry.getKey()));
+            List<Edge> mirrorEdges = sortedEdges(mirrorView.getOutEdges(entry.getKey()));
+            if (engineEdges.size() != mirrorEdges.size()) {
+                mismatches.add(label + ": node " + entry.getKey() + " out-degree differs ("
+                        + engineEdges.size() + " vs " + mirrorEdges.size() + ")");
+            } else {
+                for (int i = 0; i < engineEdges.size(); i++) {
+                    Edge a = engineEdges.get(i);
+                    Edge b = mirrorEdges.get(i);
+                    if (a.getId() != b.getId() || !a.getType().equals(b.getType())
+                            || a.getStartNodeId() != b.getStartNodeId()
+                            || a.getEndNodeId() != b.getEndNodeId()
+                            || !a.getProperties().equals(b.getProperties())) {
+                        mismatches.add(label + ": edge differs on node " + entry.getKey()
+                                + ": " + a + " != " + b);
+                    }
+                }
+            }
+        }
+        if (engineView.getEdgeCount() != mirrorView.getEdgeCount()) {
+            mismatches.add(label + ": edge count differs (" + engineView.getEdgeCount()
+                    + " vs " + mirrorView.getEdgeCount() + ")");
+        }
+        if (!new java.util.HashSet<>(engineView.getNodeIdsByLabel("Person"))
+                .equals(new java.util.HashSet<>(mirrorView.getNodeIdsByLabel("Person")))) {
+            mismatches.add(label + ": Person label index differs");
+        }
+        return mismatches;
+    }
+
+    private static List<Edge> sortedEdges(List<Edge> edges) {
+        List<Edge> sorted = new ArrayList<>(edges);
+        sorted.sort(java.util.Comparator.comparingLong(Edge::getId));
+        return sorted;
+    }
+
+    private static Node pick(InMemoryGraphStore mirror, Random random) {
+        List<Node> all = mirror.getAllNodes();
+        return all.get(random.nextInt(all.size()));
     }
 
     // ==================== 公共工具 ====================
