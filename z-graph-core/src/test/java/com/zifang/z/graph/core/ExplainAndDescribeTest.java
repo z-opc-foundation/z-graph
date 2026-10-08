@@ -101,8 +101,8 @@ class ExplainAndDescribeTest {
         List<Map<String, Object>> rows = engine.execute("SHOW STATS");
         assertEquals(1, rows.size());
         Map<String, Object> stats = rows.get(0);
-        assertEquals(2, stats.get("nodeCount"));
-        assertEquals(0, stats.get("edgeCount"));
+        assertEquals(2L, stats.get("nodeCount"));
+        assertEquals(0L, stats.get("edgeCount"));
     }
 
     // ==================== CREATE EDGE INDEX ====================

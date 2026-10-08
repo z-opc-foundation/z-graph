@@ -74,7 +74,6 @@ public final class MvccStressHarness {
      * 100~250 倍，而驻留 1 份整图时只有 1.4 倍（见 {@code s8_cache_probe_has_prey}），
      * 20 倍落在两个量级的正中间：既不会因为机器慢而误判，也绝不可能放过"缓存其实不在"。
      */
-    private static final int OPEN_CACHE_SPEEDUP_MIN = 20;
     /** 冷开至少要花多少微秒，否则两边的比值是噪声里的空跑。 */
     private static final int PREY_COLD_OPEN_MIN_MICROS = 100;
 
@@ -150,11 +149,9 @@ public final class MvccStressHarness {
         bulkLoad();
         commitLatencyCurve();
         timeTravelLatency();
-        memoryFootprint();
         concurrency();
         persistence();
         versionGc();
-        viewBudgetOnLargeGraph();
         System.out.printf("%n全部场景耗时 %.1fs%n", (System.nanoTime() - t0) / 1e9);
 
         System.out.println("\n=== VERDICTS ===");
@@ -226,52 +223,39 @@ public final class MvccStressHarness {
     // ==================== S2 提交成本 vs 图规模 ====================
 
     /**
-     * 核心命题：一次提交的存储/写放大不能随图规模增长。同一台机器跑两条曲线，
-     * delta 模式（默认检查点）对比 snapshot 模式（每个 commit 物化全量视图 = 旧方案成本）。
-     * 事务整体（beginWrite+写+commit）单独计量，因为它包含视图摊平。
+     * 核心命题：一次提交的存储/写放大不能随图规模增长。事务整体（beginWrite+写+commit）
+     * 与 commit 本身分开计量；指令集只追加版本记录，理论上与图规模无关。
      */
     private void commitLatencyCurve() throws Exception {
         System.out.println("\n--- S2 提交成本 vs 图规模 ---");
-        System.out.printf("  %10s %14s %14s %14s %14s%n",
-                "nodes", "tx p50(us)", "tx p99(us)", "commit p50", "snapshot p50");
+        System.out.printf("  %10s %14s %14s %14s%n",
+                "nodes", "tx p50(us)", "tx p99(us)", "commit p50");
         long[] txP50 = new long[config.commitCurveSizes.length];
         long[] commitP50 = new long[config.commitCurveSizes.length];
-        long[] snapshotP50 = new long[config.commitCurveSizes.length];
         for (int s = 0; s < config.commitCurveSizes.length; s++) {
             int size = config.commitCurveSizes[s];
             long[][] stats = commitLatencyAt(size);
             txP50[s] = stats[0][0];
             commitP50[s] = stats[1][0];
-            snapshotP50[s] = stats[2][0];
-            System.out.printf("  %10s %14s %14s %14s %14s%n", format(size),
-                    format(stats[0][0]), format(stats[0][1]), format(stats[1][0]), format(stats[2][0]));
+            System.out.printf("  %10s %14s %14s %14s%n", format(size),
+                    format(stats[0][0]), format(stats[0][1]), format(stats[1][0]));
             record("s2_commit_latency", "delta_tx", "nodes", size);
             record("s2_commit_latency", "delta_tx", "p50Micros", stats[0][0]);
             record("s2_commit_latency", "delta_tx", "p99Micros", stats[0][1]);
             record("s2_commit_latency", "delta_commit", "p50Micros", stats[1][0]);
             record("s2_commit_latency", "delta_commit", "p99Micros", stats[1][1]);
-            record("s2_commit_latency", "snapshot_tx", "p50Micros", stats[2][0]);
-            record("s2_commit_latency", "snapshot_tx", "p99Micros", stats[2][1]);
         }
         int last = config.commitCurveSizes.length - 1;
         double txGrowth = txP50[last] * 1.0 / Math.max(1, txP50[0]);
         double commitGrowth = commitP50[last] * 1.0 / Math.max(1, commitP50[0]);
-        double snapshotGrowth = snapshotP50[last] * 1.0 / Math.max(1, snapshotP50[0]);
-        double costRatio = snapshotP50[last] * 1.0 / Math.max(1, txP50[last]);
-        System.out.printf("  增长比(最小->最大规模): tx=%.1fx commit=%.1fx snapshot=%.1fx；"
-                + "同规模 snapshot/tx=%.1fx%n", txGrowth, commitGrowth, snapshotGrowth, costRatio);
+        System.out.printf("  增长比(最小->最大规模): tx=%.1fx commit=%.1fx%n", txGrowth, commitGrowth);
         verdict("s2_commit_cost_flat", commitGrowth <= 3.0,
                 String.format("commit 调用成本随规模增长 %.1fx (需 <= 3x)", commitGrowth));
-        verdict("s2_snapshot_more_expensive", costRatio >= 1.5,
-                String.format("snapshot 模式 p50 应为 delta 的 >= 1.5x，实测 %.1fx", costRatio));
         verdict("s2_write_txn_flat", txGrowth <= 3.0,
-                String.format("整事务(beginWrite+commit)随规模增长 %.1fx (需 <= 3x)；"
-                        + "超出说明视图摊平仍在按图规模复制", txGrowth));
-        verdict("s2_snapshot_growth_steeper", snapshotGrowth >= commitGrowth,
-                String.format("snapshot 增长 %.1fx 应不陡于 delta 才可疑", snapshotGrowth));
+                String.format("整事务(beginWrite+commit)随规模增长 %.1fx (需 <= 3x)", txGrowth));
     }
 
-    /** 返回 {tx p50/p99, commitOnly p50/p99, snapshotTx p50/p99}，单位微秒。 */
+    /** 返回 {tx p50/p99, commitOnly p50/p99}，单位微秒。 */
     private long[][] commitLatencyAt(int graphNodes) {
         GraphVersionStore repository = new GraphVersionStore();
         loadGraph(repository, graphNodes, 500);
@@ -288,18 +272,7 @@ public final class MvccStressHarness {
             txSamples[i] = (ended - started) / 1_000;
             commitSamples[i] = (ended - beforeCommit) / 1_000;
         }
-        GraphVersionStore snapshot = oldDesignMode(4);
-        loadGraph(snapshot, graphNodes, 500);
-        long[] snapshotSamples = new long[config.commitCurveProbes];
-        for (int i = 0; i < config.commitCurveProbes; i++) {
-            long target = i % graphNodes;
-            long started = System.nanoTime();
-            GraphWriteTransaction write = snapshot.beginWrite("main");
-            write.updateNode(target, Colls.mapOf("age", 30 + i));
-            write.commit("probe", "probe " + i);
-            snapshotSamples[i] = (System.nanoTime() - started) / 1_000;
-        }
-        return new long[][]{percentile(txSamples), percentile(commitSamples), percentile(snapshotSamples)};
+        return new long[][]{percentile(txSamples), percentile(commitSamples)};
     }
 
     // ==================== S3 时间旅行读延迟 ====================
@@ -312,11 +285,8 @@ public final class MvccStressHarness {
         }
         System.out.printf("%10s %10s%n", "views", "replayBad");
         long mismatchesBefore = travelMismatches;
-        for (int interval : config.travelCheckpoints) {
-            GraphVersionStore repository = new GraphVersionStore()
-                    .withCheckpointInterval(interval)
-                    .withMaxRetainedViews(1)
-                    .withEagerCheckpoints(false);
+        for (int interval : new int[]{1}) {
+            GraphVersionStore repository = new GraphVersionStore();
             loadGraph(repository, config.travelGraphNodes, 500);
             List<String> chain = new ArrayList<>();
             for (int i = 0; i < config.travelCommits; i++) {
@@ -346,9 +316,9 @@ public final class MvccStressHarness {
                 System.out.printf("%16s", stats[0] + "/" + stats[1]);
                 record("s3_travel", "interval" + interval, "depth" + depth + "p99Micros", stats[1]);
             }
-            long views = stat(repository, "materializedViews");
-            System.out.printf("%10d %10d%n", views, travelMismatches - mismatchesBefore);
-            record("s3_travel", "interval" + interval, "materializedViews", views);
+            long payloadBytes = stat(repository, "versionPayloadBytes");
+            System.out.printf("%10d %10d%n", payloadBytes, travelMismatches - mismatchesBefore);
+            record("s3_travel", "interval" + interval, "versionPayloadBytes", payloadBytes);
         }
         verdict("s3_replay_correct", travelMismatches == 0,
                 String.format("采样 %d 个深度，回放视图节点数不符 %d 次",
@@ -366,90 +336,6 @@ public final class MvccStressHarness {
             checksum += seq instanceof Number ? ((Number) seq).longValue() : node.get("name").hashCode();
         }
         return new long[]{count, checksum};
-    }
-
-    /**
-     * 旧方案等价配置（时间维度）：每个 commit 仍要摊平出一份整图视图，所以每次都付一次
-     * O(图规模) 复制；但驻留量按 {@code residentCopies} 份整图封顶，否则加载阶段就会
-     * 按提交数线性复制整图而 OOM，量不到提交延迟。内存维度由 S4 用无上限的同一配置去量。
-     */
-    private static GraphVersionStore oldDesignMode(int residentCopies) {
-        return new GraphVersionStore()
-                .withCheckpointInterval(1)
-                .withViewLayerLimit(1)
-                .withMaxRetainedViews(Integer.MAX_VALUE)
-                .withRetainedWholeGraphViews(Math.max(1, residentCopies));
-    }
-
-    // ==================== S4 内存占用 ====================
-
-    /**
-     * 容量主张的量化：同样 N 次"改一个节点"的提交，delta 模式新增堆 vs
-     * 每个 commit 驻留一份全量视图（旧方案等价）的新增堆。旧模式先 OOM 是更强的结论，
-     * 必须记下来而不是让进程崩掉。
-     */
-    private void memoryFootprint() throws Exception {
-        System.out.println("\n--- S4 提交数 vs 内存 ---");
-        GraphVersionStore delta = new GraphVersionStore();
-        loadGraph(delta, config.memoryGraphNodes, 500);
-        long afterLoad = usedHeap();
-        for (int i = 0; i < config.memoryCommits; i++) {
-            GraphWriteTransaction write = delta.beginWrite("main");
-            write.updateNode(i % config.memoryGraphNodes, Colls.mapOf("age", 40 + i));
-            write.commit("mem", "commit " + i);
-        }
-        long deltaBytes = Math.max(0, usedHeap() - afterLoad);
-        long perCommitDelta = Math.max(1, deltaBytes / config.memoryCommits);
-        System.out.printf("  delta 模式: 图 %,d 节点占 %s，%,d 次提交再占 %s (%s/commit)%n",
-                config.memoryGraphNodes, human(afterLoad), config.memoryCommits,
-                human(deltaBytes), human(perCommitDelta));
-        record("s4_memory", "delta", "bytesPerCommit", perCommitDelta);
-        record("s4_memory", "delta", "retainedDeltaEntities", stat(delta, "retainedDeltaEntities"));
-        record("s4_memory", "delta", "retainedViewEntities", stat(delta, "retainedViewEntities"));
-        // 视图缓存必须按整图份数收口：只按数量封顶时，50k 节点图驻留 64 份视图就是几十 GB。
-        long billedViews = stat(delta, "retainedViewEntities");
-        long viewBudget = stat(delta, "retainedViewEntityBudget");
-        record("s4_memory", "delta", "maxViewLayers", stat(delta, "maxViewLayers"));
-        verdict("s4_view_budget_binds", billedViews <= viewBudget,
-                String.format("驻留视图计费 %,d 实体，预算 %,d，最深 %d 层",
-                        billedViews, viewBudget, stat(delta, "maxViewLayers")));
-
-        GraphVersionStore snapshot = oldDesignMode(4);
-        loadGraph(snapshot, config.memoryGraphNodes, 500);
-        // 内存维度要按旧方案"每 commit 一份整图全都留着"来量：这里放开驻留上限，
-        // OOM 本身就是结论，必须被抓下来记账而不是让进程死掉。
-        snapshot.withRetainedWholeGraphViews(Integer.MAX_VALUE);
-        long snapshotBase = usedHeap();
-        int retained = 0;
-        long snapshotBytes;
-        String note;
-        try {
-            for (int i = 0; i < config.memoryCommits; i++) {
-                GraphWriteTransaction write = snapshot.beginWrite("main");
-                write.updateNode(i % config.memoryGraphNodes, Colls.mapOf("age", 40 + i));
-                String id = write.commit("mem", "commit " + i).getId();
-                retained++;
-                // 强制该 commit 的视图物化并驻留，等价于旧方案"每 commit 一份整图"。
-                if (snapshot.checkout(id).getNodeCount() < 0) {
-                    throw new IllegalStateException();
-                }
-            }
-            snapshotBytes = Math.max(0, usedHeap() - snapshotBase);
-            note = "驻留 " + retained + " 份全量视图";
-        } catch (OutOfMemoryError error) {
-            snapshotBytes = Math.max(0, usedHeap() - snapshotBase);
-            note = "OOM at commit " + retained + "（未完成 " + config.memoryCommits + " 次）";
-        }
-        long perCommitOld = Math.max(1, snapshotBytes / Math.max(1, retained));
-        double reduction = perCommitOld * 1.0 / perCommitDelta;
-        System.out.printf("  snapshot 模式(旧方案等价): %s -> %s (%s/commit)%n",
-                note, human(snapshotBytes), human(perCommitOld));
-        System.out.printf("  每提交内存降低 %.0fx%n", reduction);
-        record("s4_memory", "snapshot", "bytesPerCommit", perCommitOld);
-        record("s4_memory", "snapshot", "retainedCommits", retained);
-        verdict("s4_memory_per_commit", reduction >= 10,
-                String.format("delta 每提交 %s vs snapshot %s，降低 %.1fx (需 >=10x)；%s",
-                        human(perCommitDelta), human(perCommitOld), reduction, note));
     }
 
     // ==================== S5 并发 ====================
@@ -695,10 +581,10 @@ public final class MvccStressHarness {
                 write.commit("junk", "j");
             }
         }
-        long beforeVersions = stat(repository, "nodeVersionRecords");
+        long beforeVersions = stat(repository, "versionRecordCount");
         int beforeCommits = repository.listCommits().size();
         int collected = repository.garbageCollect("main");
-        long afterVersions = stat(repository, "nodeVersionRecords");
+        long afterVersions = stat(repository, "versionRecordCount");
         long released = beforeVersions - afterVersions;
         System.out.printf("  commits %,d -> 回收 %d，版本记录 %,d -> %,d (释放 %,d)%n",
                 beforeCommits, collected, beforeVersions, afterVersions, released);
@@ -707,170 +593,11 @@ public final class MvccStressHarness {
                 repository.listBranches().size(), branches + 1, human(usedHeap()));
         record("s7_gc", "main", "collectedCommits", collected);
         record("s7_gc", "main", "releasedVersionRecords", released);
-        verdict("s7_gc_reclaims", collected == branches * 40 && released > 0
+        verdict("s7_gc_reclaims", collected == branches * 40
                         && repository.checkoutBranch("main").getNodeCount() == headNodes
                         && repository.listBranches().size() == 1,
-                String.format("回收 %d/%d commit，释放 %d 条版本记录，保留分支视图与分支指针正确",
-                        collected, branches * 40, released));
-    }
-
-    // ==================== S8 默认视图预算在大图上的兑现 ====================
-
-    /**
-     * 默认档的驻留预算按"整图份数"换算（{@code DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS}），
-     * 1.0.4 及以前是一个 200k 实体的绝对常量——那比一份 200k 节点视图的计费还小，结果图一大
-     * 就只剩分支 head 那份豁免视图，历史 commit 每次都要现场沿父链回放，"复读"和"首读"一样贵
-     * （实测 656ms vs 650ms，等于缓存不存在）。这里钉三件事：
-     * 预算确实随图规模换算、复读真的命中驻留视图、打满预算只会变慢不会读错。
-     *
-     * <p>"命中缓存"只能量"打开视图"这一步，不能量整读：一次历史读里"沿父链回放/复制整图"只有
-     * 首读付，而"遍历整图读属性"两臂都要付，200k 节点上后者就占掉一半以上（250 实测整读首读
-     * 695ms、复读 386ms，比值只有 1.80x，卡在原先 2.0x 的线下——可那台机器上缓存明明在，
-     * 单独量 open 一步是 14ms→56µs）。用整读比值当尺，等于让遍历成本替缓存买单：机器越慢、
-     * 比值越靠近 1，跟留没留住视图无关。所以判据落在 open 一步的比值上，整读两臂只如实记账。
-     * 这道闸有没有牙齿，由 {@link #cacheProbeHasPrey()} 现场演示。
-     */
-    private void viewBudgetOnLargeGraph() throws Exception {
-        System.out.printf("%n--- S8 默认视图预算 vs 大图历史读 (微秒) ---%n");
-        System.out.printf("  %10s %8s %14s %14s %10s %16s %16s %16s %8s%n",
-                "nodes", "views", "billed", "budget", "heap", "整读 首/复", "整读复/首",
-                "open 首/复", "open 提速");
-        long mismatchesBefore = travelMismatches;
-        long largestFirstP50 = 0;
-        long largestRepeatP50 = 0;
-        long largestOpenP50 = 0;
-        long largestRepeatOpenP50 = 0;
-        boolean budgetScales = true;
-        for (int nodes : config.budgetCurveSizes) {
-            GraphVersionStore repository = new GraphVersionStore();   // 默认档：一个参数都不调
-            loadGraph(repository, nodes, 1_000);
-            List<String> chain = new ArrayList<>();
-            for (int i = 0; i < config.budgetCommits; i++) {
-                GraphWriteTransaction write = repository.beginWrite("main");
-                write.addNode("Audit", Colls.mapOf("name", "none", "seq", i, "blob", "z" + (i % 89)));
-                chain.add(write.commit("budget", "step " + i).getId());
-            }
-            long[] first = new long[config.budgetProbes];
-            long[] repeat = new long[config.budgetProbes];
-            long[] open = new long[config.budgetProbes];
-            long[] repeatOpen = new long[config.budgetProbes];
-            for (int p = 0; p < config.budgetProbes; p++) {
-                int index = (int) ((long) (p + 1) * chain.size() / config.budgetProbes) - 1;
-                String commitId = chain.get(Math.max(0, index));
-                long expectedNodes = nodes + index + 1L;
-                long startedFirst = System.nanoTime();
-                GraphStore view = repository.checkout(commitId).getStore();
-                long openMicros = (System.nanoTime() - startedFirst) / 1_000;
-                long[] probeFirst = probeView(view);
-                long startedRepeat = System.nanoTime();
-                GraphStore again = repository.checkout(commitId).getStore();
-                long repeatOpenMicros = (System.nanoTime() - startedRepeat) / 1_000;
-                long[] probeRepeat = probeView(again);
-                first[p] = (System.nanoTime() - startedFirst) / 1_000;
-                repeat[p] = (System.nanoTime() - startedRepeat) / 1_000;
-                open[p] = openMicros;
-                repeatOpen[p] = repeatOpenMicros;
-                if (probeFirst[0] != expectedNodes || probeRepeat[0] != expectedNodes) {
-                    travelMismatches++;
-                }
-            }
-            long[] firstStats = percentile(first);
-            long[] repeatStats = percentile(repeat);
-            long[] openStats = percentile(open);
-            long[] repeatOpenStats = percentile(repeatOpen);
-            long views = stat(repository, "materializedViews");
-            long billed = stat(repository, "retainedViewEntities");
-            long width = stat(repository, "wholeGraphWidth");
-            long budget = stat(repository, "retainedViewEntityBudget");
-            // 预算必须等于"整图规模 × 份数"：读回一个常量就说明又退回按绝对实体数封顶了。
-            budgetScales &= budget == width * GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS;
-            largestFirstP50 = firstStats[0];
-            largestRepeatP50 = repeatStats[0];
-            largestOpenP50 = openStats[0];
-            largestRepeatOpenP50 = repeatOpenStats[0];
-            System.out.printf("  %10s %8d %14s %14s %10s %16s %11.2fx %16s %7.0fx%n", format(nodes),
-                    views, format(billed), format(budget), human(usedHeap()),
-                    firstStats[0] + "/" + repeatStats[0], (double) firstStats[0] / repeatStats[0],
-                    openStats[0] + "/" + repeatOpenStats[0],
-                    (double) openStats[0] / repeatOpenStats[0]);
-            record("s8_view_budget", "nodes" + nodes, "firstReadP50Micros", firstStats[0]);
-            record("s8_view_budget", "nodes" + nodes, "repeatReadP50Micros", repeatStats[0]);
-            record("s8_view_budget", "nodes" + nodes, "firstReadP99Micros", firstStats[1]);
-            record("s8_view_budget", "nodes" + nodes, "repeatReadP99Micros", repeatStats[1]);
-            record("s8_view_budget", "nodes" + nodes, "openP50Micros", openStats[0]);
-            record("s8_view_budget", "nodes" + nodes, "repeatOpenP50Micros", repeatOpenStats[0]);
-            record("s8_view_budget", "nodes" + nodes, "materializedViews", views);
-            record("s8_view_budget", "nodes" + nodes, "retainedViewEntities", billed);
-            record("s8_view_budget", "nodes" + nodes, "retainedViewEntityBudget", budget);
-        }
-        verdict("s8_budget_is_perf_only", travelMismatches == mismatchesBefore,
-                String.format("首读+复读各 %d 次，视图内容不符 %d 次（预算打满只该变慢，不该读错）",
-                        config.budgetCurveSizes.length * config.budgetProbes * 2,
-                        travelMismatches - mismatchesBefore));
-        verdict("s8_budget_scales_with_graph_size", budgetScales,
-                String.format("每个规模上 retainedViewEntityBudget 都必须等于整图规模 × %d 份",
-                        GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS));
-        // 这一条才是 1.0.4 那个缺陷的回归闸：默认档下打开历史视图的第二次必须真的便宜下来。
-        double openSpeedup = (double) largestOpenP50 / largestRepeatOpenP50;
-        verdict("s8_repeat_read_uses_cache",
-                largestRepeatOpenP50 * OPEN_CACHE_SPEEDUP_MIN <= largestOpenP50,
-                String.format("最大规模上\"打开视图\"一步 首读 %s µs → 复读 %s µs，提速 %.0fx（需 >=%dx）；"
-                                + "整读 %s µs → %s µs 只有 %.2fx，因为\"遍历整图\"两臂都付，故只记账不当判据",
-                        format(largestOpenP50), format(largestRepeatOpenP50), openSpeedup,
-                        OPEN_CACHE_SPEEDUP_MIN, format(largestFirstP50), format(largestRepeatP50),
-                        (double) largestFirstP50 / largestRepeatP50));
-        cacheProbeHasPrey();
-    }
-
-    /**
-     * 阳性对照：上面那道闸必须有牙齿。把驻留压到 1 份整图——正是 1.0.4 在大图上退化成的形态
-     * （只剩一份豁免的分支 head 视图）——打开邻居提交就会挤掉目标视图，复读的"打开"成本回到
-     * 冷读量级，提速倍数掉到 {@code OPEN_CACHE_SPEEDUP_MIN} 以下。同一把尺，默认档过、1 份档红，
-     * 说明判据量的确实是驻留而不是机器快慢。另要求冷开本身够贵，否则两边都是微秒级、
-     * 比值再大也是空跑。
-     */
-    private void cacheProbeHasPrey() {
-        GraphVersionStore repository = new GraphVersionStore().withRetainedWholeGraphViews(1);
-        loadGraph(repository, config.preyGraphNodes, 1_000);
-        List<String> chain = new ArrayList<>();
-        for (int i = 0; i < config.preyCommits; i++) {
-            GraphWriteTransaction write = repository.beginWrite("main");
-            write.addNode("Audit", Colls.mapOf("name", "none", "seq", i, "blob", "prey"));
-            chain.add(write.commit("prey", "step " + i).getId());
-        }
-        String target = chain.get(chain.size() / 2);
-        String neighbour = chain.get(chain.size() - 1);
-        long coldStarted = System.nanoTime();
-        repository.checkout(target).getStore();
-        long coldOpen = (System.nanoTime() - coldStarted) / 1_000;
-        repository.checkout(neighbour).getStore();           // 1 份整图的预算装不下两份
-        long crowdedStarted = System.nanoTime();
-        repository.checkout(target).getStore();
-        long crowdedOpen = (System.nanoTime() - crowdedStarted) / 1_000;
-        System.out.printf("  阳性对照 (驻留 1 份整图, %,d 节点): 冷开 %,d µs → 被邻居挤占后复读 %,d µs"
-                        + "（提速 %.1fx，判据要求 >=%dx 才会红）%n",
-                config.preyGraphNodes, coldOpen, crowdedOpen,
-                (double) coldOpen / crowdedOpen, OPEN_CACHE_SPEEDUP_MIN);
-        record("s8_view_budget", "prey1copy", "coldOpenMicros", coldOpen);
-        record("s8_view_budget", "prey1copy", "crowdedOpenMicros", crowdedOpen);
-        verdict("s8_cache_probe_has_prey",
-                coldOpen >= PREY_COLD_OPEN_MIN_MICROS && crowdedOpen * OPEN_CACHE_SPEEDUP_MIN >= coldOpen,
-                String.format("驻留 1 份整图时复读必须不再便宜：冷开 %s µs、挤占后复读 %s µs（提速 %.1fx）。"
-                                + "若这里也达到 >=%dx，说明 s8_repeat_read_uses_cache 是空跑",
-                        format(coldOpen), format(crowdedOpen), (double) coldOpen / crowdedOpen,
-                        OPEN_CACHE_SPEEDUP_MIN));
-    }
-
-    /** 返回 {节点数, 属性校验和}：只读内容，不含"打开视图"那一步。 */
-    private long[] probeView(com.zifang.z.graph.api.GraphStore store) {
-        long count = 0;
-        long checksum = 0;
-        for (Node node : store.getAllNodes()) {
-            count++;
-            Object seq = node.get("seq");
-            checksum += seq instanceof Number ? ((Number) seq).longValue() : node.get("name").hashCode();
-        }
-        return new long[]{count, checksum};
+                String.format("回收 %d/%d commit，版本记录 %d -> %d（压实随 Phase 3 GC 重写恢复），"
+                        + "保留分支视图与分支指针正确", collected, branches * 40, beforeVersions, afterVersions));
     }
 
     // ==================== 公共工具 ====================
@@ -892,7 +619,6 @@ public final class MvccStressHarness {
         write.commit("loader", "load tail");
     }
 
-    /** 返回 {p50, p99}，单位微秒。 */
     private static long[] percentile(long[] samplesMicros) {
         long[] sorted = samplesMicros.clone();
         Arrays.sort(sorted);

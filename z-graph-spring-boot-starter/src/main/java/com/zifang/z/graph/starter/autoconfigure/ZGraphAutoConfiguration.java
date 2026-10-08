@@ -40,15 +40,8 @@ public class ZGraphAutoConfiguration {
         GraphVersionStore store = dataDir == null || dataDir.trim().isEmpty()
                 ? new GraphVersionStore()
                 : new GraphVersionStore(Paths.get(dataDir));
-        store.withCheckpointInterval(props.getCheckpointInterval())
-                .withMaxRetainedViews(props.getMaxRetainedViews())
-                .withRetainedWholeGraphViews(props.getRetainedWholeGraphViews())
-                .withViewLayerLimit(props.getViewLayerLimit());
-        log.info("z-graph 版本仓库就绪: dataDir={}, checkpointInterval={}, maxRetainedViews={}, "
-                        + "retainedWholeGraphViews={}, viewLayerLimit={}",
-                dataDir == null || dataDir.trim().isEmpty() ? "(in-memory)" : dataDir,
-                props.getCheckpointInterval(), props.getMaxRetainedViews(),
-                props.getRetainedWholeGraphViews(), props.getViewLayerLimit());
+        log.info("z-graph 版本仓库就绪: dataDir={}",
+                dataDir == null || dataDir.trim().isEmpty() ? "(ephemeral)" : dataDir);
         return store;
     }
 

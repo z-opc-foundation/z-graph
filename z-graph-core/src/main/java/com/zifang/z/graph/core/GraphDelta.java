@@ -451,7 +451,7 @@ public final class GraphDelta {
         for (String value : values) GraphCodec.writeString(out, value);
     }
 
-    static GraphDelta readFrom(DataInputStream in) throws IOException {
+    public static GraphDelta readFrom(DataInputStream in) throws IOException {
         GraphDelta delta = new GraphDelta();
         int nodeUpsertCount = in.readInt();
         for (int i = 0; i < nodeUpsertCount; i++) {

@@ -1,10 +1,19 @@
 package com.zifang.z.graph.core;
 
 import com.zifang.z.graph.api.Edge;
+import com.zifang.z.graph.api.EdgeTypeSchema;
 import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.api.GraphMergeResult;
 import com.zifang.z.graph.api.GraphStore;
 import com.zifang.z.graph.api.Node;
+import com.zifang.z.graph.api.TagSchema;
+import com.zifang.z.graph.core.storage.AncestryIndex;
+import com.zifang.z.graph.core.storage.CommitObjectStore;
+import com.zifang.z.graph.core.storage.PayloadCodec;
+import com.zifang.z.graph.core.storage.RefStore;
+import com.zifang.z.graph.core.storage.RefViewGraphStore;
+import com.zifang.z.graph.core.storage.StorageEngine;
+import com.zifang.z.graph.core.storage.VersionStore;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -12,15 +21,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
@@ -35,192 +40,184 @@ import java.util.stream.Collectors;
 import com.zifang.z.graph.api.Colls;
 
 /**
- * MVCC 版本化图存储。
+ * 版本化图仓库：引擎原生 MVCC。
  *
- * <p>与"每个 commit 存一份整图副本"的做法不同，这里每个 commit 只登记相对第一父提交的
- * 增量 {@link GraphDelta}，同时把被触碰过的节点/边追加进各自的版本链
- * （{@link GraphEntityVersion}）。因此：</p>
+ * <p>唯一图数据基底是磁盘上的追加式版本链（{@link VersionStore}）+ 版本化
+ * postings 索引，由 {@link StorageEngine} 持有。任何 ref —— main head、分支
+ * head、任意历史 commit —— 都由 {@link RefViewGraphStore} 按「commitSeq ∈ 该
+ * ref 的祖先闭包」即时解析，<b>仓库不物化任何图状态</b>：没有视图缓存、没有
+ * 检查点、没有写事务覆盖层充当视图。</p>
  *
- * <ul>
- *   <li>写入成本是 O(本次变更量)，与图的规模无关；</li>
- *   <li>{@link #checkout(String)} 仍然给出任意历史 commit 上的完整视图，
- *       视图由最近的固定检查点向前回放增量物化得到，并按 LRU 缓存复用；</li>
- *   <li>{@link #nodeVersions(long)} 暴露单个节点的多版本历史，
- *       {@link #nodeVersionAt(long, String)} 给出该节点在指定 commit 上的版本。</li>
- * </ul>
+ * <p>commit object 对齐 Git：id = 整个对象规范化字节的 SHA-256（含 parents /
+ * branch / author / message / timestamp / delta 清单），同对象必同 id，落盘即
+ * 不可变（{@link CommitObjectStore}）。分支是 {@link RefStore} 里的纯指针文件，
+ * ref 移动是 commit 的提交点：数据先行 force，ref 原子替换，崩溃后孤儿对象由
+ * GC 回收。</p>
  *
- * <p>物化视图一旦发布就不再改写：后续提交只会产生新视图，所以已经交出去的
- * checkout 不会被追溯修改。提交后直接把写事务的覆盖层认领为该 commit 的视图，
- * 读要穿透每一层，所以套叠到 {@code viewLayerLimit} 层或到达检查点深度时才摊平一次。
- * 缓存视图受 {@code maxRetainedViews}（数量）和 {@code retainedWholeGraphViews}（合计驻留
- * 多少份整图）双重上限约束，分支 head 的视图不参与淘汰。</p>
+ * <p>写事务（{@link TxBuffer}）只是读改写缓冲：读穿透 beginWrite 时的 head
+ * 视图，写登记进暂存指令集；提交 = 校验 head 未被推进（{@link StaleHeadException}
+ * 乐观并发）→ 版本链追加 → commit object 落盘 → ref 移动。</p>
  */
 public final class GraphVersionStore {
 
-    /** 每隔多少个第一父深度保留一个全量物化检查点。 */
-    public static final int DEFAULT_CHECKPOINT_INTERVAL = 32;
-    /** LRU 里最多驻留多少个物化视图（分支 head 不计入该上限）。 */
-    public static final int DEFAULT_MAX_RETAINED_VIEWS = 64;
-    /**
-     * 缓存视图合计最多驻留多少"份整图"（平铺视图按整图规模计费，套叠的覆盖层只按本层增量计费）。
-     *
-     * <p>预算不能写成实体数常量：预算一旦小于一份整图，淘汰就退化成"只留着各分支 head 那份豁免的
-     * 视图"，历史读永远命中不了缓存——1.0.4 的 S8 实测就是这样（20 万节点的图计费 300,299 实体，
-     * 而当时的默认预算是 200,000，首读 656ms、复读 650ms，复读相对首读零收益）。按份数定预算
-     * 才对图规模自适应：图越大，留的视图越少；20 万节点的图留 4 份约 120 万实体。</p>
-     */
-    public static final int DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS = 4;
-    /**
-     * head 视图最多套叠多少层覆盖层。提交后直接把写事务的覆盖层当作新 commit 的视图，
-     * 省掉一次整图复制；但读要穿透每一层，超过该层数就摊平一次。
-     */
-    public static final int DEFAULT_VIEW_LAYER_LIMIT = 8;
-
     private static final InMemoryGraphStore EMPTY_VIEW = new InMemoryGraphStore();
+    private static final String DEFAULT_BRANCH = "main";
 
-    private final Map<String, GraphCommit> commits = new LinkedHashMap<>();
-    private final Map<String, GraphDelta> deltas = new LinkedHashMap<>();
-    private final Map<String, Integer> firstParentDepth = new LinkedHashMap<>();
-    private final Map<String, Long> commitSequenceById = new LinkedHashMap<>();
-    private final Map<String, String> branches = new LinkedHashMap<>();
-    private final LinkedHashMap<String, GraphStore> views = new LinkedHashMap<>(16, 0.75f, true);
-    private final Map<Long, List<GraphEntityVersion>> nodeVersions = new LinkedHashMap<>();
-    private final Map<Long, List<GraphEntityVersion>> edgeVersions = new LinkedHashMap<>();
+    private final Path dataDir;
+    private final StorageEngine engine;
+    private final CommitObjectStore commitStore;
+    private final RefStore refStore;
+    private final AncestryIndex ancestry;
+    private final Map<String, CommitObjectStore.CommitMeta> commits = new LinkedHashMap<>();
+    private final Map<Long, String> commitIdBySeq = new LinkedHashMap<>();
+    private final Map<String, GraphCommit> commitHandles = new LinkedHashMap<>();
 
-    private final Path storageDirectory;
-    private long sequence;
-    private long nextNodeId;
-    private long nextEdgeId;
-
-    private int checkpointInterval = DEFAULT_CHECKPOINT_INTERVAL;
-    private int maxRetainedViews = DEFAULT_MAX_RETAINED_VIEWS;
-    private int retainedWholeGraphViews = DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS;
-    private int viewLayerLimit = DEFAULT_VIEW_LAYER_LIMIT;
-    private boolean eagerCheckpoints = true;
-
+    /**
+     * 纯内存口径的仓库：实际落到进程临时目录（引擎是磁盘追加式的），进程退出
+     * 即弃，与旧「不传目录 = 不落盘」的语义等价。
+     */
     public GraphVersionStore() {
         this(null);
     }
 
-    /**
-     * 打开一个可选的文件仓库。非 null 时，每个 commit 的元数据和增量各自落盘一次
-     * （{@code objects/<commit>.bin}，写完不再改写），分支指针和序号写在
-     * {@code repository.bin}，进程重启后可以恢复提交图、版本链和全部历史视图。
-     */
     public GraphVersionStore(Path storageDirectory) {
-        this.storageDirectory = storageDirectory;
-        if (storageDirectory != null && loadState()) {
-            return;
+        boolean ephemeral = storageDirectory == null;
+        Path dir;
+        if (ephemeral) {
+            try {
+                dir = Files.createTempDirectory("z-graph-ephemeral-");
+            } catch (IOException e) {
+                throw new IllegalStateException("Cannot create ephemeral store directory", e);
+            }
+        } else {
+            dir = storageDirectory;
         }
-        GraphCommit root = createCommit(Colls.listOf(), "main", "system", "Initial graph",
-                new GraphDelta().freeze(), 0, 0);
-        branches.put("main", root.getId());
-        persistHeader();
+        this.dataDir = dir;
+        Path storeDir = dir.resolve("store");
+        Path commitsDir = dir.resolve("commits");
+        try {
+            boolean existing = Files.exists(storeDir.resolve("header.bin"));
+            if (existing) {
+                this.engine = StorageEngine.open(storeDir);
+            } else {
+                this.engine = StorageEngine.create(storeDir);
+            }
+            Files.createDirectories(commitsDir);
+            this.commitStore = new CommitObjectStore(commitsDir);
+            this.refStore = new RefStore(dir);
+            this.ancestry = new AncestryIndex(new CommitGraphView());
+            if (existing) {
+                loadCommits();
+                requireBranch(DEFAULT_BRANCH);
+            } else {
+                refStore.init(DEFAULT_BRANCH);
+                createCommitAndAdvance(DEFAULT_BRANCH, Colls.listOf(), "system", "Initial graph",
+                        new GraphDelta().freeze(), 0, 0, null, null);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot open z-graph repository at " + dir, e);
+        }
+    }
+
+    private final class CommitGraphView implements AncestryIndex.CommitGraph {
+        @Override
+        public List<String> parentsOf(String commitId) {
+            CommitObjectStore.CommitMeta meta = commits.get(commitId);
+            return meta == null ? Colls.listOf() : meta.parents;
+        }
+
+        @Override
+        public long commitSeqOf(String commitId) {
+            CommitObjectStore.CommitMeta meta = commits.get(commitId);
+            if (meta == null) {
+                throw new IllegalArgumentException("Unknown commit: " + commitId);
+            }
+            return meta.commitSeq;
+        }
+    }
+
+    private void loadCommits() throws IOException {
+        try (java.util.stream.Stream<Path> files = Files.list(dataDir.resolve("commits"))) {
+            List<Path> objects = new ArrayList<>();
+            files.filter(path -> path.getFileName().toString().endsWith(".bin")).forEach(objects::add);
+            objects.sort(Comparator.comparing(path -> path.getFileName().toString()));
+            for (Path object : objects) {
+                String id = object.getFileName().toString().replace(".bin", "");
+                registerCommit(commitStore.read(id));
+            }
+        }
+    }
+
+    private void registerCommit(CommitObjectStore.CommitMeta meta) {
+        commits.put(meta.id, meta);
+        commitIdBySeq.put(meta.commitSeq, meta.id);
     }
 
     // ==================== 调参 ====================
 
     public Path getStorageDirectory() {
-        return storageDirectory;
-    }
-
-    /** 设置检查点间隔；越小则回放越短、驻留内存越多。必须小于 1 时使用默认值。 */
-    public synchronized GraphVersionStore withCheckpointInterval(int interval) {
-        this.checkpointInterval = Math.max(1, interval);
-        return this;
-    }
-
-    /** 设置 LRU 里可驻留的非固定视图数。 */
-    public synchronized GraphVersionStore withMaxRetainedViews(int maxViews) {
-        this.maxRetainedViews = Math.max(1, maxViews);
-        return this;
-    }
-
-    /**
-     * 设置缓存视图合计可驻留多少"份整图"（含各分支 head 那份豁免视图）。
-     * 预算随图规模换算，所以小图多留几份、大图自动少留；越小越省内存、历史读回放越长。
-     */
-    public synchronized GraphVersionStore withRetainedWholeGraphViews(int views) {
-        this.retainedWholeGraphViews = Math.max(1, views);
-        return this;
-    }
-
-    /** head 视图套叠多少层覆盖层后强制摊平一次；1 等于每次都摊平（旧行为）。 */
-    public synchronized GraphVersionStore withViewLayerLimit(int layers) {
-        this.viewLayerLimit = Math.max(1, layers);
-        return this;
-    }
-
-    /** 关闭后提交不再主动物化检查点，读取历史时再按需回放（更省内存、读更慢）。 */
-    public synchronized GraphVersionStore withEagerCheckpoints(boolean enabled) {
-        this.eagerCheckpoints = enabled;
-        return this;
-    }
-
-    public synchronized int getCheckpointInterval() {
-        return checkpointInterval;
-    }
-
-    public synchronized int getMaxRetainedViews() {
-        return maxRetainedViews;
-    }
-
-    public synchronized int getRetainedWholeGraphViews() {
-        return retainedWholeGraphViews;
+        return dataDir;
     }
 
     // ==================== 提交图 ====================
 
     /** 返回当前分支 head；仓库默认创建 main 分支。 */
     public synchronized GraphCommit getBranchHead(String branch) {
-        return requireCommit(branches.get(requireBranch(branch)), "branch=" + branch);
+        return commitHandle(resolveRefId(requireBranch(branch)));
     }
 
     public synchronized GraphCommit getCommit(String commitId) {
-        return requireCommit(commitId, "commit=" + commitId);
+        return commitHandle(requireCommitId(commitId, "commit=" + commitId));
     }
 
     public synchronized List<GraphCommit> listCommits() {
-        return Colls.copyOfList(commits.values());
+        List<CommitObjectStore.CommitMeta> ordered = new ArrayList<>(commits.values());
+        ordered.sort(Comparator.comparingLong(meta -> meta.commitSeq));
+        List<GraphCommit> result = new ArrayList<>(ordered.size());
+        for (CommitObjectStore.CommitMeta meta : ordered) {
+            result.add(commitHandle(meta.id));
+        }
+        return result;
     }
 
     public synchronized List<String> listBranches() {
-        return Colls.copyOfList(branches.keySet());
+        try {
+            return refStore.branches();
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot list branches", e);
+        }
     }
 
     /** 返回 ref 的第一父链日志，ref 可以是 branch 名或 commit ID。 */
     public synchronized List<GraphCommit> log(String ref) {
-        String headId = branches.containsKey(ref) ? branches.get(ref) : requireCommit(ref, "commit=" + ref).getId();
+        String headId = resolveRefId(ref);
         List<GraphCommit> history = new ArrayList<>();
-        String current = headId;
-        while (current != null) {
-            GraphCommit commit = requireCommit(current, "commit=" + current);
-            history.add(commit);
-            current = commit.getParents().isEmpty() ? null : commit.getParents().get(0);
+        for (String id : AncestryIndex.lineageToRoot(new CommitGraphView(), headId)) {
+            history.add(commitHandle(id));
         }
-        return Colls.copyOfList(history);
+        return history;
     }
 
     public synchronized GraphCommit createBranch(String branch, String fromCommitId) {
         validateBranchName(branch);
-        if (branches.containsKey(branch)) {
-            throw new IllegalArgumentException("Branch already exists: " + branch);
+        try {
+            if (refStore.get(branch) != null) {
+                throw new IllegalArgumentException("Branch already exists: " + branch);
+            }
+            requireCommit(fromCommitId, "commit=" + fromCommitId);
+            refStore.put(branch, fromCommitId);
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot create branch " + branch, e);
         }
-        GraphCommit base = requireCommit(fromCommitId, "commit=" + fromCommitId);
-        branches.put(branch, base.getId());
-        persistHeader();
-        return base;
+        return commitHandle(fromCommitId);
     }
 
     // ==================== 写事务与视图 ====================
 
     public synchronized GraphWriteTransaction beginWrite(String branch) {
-        String headId = branches.get(requireBranch(branch));
+        String headId = resolveRefId(requireBranch(branch));
         requireCommit(headId, "branch=" + branch);
-        // 覆盖层只从 base 读、写入都落在自己的暂存区，所以 head 视图已在缓存时直接共享，
-        // 哪怕它本身还套叠着前几次提交的覆盖层；未命中才回放物化一次。
-        GraphStore base = cachedView(headId);
-        VersionOverlayStore overlay = new VersionOverlayStore(base, new VersionOverlayStore.IdAllocator() {
+        TxBuffer buffer = new TxBuffer(viewAt(headId), new TxBuffer.IdAllocator() {
             @Override
             public long nextNodeId() {
                 return allocateNodeId();
@@ -231,129 +228,170 @@ public final class GraphVersionStore {
                 return allocateEdgeId();
             }
         });
-        return new GraphWriteTransaction(this, branch, headId, overlay);
+        return new GraphWriteTransaction(this, branch, headId, buffer);
     }
 
-    /** 打开某个 commit 上的视图；返回的 checkout 绑定在该 commit，不随分支继续变化。 */
+    /** 打开某个 commit 上的视图；返回的 checkout 绑定该 commit，不随分支继续变化。 */
     public synchronized GraphCheckout checkout(String commitId) {
-        GraphCommit commit = requireCommit(commitId, "commit=" + commitId);
-        return new GraphCheckout(commit, materializeFlat(commitId));
+        CommitObjectStore.CommitMeta meta = requireCommit(commitId, "commit=" + commitId);
+        return new GraphCheckout(commitHandle(meta.id), viewAt(meta.id), this);
     }
 
     public synchronized GraphCheckout checkoutBranch(String branch) {
-        return checkout(getBranchHead(branch).getId());
+        return checkout(resolveRefId(requireBranch(branch)));
+    }
+
+    /** 绑定指定 commit 的引擎解析视图（无任何物化）；计数用 commit 声明值播种。 */
+    RefViewGraphStore viewAt(String commitId) {
+        CommitObjectStore.CommitMeta meta = requireCommit(commitId, "commit=" + commitId);
+        return new RefViewGraphStore(engine, ancestry.visibilityOf(commitId), meta.nodeCount, meta.edgeCount);
+    }
+
+    // ==================== commit 落地 ====================
+
+    /**
+     * 写事务的提交入口：校验 head 未被推进（乐观并发），随后把指令集落成版本链
+     * + postings，commit object 内容寻址落盘，最后移动分支 ref（提交点）。
+     */
+    synchronized GraphCommit commit(String branch,
+                                    String baseCommitId,
+                                    GraphDelta delta,
+                                    long nodeCount,
+                                    long edgeCount,
+                                    String author,
+                                    String message) {
+        requireBranch(branch);
+        return createCommitAndAdvance(branch, Colls.listOf(baseCommitId), author, message,
+                delta, nodeCount, edgeCount, null, baseCommitId);
+    }
+
+    private synchronized GraphCommit createCommitAndAdvance(String branch,
+                                                            List<String> parents,
+                                                            String author,
+                                                            String message,
+                                                            GraphDelta delta,
+                                                            long nodeCount,
+                                                            long edgeCount,
+                                                            String legacyId,
+                                                            String expectedBaseHeadId) {
+        try {
+            if (expectedBaseHeadId != null) {
+                String currentHeadId = refStore.get(branch);
+                if (!Objects.equals(currentHeadId, expectedBaseHeadId)) {
+                    throw new StaleHeadException(
+                            "Branch advanced since transaction started: " + branch
+                                    + " (expected " + expectedBaseHeadId + ", actual " + currentHeadId + ")");
+                }
+            }
+            long commitSeq = engine.allocateCommitSeq();
+            byte[] canonical = CommitObjectStore.canonicalBytes(parents, branch, author, message,
+                    System.currentTimeMillis(), nodeCount, edgeCount, commitSeq, legacyId, delta);
+            String id = CommitObjectStore.hashOf(canonical);
+            byte[] digest16 = Arrays.copyOf(CommitObjectStore.digestOf(canonical), 16);
+            engine.applyDelta(commitSeq, digest16, delta);
+            String writtenId = commitStore.writeCanonical(canonical);
+            if (!writtenId.equals(id)) {
+                throw new IllegalStateException("Commit id mismatch: " + writtenId + " != " + id);
+            }
+            // 提交点 = ref 移动：在此之前数据必须全部 force 完成，崩溃后 ref 仍指旧 commit。
+            engine.persistAndForce();
+            refStore.put(branch, id);
+            registerCommit(commitStore.read(id));
+            return commitHandle(id);
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot persist commit on branch " + branch, e);
+        }
     }
 
     /**
-     * 物化指定 commit 的整图视图。相同 commit 复用缓存，因此反复打开同一历史视图
-     * 不会重复回放增量。返回的实例是共享的不可变视图，调用方不得改写。
+     * 当并发事务提交时，branch head 已被推进，提示调用方放弃或重试。
      */
-    synchronized InMemoryGraphStore materializeView(String commitId) {
-        requireCommit(commitId, "commit=" + commitId);
-        return materializeFlat(commitId);
-    }
-
-    private GraphStore cachedView(String commitId) {
-        GraphStore cached = views.get(commitId);
-        return cached == null ? materializeFlat(commitId) : cached;
+    public static class StaleHeadException extends IllegalStateException {
+        public StaleHeadException(String message) { super(message); }
     }
 
     /**
-     * 回放出一份平铺视图：沿第一父链走到最近的已缓存平铺视图，复制它再按顺序套用沿途增量。
-     * 途中遇到的套叠覆盖层会被这份平铺视图替换掉（两者内容相同，平铺版读得更快）。
+     * 引用（commit id 或分支名）在仓库里不存在。它与参数写错一样都是 {@link IllegalArgumentException}
+     * 的子类，好让既有 catch 继续生效；控制面据此把"资源不存在"和"服务端故障"分开（404 vs 500）。
      */
-    private InMemoryGraphStore materializeFlat(String commitId) {
-        // views 是 access-order LinkedHashMap，get() 会改写内部顺序：这里只求值一次，
-        // 绝不为了 instanceof 而多打一次 get。
-        GraphStore cached = views.get(commitId);
-        if (cached instanceof InMemoryGraphStore) {
-            return (InMemoryGraphStore) cached;
-        }
-        List<String> chain = new ArrayList<>();
-        String cursor = commitId;
-        while (cursor != null && !(views.get(cursor) instanceof InMemoryGraphStore)) {
-            chain.add(cursor);
-            GraphCommit commit = commits.get(cursor);
-            cursor = commit == null || commit.getParents().isEmpty() ? null : commit.getParents().get(0);
-        }
-        InMemoryGraphStore view = cursor == null
-                ? EMPTY_VIEW.copy()
-                : ((InMemoryGraphStore) views.get(cursor)).copy();
-        for (int i = chain.size() - 1; i >= 0; i--) {
-            view.applyDelta(deltas.get(chain.get(i)));
-        }
-        registerView(commitId, view);
-        return view;
+    public static class UnknownReferenceException extends IllegalArgumentException {
+        public UnknownReferenceException(String message) { super(message); }
     }
 
-    /**
-     * 提交后给新 commit 登记视图。写事务的覆盖层本身已经合并好了 base 和本次增量，
-     * 直接拿它当视图就能让提交成本留在 O(变更量)；只有到检查点、或套叠层数触顶
-     * （读要穿透每一层）时才摊平一次，把整图复制摊到多次提交上。
-     */
-    private void registerCommittedView(String commitId, VersionOverlayStore committed) {
-        if (!isCheckpoint(commitId) && committed.viewDepth() <= viewLayerLimit) {
-            registerView(commitId, committed);
-            return;
-        }
-        materializeFlat(commitId);
+    synchronized long allocateNodeId() {
+        return engine.allocateNodeId();
     }
 
-    private void registerView(String commitId, GraphStore view) {
-        views.put(commitId, view);
-        evictViews();
+    synchronized long allocateEdgeId() {
+        return engine.allocateEdgeId();
     }
 
-    private void evictViews() {
-        // 分支 head 的视图不参与淘汰：淘汰它会让下一次 beginWrite 退化回整图回放。
-        // 被换出的平铺父视图仍可能被某个在世的套叠子视图引用着而留在堆上，
-        // 因此实际驻留约为「预算 + 每个分支一份整图」。
-        List<String> candidates = new ArrayList<>();
-        long retained = 0;
-        long wholeGraphWidth = 0;
-        for (Map.Entry<String, GraphStore> entry : views.entrySet()) {
-            GraphStore view = entry.getValue();
-            retained += entityWidth(view);
-            // 覆盖层按增量计费，但 getNodeCount/getEdgeCount 给的是"这份视图看到的世界"的全量，
-            // 两者一起用会让预算基准随套叠层数漂走，所以统一取全量计数。
-            wholeGraphWidth = Math.max(wholeGraphWidth, view.getNodeCount() + view.getEdgeCount());
-            if (!branches.containsValue(entry.getKey())) candidates.add(entry.getKey());
-        }
-        // views 是 accessOrder 链表，遍历顺序即"最久未用在前"。
-        int excessByCount = candidates.size() - maxRetainedViews;
-        long excessByEntities = retained - entityBudget(wholeGraphWidth);
-        int index = 0;
-        while (index < candidates.size() && (index < excessByCount || excessByEntities > 0)) {
-            String victim = candidates.get(index++);
-            excessByEntities -= entityWidth(views.get(victim));
-            views.remove(victim);
-        }
+    synchronized void reserveNodeId(long id) {
+        engine.reserveNodeId(id);
     }
 
-    /** 驻留预算：整图规模 × 约定份数。仓库还空着时基准为 0，此时任何视图都还没资格被淘。 */
-    private long entityBudget(long wholeGraphWidth) {
-        return wholeGraphWidth == 0 ? 0 : wholeGraphWidth * retainedWholeGraphViews;
+    synchronized void reserveEdgeId(long id) {
+        engine.reserveEdgeId(id);
     }
 
-    private static long entityWidth(GraphStore view) {
-        return VersionOverlayStore.billedEntities(view);
-    }
+    // ==================== 单实体版本链 ====================
 
-    private boolean isCheckpoint(String commitId) {
-        Integer depth = firstParentDepth.get(commitId);
-        return depth != null && depth % checkpointInterval == 0;
-    }
-
-    // ==================== 节点多版本 ====================
-
-    /** 节点的全部版本，按提交先后排列；节点从未出现在仓库里时为空。 */
+    /** 节点的全部已登记版本，按提交先后排列；节点从未出现时为空。 */
     public synchronized List<GraphEntityVersion> nodeVersions(long nodeId) {
-        return Colls.copyOfList(nodeVersions.getOrDefault(nodeId, Colls.listOf()));
+        return entityVersions(VersionStore.KIND_UPSERT_NODE, nodeId);
     }
 
-    /** 边的全部版本，按提交先后排列。 */
+    /** 边的全部已登记版本，按提交先后排列。 */
     public synchronized List<GraphEntityVersion> edgeVersions(long edgeId) {
-        return Colls.copyOfList(edgeVersions.getOrDefault(edgeId, Colls.listOf()));
+        return entityVersions(VersionStore.KIND_UPSERT_EDGE, edgeId);
+    }
+
+    private List<GraphEntityVersion> entityVersions(int upsertKind, long entityId) {
+        List<VersionStore.VersionRecord> chain;
+        try {
+            chain = engine.versionStore().historyVisible(upsertKind, entityId, StorageEngine.ALWAYS_VISIBLE);
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot read version chain for entity " + entityId, e);
+        }
+        List<GraphEntityVersion> result = new ArrayList<>(chain.size());
+        for (int i = chain.size() - 1; i >= 0; i--) {
+            GraphEntityVersion version = toEntityVersion(chain.get(i), upsertKind);
+            if (version != null) {
+                result.add(version);
+            }
+        }
+        return result;
+    }
+
+    private GraphEntityVersion toEntityVersion(VersionStore.VersionRecord record, int upsertKind) {
+        String commitId = commitIdBySeq.get(record.commitSeq);
+        if (commitId == null) {
+            // 版本所属 commit 已被 GC（Phase 3 会压实这些孤儿版本）；此刻跳过。
+            return null;
+        }
+        CommitObjectStore.CommitMeta meta = commits.get(commitId);
+        GraphEntityVersion.Kind kind = record.isDelete()
+                ? GraphEntityVersion.Kind.DELETE
+                : GraphEntityVersion.Kind.UPSERT;
+        Node node = null;
+        Edge edge = null;
+        if (!record.isDelete()) {
+            try {
+                byte[] payload = engine.versionStore().payload(record);
+                if (upsertKind == VersionStore.KIND_UPSERT_NODE) {
+                    PayloadCodec.NodePayload decoded = PayloadCodec.decodeNode(payload, engine.labelDictionary());
+                    node = new Node(record.entityId, decoded.labels, decoded.properties);
+                } else {
+                    PayloadCodec.EdgePayload decoded = PayloadCodec.decodeEdge(payload, engine.typeDictionary());
+                    edge = new Edge(record.entityId, decoded.type, decoded.startNodeId,
+                            decoded.endNodeId, decoded.properties);
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException("Cannot decode version payload " + record.versionId, e);
+            }
+        }
+        return new GraphEntityVersion(record.entityId, kind, commitId, record.commitSeq,
+                meta.timestampEpochMillis, node, edge);
     }
 
     /**
@@ -361,33 +399,35 @@ public final class GraphVersionStore {
      * 该节点的提交。返回空表示该 ref 的历史里从未登记过这个节点的任何版本。
      */
     public synchronized java.util.Optional<GraphEntityVersion> nodeVersionAt(long nodeId, String ref) {
-        return versionAt(nodeVersions.get(nodeId), ref, "ref=" + ref);
+        return versionAt(nodeVersions(nodeId), ref, "ref=" + ref);
     }
 
     public synchronized java.util.Optional<GraphEntityVersion> edgeVersionAt(long edgeId, String ref) {
-        return versionAt(edgeVersions.get(edgeId), ref, "ref=" + ref);
+        return versionAt(edgeVersions(edgeId), ref, "ref=" + ref);
     }
 
     /** 节点在 ref 可见的版本链，按时间顺序。 */
     public synchronized List<GraphEntityVersion> nodeHistory(long nodeId, String ref) {
-        Set<String> ancestry = ancestorsOfRef(ref);
+        Set<Long> closure = ancestry.closureOf(resolveRefId(ref));
         List<GraphEntityVersion> visible = new ArrayList<>();
-        for (GraphEntityVersion version : nodeVersions.getOrDefault(nodeId, Colls.listOf())) {
-            if (ancestry.contains(version.getCommitId())) visible.add(version);
+        for (GraphEntityVersion version : nodeVersions(nodeId)) {
+            if (closure.contains(version.getCommitSequence())) {
+                visible.add(version);
+            }
         }
-        return Colls.copyOfList(visible);
+        return visible;
     }
 
     private java.util.Optional<GraphEntityVersion> versionAt(List<GraphEntityVersion> chain,
                                                              String ref,
                                                              String description) {
-        if (chain == null || chain.isEmpty()) {
+        if (chain.isEmpty()) {
             return java.util.Optional.empty();
         }
-        Set<String> ancestry = ancestorsOfRef(ref);
+        Set<Long> closure = ancestry.closureOf(resolveRefId(ref));
         GraphEntityVersion best = null;
         for (GraphEntityVersion version : chain) {
-            if (!ancestry.contains(version.getCommitId())) continue;
+            if (!closure.contains(version.getCommitSequence())) continue;
             if (best == null || version.getCommitSequence() > best.getCommitSequence()) {
                 best = version;
             }
@@ -398,55 +438,21 @@ public final class GraphVersionStore {
         return java.util.Optional.of(best);
     }
 
-    private Set<String> ancestorsOfRef(String ref) {
-        String head = branches.containsKey(ref) ? branches.get(ref) : requireCommit(ref, "commit=" + ref).getId();
-        Map<String, Integer> distances = ancestorDistances(head);
-        return distances.keySet();
-    }
+    // ==================== 观测 ====================
 
-    /** 仓库里登记过的实体版本总数，用于容量观测。所有计数一律以 long 输出，便于压测脚本直接取数。 */
+    /** 引擎观测面。所有计数一律以 long 输出，便于压测脚本直接取数。 */
     public synchronized Map<String, Object> versionStats() {
         Map<String, Object> stats = new LinkedHashMap<>();
-        long deltaEntities = 0;
-        long deltaDeletes = 0;
-        for (GraphDelta delta : deltas.values()) {
-            deltaEntities += delta.nodeUpserts().size() + delta.edgeUpserts().size();
-            deltaDeletes += delta.nodeDeletes().size() + delta.edgeDeletes().size();
-        }
         stats.put("commitCount", (long) commits.size());
-        stats.put("branchCount", (long) branches.size());
-        stats.put("versionedNodeCount", (long) nodeVersions.size());
-        stats.put("versionedEdgeCount", (long) edgeVersions.size());
-        stats.put("nodeVersionRecords", sumVersions(nodeVersions));
-        stats.put("edgeVersionRecords", sumVersions(edgeVersions));
-        stats.put("retainedDeltaEntities", deltaEntities);
-        stats.put("retainedDeltaDeletes", deltaDeletes);
-        stats.put("materializedViews", (long) views.size());
-        long retainedViewEntities = 0;
-        long wholeGraphWidth = 0;
-        int maxViewLayers = 0;
-        for (GraphStore view : views.values()) {
-            retainedViewEntities += entityWidth(view);
-            wholeGraphWidth = Math.max(wholeGraphWidth, view.getNodeCount() + view.getEdgeCount());
-            if (view instanceof VersionOverlayStore) {
-                maxViewLayers = Math.max(maxViewLayers, ((VersionOverlayStore) view).viewDepth());
-            }
+        try {
+            stats.put("branchCount", (long) refStore.branches().size());
+        } catch (IOException e) {
+            stats.put("branchCount", -1L);
         }
-        stats.put("retainedViewEntities", retainedViewEntities);
-        stats.put("wholeGraphWidth", wholeGraphWidth);
-        stats.put("retainedViewEntityBudget", entityBudget(wholeGraphWidth));
-        stats.put("maxViewLayers", (long) maxViewLayers);
-        stats.put("checkpointInterval", (long) checkpointInterval);
-        stats.put("maxRetainedViews", (long) maxRetainedViews);
-        stats.put("retainedWholeGraphViews", (long) retainedWholeGraphViews);
-        stats.put("viewLayerLimit", (long) viewLayerLimit);
+        stats.putAll(engine.stats());
+        stats.put("versionPayloadBytes", engine.payloadBytes());
+        stats.put("ancestryCachedClosures", (long) ancestry.cachedClosureCount());
         return stats;
-    }
-
-    private static long sumVersions(Map<Long, List<GraphEntityVersion>> chains) {
-        long total = 0;
-        for (List<GraphEntityVersion> chain : chains.values()) total += chain.size();
-        return total;
     }
 
     // ==================== 快照导入导出 ====================
@@ -454,12 +460,12 @@ public final class GraphVersionStore {
     /** 把指定 commit 的视图导出为独立文件，便于备份/迁移。 */
     public synchronized Path exportSnapshot(String commitId, Path target) throws IOException {
         requireCommit(commitId, "commit=" + commitId);
-        GraphDelta full = GraphDelta.between(EMPTY_VIEW, materializeFlat(commitId));
+        GraphDelta full = GraphDelta.between(EMPTY_VIEW, resolveToInMemory(commitId));
         Path parent = target.getParent();
         if (parent != null) Files.createDirectories(parent);
         Path temp = target.resolveSibling(target.getFileName() + ".tmp");
         try (OutputStream output = Files.newOutputStream(temp,
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
              DataOutputStream out = new DataOutputStream(output)) {
             out.writeInt(GraphCodec.STORAGE_MAGIC);
             out.writeInt(GraphCodec.STORAGE_VERSION);
@@ -493,15 +499,35 @@ public final class GraphVersionStore {
                     ? GraphDelta.readFrom(in)
                     : GraphDelta.between(EMPTY_VIEW, readLegacySnapshot(in, version));
         }
-        String headId = branches.get(branch);
+        String headId = resolveRefId(branch);
         InMemoryGraphStore target = EMPTY_VIEW.copy();
         target.applyDelta(full);
-        GraphDelta replacement = GraphDelta.between(materializeFlat(headId), target);
-        GraphCommit commit = createCommit(Colls.listOf(headId), branch, author, message, replacement.freeze(),
-                target.getNodeCount(), target.getEdgeCount());
-        branches.put(branch, commit.getId());
-        persistHeader();
-        return commit;
+        GraphDelta replacement = GraphDelta.between(resolveToInMemory(headId), target).freeze();
+        return createCommitAndAdvance(branch, Colls.listOf(headId), author, message, replacement,
+                target.getNodeCount(), target.getEdgeCount(), null, headId);
+    }
+
+    /** 解析指定 commit 的完整视图进一份内存副本（仅用于 export/import/merge 等冷路径）。 */
+    private InMemoryGraphStore resolveToInMemory(String commitId) {
+        GraphStore view = viewAt(commitId);
+        InMemoryGraphStore snapshot = new InMemoryGraphStore();
+        for (Node node : view.getAllNodes()) {
+            snapshot.addNode(node.getId(), node.getLabels(), node.getProperties());
+        }
+        for (Edge edge : view.getAllEdges()) {
+            snapshot.addEdge(edge.getId(), edge.getType(), edge.getStartNodeId(), edge.getEndNodeId(),
+                    edge.getProperties());
+        }
+        for (String tag : view.listTags()) {
+            snapshot.putTagSchema(view.getTagSchema(tag));
+        }
+        for (String edgeType : view.listEdgeTypes()) {
+            snapshot.putEdgeTypeSchema(view.getEdgeTypeSchema(edgeType));
+        }
+        for (List<String> index : view.getPropertyIndexes()) {
+            snapshot.createPropertyIndex(index.get(0), index.get(1));
+        }
+        return snapshot;
     }
 
     // ==================== 合并 ====================
@@ -509,6 +535,9 @@ public final class GraphVersionStore {
     /**
      * 将 source branch 合并到 target branch。只自动合并三方模型中一侧发生变化的实体；
      * 同一节点/边两侧都发生不一致修改时返回冲突，且不会移动 target head。
+     *
+     * <p>过渡实现：三方快照经引擎解析视图装配后走既有字段级合并；Phase 3 换成
+     * commit 级 replay（只比较两侧相对 merge-base 触碰过的实体）。</p>
      */
     public synchronized GraphMergeResult merge(String targetBranch,
                                                String sourceBranch,
@@ -516,102 +545,59 @@ public final class GraphVersionStore {
                                                String message) {
         requireBranch(targetBranch);
         requireBranch(sourceBranch);
-        String targetHeadId = branches.get(targetBranch);
-        String sourceHeadId = branches.get(sourceBranch);
+        String targetHeadId = resolveRefId(targetBranch);
+        String sourceHeadId = resolveRefId(sourceBranch);
         if (Objects.equals(targetHeadId, sourceHeadId)) {
-            return new GraphMergeResult(false, targetHeadId, commits.get(targetHeadId), Colls.listOf());
+            return new GraphMergeResult(false, targetHeadId, commitHandle(targetHeadId), Colls.listOf());
         }
 
-        Map<String, Integer> targetAncestors = ancestorDistances(targetHeadId);
-        String baseId = closestCommonAncestor(sourceHeadId, targetAncestors);
+        String baseId = newestCommonAncestor(sourceHeadId, targetHeadId);
         if (baseId == null) {
             throw new IllegalStateException("Branches do not have a common ancestor");
         }
         if (Objects.equals(baseId, sourceHeadId)) {
             // source 已经包含 target 的全部历史，执行 fast-forward。
-            branches.put(targetBranch, sourceHeadId);
-            persistHeader();
-            return new GraphMergeResult(true, baseId, commits.get(sourceHeadId), Colls.listOf());
+            try {
+                refStore.put(targetBranch, sourceHeadId);
+            } catch (IOException e) {
+                throw new IllegalStateException("Cannot fast-forward " + targetBranch, e);
+            }
+            return new GraphMergeResult(true, baseId, commitHandle(sourceHeadId), Colls.listOf());
         }
 
-        InMemoryGraphStore base = materializeFlat(baseId);
-        InMemoryGraphStore ours = materializeFlat(targetHeadId);
-        InMemoryGraphStore theirs = materializeFlat(sourceHeadId);
+        InMemoryGraphStore base = resolveToInMemory(baseId);
+        InMemoryGraphStore ours = resolveToInMemory(targetHeadId);
+        InMemoryGraphStore theirs = resolveToInMemory(sourceHeadId);
         MergeState merged = mergeSnapshots(base, ours, theirs);
         if (!merged.conflicts.isEmpty()) {
             return new GraphMergeResult(false, baseId, null, merged.conflicts);
         }
 
         GraphDelta mergeDelta = GraphDelta.between(ours, merged.store).freeze();
-        GraphCommit mergeCommit = createCommit(Colls.listOf(targetHeadId, sourceHeadId), targetBranch, author, message,
-                mergeDelta, merged.store.getNodeCount(), merged.store.getEdgeCount());
-        branches.put(targetBranch, mergeCommit.getId());
-        persistHeader();
+        GraphCommit mergeCommit = createCommitAndAdvance(targetBranch, Colls.listOf(targetHeadId, sourceHeadId),
+                author, message, mergeDelta, merged.store.getNodeCount(), merged.store.getEdgeCount(), null, null);
         return new GraphMergeResult(true, baseId, mergeCommit, Colls.listOf());
     }
 
-    /**
-     * 写事务的提交入口：登记增量和版本链，并把事务自己的覆盖层认领成新 commit 的视图，
-     * 因此提交成本是 O(本次变更量)，与图的规模无关。
-     */
-    synchronized GraphCommit commit(String branch,
-                                    String baseCommitId,
-                                    GraphDelta delta,
-                                    long nodeCount,
-                                    long edgeCount,
-                                    String author,
-                                    String message,
-                                    VersionOverlayStore committedView) {
-        requireBranch(branch);
-        String currentHeadId = branches.get(branch);
-        if (!Objects.equals(currentHeadId, baseCommitId)) {
-            throw new StaleHeadException(
-                    "Branch advanced since transaction started: " + branch
-                            + " (expected " + baseCommitId + ", actual " + currentHeadId + ")");
+    /** 两侧闭包交集里 commitSeq 最新的公共祖先。 */
+    private String newestCommonAncestor(String a, String b) {
+        Set<Long> closureB = ancestry.closureOf(b);
+        String best = null;
+        long bestSeq = Long.MIN_VALUE;
+        for (String candidate : AncestryIndex.lineageToRoot(new CommitGraphView(), a)) {
+            CommitObjectStore.CommitMeta meta = commits.get(candidate);
+            if (meta != null && closureB.contains(meta.commitSeq) && meta.commitSeq > bestSeq) {
+                best = candidate;
+                bestSeq = meta.commitSeq;
+            }
         }
-        GraphCommit commit = createCommit(Colls.listOf(baseCommitId), branch, author, message, delta, nodeCount, edgeCount);
-        branches.put(branch, commit.getId());
-        // 先移动 head 再登记视图：淘汰规则要按"是否还是某个分支的 head"决定谁能被换出。
-        registerCommittedView(commit.getId(), committedView);
-        persistHeader();
-        return commit;
-    }
-
-    /**
-     * 当并发事务提交时，branch head 已被推进，提示调用方放弃或重试。
-     */
-    public static class StaleHeadException extends IllegalStateException {
-        public StaleHeadException(String message) { super(message); }
-    }
-
-    /**
-     * 引用（commit id 或分支名）在仓库里不存在。它与参数写错一样都是 {@link IllegalArgumentException}
-     * 的子类，好让既有 catch 继续生效；控制面据此把"资源不存在"和"服务端故障"分开（404 vs 500）。
-     */
-    public static class UnknownReferenceException extends IllegalArgumentException {
-        public UnknownReferenceException(String message) { super(message); }
-    }
-
-    synchronized long allocateNodeId() {
-        return nextNodeId++;
-    }
-
-    synchronized long allocateEdgeId() {
-        return nextEdgeId++;
-    }
-
-    synchronized void reserveNodeId(long id) {
-        nextNodeId = Math.max(nextNodeId, id + 1);
-    }
-
-    synchronized void reserveEdgeId(long id) {
-        nextEdgeId = Math.max(nextEdgeId, id + 1);
+        return best;
     }
 
     // ==================== 回收 ====================
 
     /**
-     * 回收不再被任何保留分支引用的 commit：删掉它们的增量、版本记录和物化视图。
+     * 回收不再被任何保留分支引用的 commit：删掉它们的 commit object 与索引登记。
      * 保留分支的 head 以及它们的全部祖先都会保留，因此回收后这些分支上的历史视图
      * 仍然可以按 commit 打开。
      *
@@ -619,136 +605,137 @@ public final class GraphVersionStore {
      */
     public synchronized int garbageCollect(String... keepBranches) {
         Set<String> keep = keepBranches == null || keepBranches.length == 0
-                ? new LinkedHashSet<>(branches.keySet())
+                ? new LinkedHashSet<>(listBranches())
                 : new LinkedHashSet<>(Colls.listOf(keepBranches));
         Set<String> reachable = new HashSet<>();
         for (String branch : keep) {
-            String head = branches.get(requireBranch(branch));
-            reachable.addAll(ancestorDistances(head).keySet());
+            String headId = resolveRefId(requireBranch(branch));
+            for (String id : AncestryIndex.lineageToRoot(new CommitGraphView(), headId)) {
+                reachable.add(id);
+            }
+            // merge 双父：闭包沿全部 parents 递归补齐
+            for (Long seq : ancestry.closureOf(headId)) {
+                String id = commitIdBySeq.get(seq);
+                if (id != null) reachable.add(id);
+            }
         }
         List<String> collected = new ArrayList<>();
         for (String id : commits.keySet()) {
             if (!reachable.contains(id)) collected.add(id);
         }
         for (String id : collected) {
-            commits.remove(id);
-            deltas.remove(id);
-            firstParentDepth.remove(id);
-            commitSequenceById.remove(id);
-            views.remove(id);
-            dropVersionRecords(id);
-            deleteCommitObject(id);
+            CommitObjectStore.CommitMeta meta = commits.remove(id);
+            commitIdBySeq.remove(meta.commitSeq);
+            commitHandles.remove(id);
+            try {
+                commitStore.delete(id);
+            } catch (IOException e) {
+                throw new IllegalStateException("Cannot delete commit object " + id, e);
+            }
         }
-        // 指针必须和 commit 一起消失，否则 repository.bin 会引用已删除的对象文件。
-        branches.entrySet().removeIf(entry -> !reachable.contains(entry.getValue()));
+        try {
+            for (Map.Entry<String, String> ref : refStore.allRefs().entrySet()) {
+                if (!reachable.contains(ref.getValue())) {
+                    refStore.remove(ref.getKey());
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot prune branch refs", e);
+        }
         if (!collected.isEmpty()) {
-            persistHeader();
+            ancestry.invalidateAll();
+            try {
+                engine.persistAndForce();
+            } catch (IOException e) {
+                throw new IllegalStateException("Cannot persist after garbage collect", e);
+            }
         }
         return collected.size();
-    }
-
-    private void dropVersionRecords(String commitId) {
-        pruneChain(nodeVersions, commitId);
-        pruneChain(edgeVersions, commitId);
-    }
-
-    private static void pruneChain(Map<Long, List<GraphEntityVersion>> chains, String commitId) {
-        chains.entrySet().removeIf(entry -> {
-            entry.getValue().removeIf(version -> version.getCommitId().equals(commitId));
-            return entry.getValue().isEmpty();
-        });
     }
 
     /** 当前仍可从分支 head 到达的 commit 数。 */
     public synchronized int reachableCommitCount() {
         Set<String> reachable = new HashSet<>();
-        for (String head : branches.values()) {
-            reachable.addAll(ancestorDistances(head).keySet());
+        try {
+            for (String headId : refStore.allRefs().values()) {
+                for (Long seq : ancestry.closureOf(headId)) {
+                    String id = commitIdBySeq.get(seq);
+                    if (id != null) reachable.add(id);
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot compute reachable commits", e);
         }
         return reachable.size();
     }
 
-    // ==================== 内部：提交与版本链 ====================
+    // ==================== 内部：引用解析 ====================
 
-    private GraphCommit createCommit(List<String> parents,
-                                     String branch,
-                                     String author,
-                                     String message,
-                                     GraphDelta delta,
-                                     long nodeCount,
-                                     long edgeCount) {
-        long commitSequence = ++sequence;
-        String id = createCommitId(parents, branch, author, message, commitSequence, nodeCount, edgeCount);
-        GraphCommit commit = new GraphCommit(id, parents, branch, author, message,
-                System.currentTimeMillis(), nodeCount, edgeCount);
-        commits.put(id, commit);
-        deltas.put(id, delta.isFrozen() ? delta : delta.freeze());
-        firstParentDepth.put(id, parents.isEmpty() ? 0 : depthOf(parents.get(0)) + 1);
-        commitSequenceById.put(id, commitSequence);
-        recordVersions(commit, id, commitSequence, delta);
-        persistCommitObject(commit, delta);
-        if (eagerCheckpoints && isCheckpoint(id)) {
-            materializeFlat(id);
-        }
-        return commit;
-    }
-
-    private int depthOf(String commitId) {
-        Integer depth = firstParentDepth.get(commitId);
-        return depth == null ? 0 : depth;
-    }
-
-    private void recordVersions(GraphCommit commit, String id, long commitSequence, GraphDelta delta) {
-        for (Node node : delta.nodeUpserts()) {
-            nodeVersions.computeIfAbsent(node.getId(), ignored -> new ArrayList<>())
-                    .add(new GraphEntityVersion(node.getId(), GraphEntityVersion.Kind.UPSERT, id,
-                            commitSequence, commit.getTimestampEpochMillis(), node, null));
-        }
-        for (long nodeId : delta.nodeDeletes()) {
-            nodeVersions.computeIfAbsent(nodeId, ignored -> new ArrayList<>())
-                    .add(new GraphEntityVersion(nodeId, GraphEntityVersion.Kind.DELETE, id,
-                            commitSequence, commit.getTimestampEpochMillis(), null, null));
-        }
-        for (Edge edge : delta.edgeUpserts()) {
-            edgeVersions.computeIfAbsent(edge.getId(), ignored -> new ArrayList<>())
-                    .add(new GraphEntityVersion(edge.getId(), GraphEntityVersion.Kind.UPSERT, id,
-                            commitSequence, commit.getTimestampEpochMillis(), null, edge));
-        }
-        for (long edgeId : delta.edgeDeletes()) {
-            edgeVersions.computeIfAbsent(edgeId, ignored -> new ArrayList<>())
-                    .add(new GraphEntityVersion(edgeId, GraphEntityVersion.Kind.DELETE, id,
-                            commitSequence, commit.getTimestampEpochMillis(), null, null));
-        }
-    }
-
-    private String createCommitId(List<String> parents,
-                                  String branch,
-                                  String author,
-                                  String message,
-                                  long commitSequence,
-                                  long nodeCount,
-                                  long edgeCount) {
-        String payload = String.join("\n", parents) + "\n" + String.join("\n",
-                branch == null ? "" : branch,
-                author == null ? "" : author,
-                message == null ? "" : message,
-                Long.toString(commitSequence),
-                Long.toString(nodeCount),
-                Long.toString(edgeCount));
+    private String resolveRefId(String ref) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(payload.getBytes(StandardCharsets.UTF_8));
-            StringBuilder result = new StringBuilder(hash.length * 2);
-            for (byte item : hash) {
-                result.append(String.format("%02x", item));
+            String headId = refStore.get(ref);
+            if (headId != null) {
+                return headId;
             }
-            return result.substring(0, 40);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("JDK does not provide SHA-256", e);
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot read ref " + ref, e);
+        }
+        return requireCommitId(ref, "commit=" + ref);
+    }
+
+    private String requireBranch(String branch) {
+        validateBranchName(branch);
+        try {
+            if (refStore.get(branch) == null) {
+                throw new UnknownReferenceException("Unknown branch: " + branch);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot read branch " + branch, e);
+        }
+        return branch;
+    }
+
+    private CommitObjectStore.CommitMeta requireCommit(String id, String description) {
+        CommitObjectStore.CommitMeta meta = commits.get(id);
+        if (meta == null) {
+            throw new UnknownReferenceException("Unknown " + description);
+        }
+        return meta;
+    }
+
+    private String requireCommitId(String id, String description) {
+        requireCommit(id, description);
+        return id;
+    }
+
+    private GraphCommit commitHandle(String id) {
+        GraphCommit cached = commitHandles.get(id);
+        if (cached != null) {
+            return cached;
+        }
+        CommitObjectStore.CommitMeta meta = requireCommit(id, "commit=" + id);
+        GraphCommit handle = new GraphCommit(meta.id, meta.parents, meta.branch, meta.author, meta.message,
+                meta.timestampEpochMillis, meta.nodeCount, meta.edgeCount);
+        commitHandles.put(id, handle);
+        return handle;
+    }
+
+    private static void validateBranchName(String branch) {
+        if (branch == null || branch.trim().isEmpty() || !branch.matches("[A-Za-z0-9._/-]+")) {
+            throw new IllegalArgumentException("Invalid branch name: " + branch);
         }
     }
 
-    // ==================== 内部：三方合并 ====================
+    private static void moveIntoPlace(Path temp, Path target) throws IOException {
+        try {
+            Files.move(temp, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+            Files.move(temp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    // ==================== 内部：三方合并（过渡实现） ====================
 
     private MergeState mergeSnapshots(InMemoryGraphStore base,
                                       InMemoryGraphStore ours,
@@ -936,273 +923,17 @@ public final class GraphVersionStore {
         return result;
     }
 
-    private Map<String, Integer> ancestorDistances(String startId) {
-        Map<String, Integer> distances = new LinkedHashMap<>();
-        Deque<String> queue = new ArrayDeque<>();
-        Deque<Integer> depth = new ArrayDeque<>();
-        queue.add(startId);
-        depth.add(0);
-        while (!queue.isEmpty()) {
-            String id = queue.removeFirst();
-            int currentDepth = depth.removeFirst();
-            Integer knownDepth = distances.putIfAbsent(id, currentDepth);
-            if (knownDepth != null && knownDepth <= currentDepth) continue;
-            GraphCommit commit = commits.get(id);
-            if (commit == null) continue;
-            for (String parent : commit.getParents()) {
-                queue.addLast(parent);
-                depth.addLast(currentDepth + 1);
-            }
-        }
-        return distances;
-    }
+    private static final class MergeState {
+        private final InMemoryGraphStore store;
+        private final List<String> conflicts;
 
-    private String closestCommonAncestor(String sourceId, Map<String, Integer> targetAncestors) {
-        Map<String, Integer> sourceAncestors = ancestorDistances(sourceId);
-        return sourceAncestors.entrySet().stream()
-                .filter(entry -> targetAncestors.containsKey(entry.getKey()))
-                .min(Comparator.comparingInt(entry -> entry.getValue() + targetAncestors.get(entry.getKey())))
-                .map(Map.Entry::getKey)
-                .orElse(null);
-    }
-
-    // ==================== 内部：落盘 ====================
-
-    private Path objectsDirectory() {
-        return storageDirectory.resolve("objects");
-    }
-
-    private Path commitObjectPath(String commitId) {
-        return objectsDirectory().resolve(commitId + ".bin");
-    }
-
-    private void persistCommitObject(GraphCommit commit, GraphDelta delta) {
-        if (storageDirectory == null) {
-            return;
-        }
-        Path temp = commitObjectPath(commit.getId() + ".tmp");
-        try {
-            Files.createDirectories(objectsDirectory());
-            try (OutputStream output = Files.newOutputStream(temp,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                 DataOutputStream out = new DataOutputStream(output)) {
-                out.writeInt(GraphCodec.STORAGE_MAGIC);
-                out.writeInt(GraphCodec.STORAGE_VERSION);
-                GraphCodec.writeString(out, commit.getId());
-                out.writeInt(commit.getParents().size());
-                for (String parent : commit.getParents()) GraphCodec.writeString(out, parent);
-                GraphCodec.writeString(out, commit.getBranch());
-                GraphCodec.writeString(out, commit.getAuthor());
-                GraphCodec.writeString(out, commit.getMessage());
-                out.writeLong(commit.getTimestampEpochMillis());
-                out.writeLong(commit.getNodeCount());
-                out.writeLong(commit.getEdgeCount());
-                out.writeLong(commitSequenceById.getOrDefault(commit.getId(), 0L));
-                delta.writeTo(out);
-            }
-            moveIntoPlace(temp, commitObjectPath(commit.getId()));
-        } catch (IOException e) {
-            throw new IllegalStateException("Cannot persist z-graph commit: " + commit.getId(), e);
+        private MergeState(InMemoryGraphStore store, List<String> conflicts) {
+            this.store = store;
+            this.conflicts = conflicts;
         }
     }
 
-    private void deleteCommitObject(String commitId) {
-        if (storageDirectory == null) {
-            return;
-        }
-        try {
-            Files.deleteIfExists(commitObjectPath(commitId));
-        } catch (IOException e) {
-            throw new IllegalStateException("Cannot delete z-graph commit object: " + commitId, e);
-        }
-    }
-
-    private void persistHeader() {
-        if (storageDirectory == null) {
-            return;
-        }
-        Path stateFile = storageDirectory.resolve("repository.bin");
-        Path tempFile = storageDirectory.resolve("repository.bin.tmp");
-        try {
-            Files.createDirectories(storageDirectory);
-            try (OutputStream output = Files.newOutputStream(tempFile,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                 DataOutputStream out = new DataOutputStream(output)) {
-                out.writeInt(GraphCodec.STORAGE_MAGIC);
-                out.writeInt(GraphCodec.STORAGE_VERSION);
-                out.writeLong(sequence);
-                out.writeLong(nextNodeId);
-                out.writeLong(nextEdgeId);
-                out.writeInt(branches.size());
-                for (Map.Entry<String, String> branch : branches.entrySet()) {
-                    GraphCodec.writeString(out, branch.getKey());
-                    GraphCodec.writeString(out, branch.getValue());
-                }
-                out.writeInt(commits.size());
-                for (String commitId : commits.keySet()) GraphCodec.writeString(out, commitId);
-            }
-            moveIntoPlace(tempFile, stateFile);
-        } catch (IOException e) {
-            throw new IllegalStateException("Cannot persist z-graph repository: " + stateFile, e);
-        }
-    }
-
-    private static void moveIntoPlace(Path temp, Path target) throws IOException {
-        try {
-            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException ignored) {
-            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
-        }
-    }
-
-    private boolean loadState() {
-        Path stateFile = storageDirectory.resolve("repository.bin");
-        if (!Files.exists(stateFile)) {
-            return false;
-        }
-        List<String> commitIds = new ArrayList<>();
-        try (InputStream input = Files.newInputStream(stateFile);
-             DataInputStream in = new DataInputStream(input)) {
-            int magic = in.readInt();
-            int version = in.readInt();
-            if (magic != GraphCodec.STORAGE_MAGIC) {
-                throw new IllegalStateException("Unsupported z-graph repository format: " + stateFile);
-            }
-            if (version < GraphCodec.LEGACY_STORAGE_VERSION || version > GraphCodec.STORAGE_VERSION) {
-                throw new IllegalStateException("Unsupported z-graph repository version: " + version);
-            }
-            if (version < GraphCodec.STORAGE_VERSION) {
-                return loadLegacyRepository(in, version);
-            }
-            sequence = in.readLong();
-            nextNodeId = in.readLong();
-            nextEdgeId = in.readLong();
-
-            int branchCount = in.readInt();
-            for (int i = 0; i < branchCount; i++) {
-                branches.put(GraphCodec.readString(in), GraphCodec.readString(in));
-            }
-            int commitCount = in.readInt();
-            for (int i = 0; i < commitCount; i++) commitIds.add(GraphCodec.readString(in));
-        } catch (IOException e) {
-            throw new IllegalStateException("Cannot load z-graph repository: " + stateFile, e);
-        }
-
-        for (String commitId : commitIds) {
-            Path object = commitObjectPath(commitId);
-            if (!Files.exists(object)) {
-                throw new IllegalStateException("Missing z-graph commit object: " + commitId);
-            }
-            try (InputStream input = Files.newInputStream(object);
-                 DataInputStream in = new DataInputStream(input)) {
-                readCommitObject(in);
-            } catch (IOException e) {
-                throw new IllegalStateException("Cannot load z-graph commit object: " + object, e);
-            }
-        }
-        rebuildDependentState();
-        return !commits.isEmpty() && !branches.isEmpty();
-    }
-
-    private void readCommitObject(DataInputStream in) throws IOException {
-        int magic = in.readInt();
-        int version = in.readInt();
-        if (magic != GraphCodec.STORAGE_MAGIC || version != GraphCodec.STORAGE_VERSION) {
-            throw new IOException("Unexpected z-graph commit object header");
-        }
-        String id = GraphCodec.readString(in);
-        int parentCount = in.readInt();
-        List<String> parents = new ArrayList<>(parentCount);
-        for (int i = 0; i < parentCount; i++) parents.add(GraphCodec.readString(in));
-        String branch = GraphCodec.readString(in);
-        String author = GraphCodec.readString(in);
-        String message = GraphCodec.readString(in);
-        long timestamp = in.readLong();
-        long nodeCount = in.readLong();
-        long edgeCount = in.readLong();
-        long commitSequence = in.readLong();
-        GraphDelta delta = GraphDelta.readFrom(in);
-
-        GraphCommit commit = new GraphCommit(id, parents, branch, author, message, timestamp, nodeCount, edgeCount);
-        commits.put(id, commit);
-        deltas.put(id, delta);
-        commitSequenceById.put(id, commitSequence);
-    }
-
-    /**
-     * 加载路径补齐第一父深度和实体版本链。commit 对象里的序号是创建顺序，
-     * 按它升序重放即可保证父提交先于子提交、版本链按时间排列。
-     */
-    private void rebuildDependentState() {
-        List<GraphCommit> ordered = new ArrayList<>(commits.values());
-        ordered.sort(Comparator.comparingLong(commit -> commitSequenceById.getOrDefault(commit.getId(), 0L)));
-        for (GraphCommit commit : ordered) {
-            List<String> parents = commit.getParents();
-            firstParentDepth.put(commit.getId(), parents.isEmpty() ? 0 : depthOf(parents.get(0)) + 1);
-            GraphDelta delta = deltas.get(commit.getId());
-            if (delta != null) {
-                recordVersions(commit, commit.getId(),
-                        commitSequenceById.getOrDefault(commit.getId(), 0L), delta);
-            }
-        }
-    }
-
-    // ==================== 内部：旧版整图仓库 ====================
-
-    private boolean loadLegacyRepository(DataInputStream in, int version) throws IOException {
-        sequence = in.readLong();
-        nextNodeId = in.readLong();
-        nextEdgeId = in.readLong();
-
-        int commitCount = in.readInt();
-        List<GraphCommit> legacyCommits = new ArrayList<>(commitCount);
-        for (int i = 0; i < commitCount; i++) {
-            GraphCommit commit = readLegacyCommit(in);
-            legacyCommits.add(commit);
-            commits.put(commit.getId(), commit);
-        }
-        int branchCount = in.readInt();
-        for (int i = 0; i < branchCount; i++) {
-            branches.put(GraphCodec.readString(in), GraphCodec.readString(in));
-        }
-        Map<String, InMemoryGraphStore> snapshots = new LinkedHashMap<>();
-        int snapshotCount = in.readInt();
-        for (int i = 0; i < snapshotCount; i++) {
-            snapshots.put(GraphCodec.readString(in), readLegacySnapshot(in, version));
-        }
-
-        // 旧格式按创建顺序内联保存，因此第 i 个提交的序号就是 i+1。
-        for (int i = 0; i < legacyCommits.size(); i++) {
-            GraphCommit commit = legacyCommits.get(i);
-            InMemoryGraphStore snapshot = snapshots.get(commit.getId());
-            if (snapshot == null) {
-                throw new IllegalStateException("Legacy repository is missing snapshot " + commit.getId());
-            }
-            GraphCommit parent = commit.getParents().isEmpty() ? null : commits.get(commit.getParents().get(0));
-            InMemoryGraphStore parentSnapshot = parent == null ? EMPTY_VIEW : snapshots.get(parent.getId());
-            if (parentSnapshot == null) {
-                throw new IllegalStateException("Legacy repository is missing snapshot "
-                        + commit.getParents().get(0));
-            }
-            commitSequenceById.put(commit.getId(), i + 1L);
-            deltas.put(commit.getId(), GraphDelta.between(parentSnapshot, snapshot).freeze());
-        }
-        rebuildDependentState();
-        persistHeader();
-        for (Map.Entry<String, GraphDelta> entry : deltas.entrySet()) {
-            persistCommitObject(commits.get(entry.getKey()), entry.getValue());
-        }
-        return !commits.isEmpty() && !branches.isEmpty();
-    }
-
-    private static GraphCommit readLegacyCommit(DataInputStream in) throws IOException {
-        String id = GraphCodec.readString(in);
-        int parentCount = in.readInt();
-        List<String> parents = new ArrayList<>(parentCount);
-        for (int i = 0; i < parentCount; i++) parents.add(GraphCodec.readString(in));
-        return new GraphCommit(id, parents, GraphCodec.readString(in), GraphCodec.readString(in),
-                GraphCodec.readString(in), in.readLong(), in.readLong(), in.readLong());
-    }
+    // ==================== 内部：旧版整图快照读取 ====================
 
     /**
      * 读取旧格式（v2/v3）的内联整图快照。v3 起尾部带索引之外的 tag/edgeType schema。
@@ -1213,7 +944,7 @@ public final class GraphVersionStore {
         int nodeCount = in.readInt();
         for (int i = 0; i < nodeCount; i++) {
             long id = in.readLong();
-            List<String> labels = GraphDelta.readStringList(in);
+            List<String> labels = readStringList(in);
             graph.addNode(id, labels, GraphCodec.readMap(in));
         }
         int edgeCount = in.readInt();
@@ -1231,45 +962,42 @@ public final class GraphVersionStore {
         if (version >= 3) {
             int tagCount = in.readInt();
             for (int i = 0; i < tagCount; i++) {
-                graph.putTagSchema(GraphDelta.readTagSchema(in));
+                graph.putTagSchema(readLegacyTagSchema(in));
             }
             int edgeTypeCount = in.readInt();
             for (int i = 0; i < edgeTypeCount; i++) {
-                graph.putEdgeTypeSchema(GraphDelta.readEdgeTypeSchema(in));
+                graph.putEdgeTypeSchema(readLegacyEdgeTypeSchema(in));
             }
         }
         return graph;
     }
 
-    private static final class MergeState {
-        private final InMemoryGraphStore store;
-        private final List<String> conflicts;
-
-        private MergeState(InMemoryGraphStore store, List<String> conflicts) {
-            this.store = store;
-            this.conflicts = conflicts;
-        }
+    private static List<String> readStringList(DataInputStream in) throws IOException {
+        int count = in.readInt();
+        List<String> values = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) values.add(GraphCodec.readString(in));
+        return values;
     }
 
-    private GraphCommit requireCommit(String id, String description) {
-        GraphCommit commit = commits.get(id);
-        if (commit == null) {
-            throw new UnknownReferenceException("Unknown " + description);
+    private static TagSchema readLegacyTagSchema(DataInputStream in) throws IOException {
+        String name = GraphCodec.readString(in);
+        int fieldCount = in.readInt();
+        List<TagSchema.Field> fields = new ArrayList<>(fieldCount);
+        for (int i = 0; i < fieldCount; i++) {
+            fields.add(new TagSchema.Field(GraphCodec.readString(in),
+                    TagSchema.DataType.valueOf(GraphCodec.readString(in)), in.readBoolean()));
         }
-        return commit;
+        return new TagSchema(name, fields);
     }
 
-    private String requireBranch(String branch) {
-        validateBranchName(branch);
-        if (!branches.containsKey(branch)) {
-            throw new UnknownReferenceException("Unknown branch: " + branch);
+    private static EdgeTypeSchema readLegacyEdgeTypeSchema(DataInputStream in) throws IOException {
+        String name = GraphCodec.readString(in);
+        int fieldCount = in.readInt();
+        List<TagSchema.Field> fields = new ArrayList<>(fieldCount);
+        for (int i = 0; i < fieldCount; i++) {
+            fields.add(new TagSchema.Field(GraphCodec.readString(in),
+                    TagSchema.DataType.valueOf(GraphCodec.readString(in)), in.readBoolean()));
         }
-        return branch;
-    }
-
-    private static void validateBranchName(String branch) {
-        if (branch == null || branch.trim().isEmpty() || !branch.matches("[A-Za-z0-9._/-]+")) {
-            throw new IllegalArgumentException("Invalid branch name: " + branch);
-        }
+        return new EdgeTypeSchema(name, fields);
     }
 }

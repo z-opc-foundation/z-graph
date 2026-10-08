@@ -83,8 +83,9 @@ class ZGraphAutoConfigurationTest {
                     GraphWriteTransaction tx = store.beginWrite("main");
                     tx.addNode("Person", Colls.mapOf("name", "Starter Alice"));
                     tx.commit("test", "starter write");
-                    assertTrue(Files.isDirectory(dir.resolve("objects")),
-                            "data-dir 配了却没落盘，说明这个属性没人读");
+                    assertTrue(Files.isDirectory(dir.resolve("store"))
+                                    && Files.isDirectory(dir.resolve("commits")),
+                            "data-dir 配了却没落盘（v5 布局 = store/ + commits/ + refs/）");
                 });
 
         assertFalse(stillListening(boundPort[0]),
@@ -92,20 +93,9 @@ class ZGraphAutoConfigurationTest {
     }
 
     @Test
-    void mvccKnobsComeFromPropertiesAndDefaultToLibraryConstants() {
-        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0")
-                .run(ctx -> {
-                    Map<String, Object> stats = ctx.getBean(GraphVersionStore.class).versionStats();
-                    assertEquals(GraphVersionStore.DEFAULT_CHECKPOINT_INTERVAL,
-                            number(stats, "checkpointInterval"), "starter 自己抄了一份默认值，没走库里的常量");
-                    assertEquals(GraphVersionStore.DEFAULT_MAX_RETAINED_VIEWS,
-                            number(stats, "maxRetainedViews"));
-                    assertEquals(GraphVersionStore.DEFAULT_RETAINED_WHOLE_GRAPH_VIEWS,
-                            number(stats, "retainedWholeGraphViews"));
-                    assertEquals(GraphVersionStore.DEFAULT_VIEW_LAYER_LIMIT,
-                            number(stats, "viewLayerLimit"));
-                });
-
+    void legacyViewCacheKnobsAreGoneAndStatsUseEngineFields() {
+        // 视图缓存已亡：四个旧配置键即使被塞进来也只是 Spring 绑定不到的孤儿，
+        // 上下文必须照常起，versionStats 走引擎新观测面。
         runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0",
                         "z.graph.checkpoint-interval=3",
                         "z.graph.max-retained-views=5",
@@ -113,10 +103,10 @@ class ZGraphAutoConfigurationTest {
                         "z.graph.view-layer-limit=9")
                 .run(ctx -> {
                     Map<String, Object> stats = ctx.getBean(GraphVersionStore.class).versionStats();
-                    assertEquals(3, number(stats, "checkpointInterval"));
-                    assertEquals(5, number(stats, "maxRetainedViews"));
-                    assertEquals(7, number(stats, "retainedWholeGraphViews"));
-                    assertEquals(9, number(stats, "viewLayerLimit"));
+                    assertEquals(1L, number(stats, "commitCount"));
+                    assertTrue(stats.containsKey("versionRecordCount"));
+                    assertTrue(stats.containsKey("versionPayloadBytes"));
+                    assertEquals(0L, number(stats, "versionRecordCount"));
                 });
     }
 

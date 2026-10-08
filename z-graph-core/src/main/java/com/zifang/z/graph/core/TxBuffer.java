@@ -22,15 +22,16 @@ import java.util.TreeSet;
 import com.zifang.z.graph.api.Colls;
 
 /**
- * 写事务的读改写覆盖层（MVCC 里的 private version）。
+ * 写事务缓冲（MVCC 里的 private version）。
  *
- * <p>事务不再深拷贝整个分支 head：基底是上一个 commit 的不可读物化视图，
- * 本层只登记被触碰过的实体，读时把两层合并。因此 {@code beginWrite} 是 O(1)，
- * 而提交时登记出来的 {@link GraphDelta} 就是这个 commit 的全部数据。</p>
+ * <p>事务不拷贝任何图状态：基底是 beginWrite 时分支 head 的 {@code RefViewGraphStore}
+ * （引擎按可见性即时解析），本层只登记被触碰过的实体，读时两层合并。因此
+ * {@code beginWrite} 是 O(1)，提交时登记出的 {@link GraphDelta} 就是这个 commit
+ * 的全部指令集。缓冲随事务生灭，<b>永不被登记为任何 commit 的视图</b>。</p>
  *
- * <p>所有对外暴露的实体都是副本，避免调用方顺着句柄把不可变基底改脏。</p>
+ * <p>所有对外暴露的实体都是副本，避免调用方顺着句柄把基底改脏。</p>
  */
-final class VersionOverlayStore implements GraphStore {
+final class TxBuffer implements GraphStore {
 
     /** 实体 ID 分配器，由版本仓库统一持有以保证跨分支不重号。 */
     interface IdAllocator {
@@ -52,7 +53,7 @@ final class VersionOverlayStore implements GraphStore {
     private long nodeCount;
     private long edgeCount;
 
-    VersionOverlayStore(GraphStore base, IdAllocator ids) {
+    TxBuffer(GraphStore base, IdAllocator ids) {
         this.base = Objects.requireNonNull(base, "base");
         this.ids = Objects.requireNonNull(ids, "ids");
         this.nodeCount = base.getNodeCount();
@@ -63,33 +64,8 @@ final class VersionOverlayStore implements GraphStore {
         return base;
     }
 
-    /**
-     * 覆盖层套叠层数。提交后的覆盖层会直接充当该 commit 的物化视图，层数越深
-     * 读穿透越贵，仓库据此决定何时摊平一次。平铺视图记作 0 层。
-     */
-    int viewDepth() {
-        return 1 + (base instanceof VersionOverlayStore ? ((VersionOverlayStore) base).viewDepth() : 0);
-    }
-
     GraphDelta pendingDelta() {
         return pending;
-    }
-
-    /**
-     * 本层自己登记的实体数。基底由它自己的缓存条目计费，套叠视图不能按合并后的
-     * 全图规模计费，否则内存预算会把"共享基底的薄层"当成一份整图。
-     */
-    long ownEntityCount() {
-        return pending.nodeUpserts().size() + pending.nodeDeletes().size()
-                + pending.edgeUpserts().size() + pending.edgeDeletes().size();
-    }
-
-    /** 缓存视图计费：平铺视图按整图规模，覆盖层只按本层增量。 */
-    static long billedEntities(GraphStore view) {
-        if (view instanceof VersionOverlayStore) {
-            return ((VersionOverlayStore) view).ownEntityCount();
-        }
-        return view.getNodeCount() + view.getEdgeCount();
     }
 
     // ==================== 节点 ====================
@@ -604,11 +580,13 @@ final class VersionOverlayStore implements GraphStore {
         return result;
     }
 
-    /** 基底可能是平铺视图，也可能是上一个 commit 的覆盖层，两者都要能取出索引定义。 */
+    /** 基底的已生效索引定义：走 GraphStore 能力方法，任何基底实现都适用。 */
     private Set<InMemoryGraphStore.IndexDefinition> baseIndexDefinitions() {
-        if (base instanceof InMemoryGraphStore) return ((InMemoryGraphStore) base).indexDefinitions();
-        if (base instanceof VersionOverlayStore) return ((VersionOverlayStore) base).indexDefinitions();
-        return Colls.setOf();
+        Set<InMemoryGraphStore.IndexDefinition> result = new LinkedHashSet<>();
+        for (List<String> pair : base.getPropertyIndexes()) {
+            result.add(new InMemoryGraphStore.IndexDefinition(pair.get(0), pair.get(1)));
+        }
+        return result;
     }
 
     @Override

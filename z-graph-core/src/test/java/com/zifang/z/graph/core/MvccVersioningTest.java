@@ -183,14 +183,11 @@ class MvccVersioningTest {
         }
 
         Map<String, Object> stats = repository.versionStats();
-        // 40 次提交各写 1 个节点，加上 seed 阶段的 2000 个。
-        assertEquals(2040L, stat(stats, "retainedDeltaEntities"));
-        assertEquals(0L, stat(stats, "retainedDeltaDeletes"));
+        // 40 次提交各写 1 个节点，加上 seed 阶段的 2000 个；每条指令一条版本记录。
+        assertEquals(2040L, stat(stats, "versionRecordCount"));
         assertEquals(42L, stat(stats, "commitCount"));
-        assertEquals(2040L, stat(stats, "nodeVersionRecords"));
-        assertEquals(2040L, stat(stats, "versionedNodeCount"));
         // 整图副本方案的量级下界：41 × 2000，比实际留存量高两个数量级。
-        assertTrue(41L * graphSize > 20 * stat(stats, "retainedDeltaEntities"));
+        assertTrue(41L * graphSize > 20 * stat(stats, "versionRecordCount"));
 
         // 更硬的证据：再多提交 60 次空事务，留存量必须一动不动。
         for (int i = 0; i < 60; i++) {
@@ -198,8 +195,7 @@ class MvccVersioningTest {
         }
         Map<String, Object> afterEmpty = repository.versionStats();
         assertEquals(102L, stat(afterEmpty, "commitCount"));
-        assertEquals(2040L, stat(afterEmpty, "retainedDeltaEntities"));
-        assertEquals(2040L, stat(afterEmpty, "nodeVersionRecords"));
+        assertEquals(2040L, stat(afterEmpty, "versionRecordCount"));
     }
 
     @Test
@@ -252,15 +248,11 @@ class MvccVersioningTest {
     }
 
     @Test
-    void longDeltaChainsReplayToTheSameViewAsFrequentCheckpoints() {
-        // 这一支要当"全都留在缓存里"的对照臂，所以把驻留份数开到盖过链长；
-        // 默认档只留 4 份整图，两支都会靠回放，比较就失去意义了。
-        GraphVersionStore frequent = new GraphVersionStore()
-                .withCheckpointInterval(1)
-                .withRetainedWholeGraphViews(128);
-        GraphVersionStore sparse = new GraphVersionStore().withCheckpointInterval(1000)
-                .withEagerCheckpoints(false)
-                .withMaxRetainedViews(1);
+    void longDeltaChainsReplayDeterministicallyAcrossEngines() {
+        // 两个独立仓库跑同一串指令集，逐步比对渲染必须逐字一致 ——
+        // 解析结果只由 commit 图决定，与仓库实例无关。
+        GraphVersionStore frequent = new GraphVersionStore();
+        GraphVersionStore sparse = new GraphVersionStore();
 
         List<String> frequentCommits = new ArrayList<>();
         List<String> sparseCommits = new ArrayList<>();
@@ -287,11 +279,6 @@ class MvccVersioningTest {
             assertEquals(expected, render(sparse.checkout(sparseCommits.get(i)).getStore()),
                     "view diverges at chain position " + i);
         }
-        // 两侧的缓存策略必须真的不同，否则上面的相等比较只是拿同一份缓存自证。
-        long sparseViews = stat(sparse.versionStats(), "materializedViews");
-        long frequentViews = stat(frequent.versionStats(), "materializedViews");
-        assertTrue(frequentViews >= 32, "间隔 1 应驻留全部视图，实际 " + frequentViews);
-        assertTrue(sparseViews < 16, "稀疏配置必须靠回放而非缓存，实际驻留 " + sparseViews);
         assertTrue(sparse.reachableCommitCount() > 30);
     }
 
@@ -311,10 +298,6 @@ class MvccVersioningTest {
             chain.add(write.commit("editor", "bump " + i).getId());
             expectedAges.add(200 + i);
         }
-        // 提交后 head 视图必须还是套叠的覆盖层。每次提交都摊平成整图副本就是这个断言要抓的回归。
-        long layers = stat(repository.versionStats(), "maxViewLayers");
-        assertTrue(layers >= 3, "head 视图应当仍在套叠，实际最深 " + layers + " 层");
-
         GraphWriteTransaction indexed = repository.beginWrite("main");
         indexed.createPropertyIndex("Person", "name");
         chain.add(indexed.commit("editor", "index").getId());
@@ -335,75 +318,13 @@ class MvccVersioningTest {
             assertEquals(expectedAges.get(i), atCommit.get("age"), "view diverges at position " + i);
         }
 
-        // 层数封顶：超过上限必须摊平一次，否则读要穿透任意深的链。
+        // 深链末端仍然精确：80+ 次提交后 head 读值必须正确（引擎沿链解析，无缓存捷径）。
         for (int i = 0; i < 60; i++) {
             GraphWriteTransaction write = repository.beginWrite("main");
             write.updateNode(target, Colls.mapOf("age", 400 + i));
             write.commit("torture", "depth " + i);
         }
-        long bounded = stat(repository.versionStats(), "maxViewLayers");
-        assertTrue(bounded <= GraphVersionStore.DEFAULT_VIEW_LAYER_LIMIT,
-                "层数封顶失效，最深 " + bounded + " 层");
         assertEquals(459, repository.checkoutBranch("main").getStore().getNode(target).get("age"));
-    }
-
-    @Test
-    void viewBudgetScalesWithGraphSizeAndStillEvictsColdViews() {
-        // 检查点间隔取 1：每次提交都摊平成整图副本，预算才有东西可淘汰
-        // （套叠的薄层只按本层增量计费，本来就很便宜）。
-        GraphVersionStore repository = new GraphVersionStore()
-                .withRetainedWholeGraphViews(2)
-                .withCheckpointInterval(1)
-                .withEagerCheckpoints(false);
-        GraphCommit seeded = seed(repository, 300);
-        long target = onlyNodeId(repository.checkout(seeded.getId()), "P7");
-        List<String> chain = new ArrayList<>();
-        chain.add(seeded.getId());
-        for (int i = 0; i < 20; i++) {
-            GraphWriteTransaction write = repository.beginWrite("main");
-            write.updateNode(target, Colls.mapOf("age", 500 + i));
-            chain.add(write.commit("mem", "bump " + i).getId());
-        }
-
-        // 只按数量封顶的话这里会驻留 21 份 300 节点的整图；预算必须把它压住。
-        Map<String, Object> stats = repository.versionStats();
-        assertEquals(300, stat(stats, "wholeGraphWidth"));
-        assertEquals(600, stat(stats, "retainedViewEntityBudget"));
-        assertTrue(stat(stats, "retainedViewEntities") <= 600,
-                "驻留实体 " + stat(stats, "retainedViewEntities") + " 未受 2 份整图的预算约束");
-        assertTrue(stat(stats, "materializedViews") < 21);
-        // 换份数 ⇒ 预算同步换算：证明这个数真是按图规模算出来的，不是另一处硬编码常量。
-        repository.withRetainedWholeGraphViews(5);
-        assertEquals(1_500, stat(repository.versionStats(), "retainedViewEntityBudget"));
-        // 淘汰只影响快慢：淘汰掉的 commit 仍然要能回放成当时的视图。
-        assertEquals(500, repository.checkout(chain.get(1)).getStore().getNode(target).get("age"));
-        assertEquals(519, repository.checkout(chain.get(20)).getStore().getNode(target).get("age"));
-        assertEquals(300, repository.checkout(chain.get(0)).getStore().getNodeCount());
-        // head 视图不参与淘汰，否则下一次 beginWrite 又要回放整图。
-        assertEquals(519, repository.beginWrite("main").getNode(target).get("age"));
-    }
-
-    @Test
-    void defaultBudgetKeepsAHistoricalViewResidentAcrossOtherReads() {
-        // 1.0.4 及以前的默认预算是"20 万实体"这个绝对常量，比一张 20 万节点的图的视图还小，
-        // 于是刚物化的历史视图会在同一次 registerView 里被自己挤掉，复读毫无收益（S8 实测）。
-        // 按份数定预算之后，读别的 commit 不该把刚物化的那份挤出去。
-        GraphVersionStore repository = new GraphVersionStore();
-        GraphCommit seeded = seed(repository, 400);
-        List<String> chain = new ArrayList<>();
-        chain.add(seeded.getId());
-        for (int i = 0; i < 12; i++) {
-            GraphWriteTransaction write = repository.beginWrite("main");
-            write.addNode("Audit", Colls.mapOf("name", "a" + i));
-            chain.add(write.commit("mem", "step " + i).getId());
-        }
-
-        InMemoryGraphStore early = repository.materializeView(chain.get(2));
-        repository.materializeView(chain.get(7));
-        // 阳性对照：不同 commit 必然是不同实例，否则下面那句 assertSame 会因为"永远同一个"而假绿。
-        assertNotSame(early, repository.materializeView(chain.get(11)));
-        assertSame(early, repository.materializeView(chain.get(2)),
-                "默认档下读别的 commit 就把这份历史视图淘掉了，等于预算小于一份整图");
     }
 
     @Test
@@ -519,8 +440,8 @@ class MvccVersioningTest {
         // 保留分支的历史视图在回收后仍然完整可读。
         List<GraphCommit> mainLog = repository.log("main");
         assertEquals(2, mainLog.size());
-        assertEquals(5, repository.materializeView(mainLog.get(0).getId()).getNodeCount());
-        assertEquals(0, repository.materializeView(mainLog.get(1).getId()).getNodeCount());
+        assertEquals(5, repository.checkout(mainLog.get(0).getId()).getStore().getNodeCount());
+        assertEquals(0, repository.checkout(mainLog.get(1).getId()).getStore().getNodeCount());
 
         // 回收也必须能在重启后成立。
         GraphVersionStore reopened = new GraphVersionStore(directory);
@@ -548,11 +469,11 @@ class MvccVersioningTest {
         assertNotNull(repository.checkout(withSchema.getId()).getTagSchema("Person"));
         assertNull(repository.checkout(base.getId()).getTagSchema("Person"));
 
-        // 索引定义是版本化的，值倒排必须在物化视图上真的建好，而不是只有定义。
-        InMemoryGraphStore indexedView = repository.materializeView(withSchema.getId());
+        // 索引定义是版本化的，checkout 视图上按它查必须真的命中，而不是只有定义。
+        GraphStore indexedView = repository.checkout(withSchema.getId()).getStore();
         assertTrue(indexedView.hasPropertyIndex("Person", "age"));
         assertEquals(Colls.listOf(1L), indexedView.findNodesByProperty("Person", "age", 21));
-        assertEquals(Colls.listOf(), repository.materializeView(base.getId())
+        assertEquals(Colls.listOf(), repository.checkout(base.getId()).getStore()
                 .findNodesByProperty("Person", "age", 999));
 
         GraphWriteTransaction drop = repository.beginWrite("main");
@@ -679,9 +600,9 @@ class MvccVersioningTest {
         assertEquals(2, repository.edgeVersions(0L).size());
         assertTrue(repository.edgeVersions(1L).get(1).isDelete());
         assertNull(repository.edgeVersions(1L).get(1).getEdge());
-        // 留存量 = seed 的 2 节点 + 2 边；删除记在 deletes 里，不混进 entities。
+        // 留存量 = seed 的 2 节点 + 2 边 upsert + 1 节点删除 + 2 边删除 = 7 条版本记录。
         Map<String, Object> stats = repository.versionStats();
-        assertEquals(4L, stat(stats, "retainedDeltaEntities"));
-        assertEquals(3L, stat(stats, "retainedDeltaDeletes"));
+        assertEquals(7L, stat(stats, "versionRecordCount"));
+        assertEquals(3L, stat(stats, "commitCount"));
     }
 }

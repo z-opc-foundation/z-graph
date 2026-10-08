@@ -21,7 +21,7 @@ import java.util.Map;
  * 禁用类型 9 的 toString 有损兜底——编码不了的值当场失败，绝不静默丢型）。
  * label / edgeType 以字典 id 写入，payload 里不重复存字符串。</p>
  */
-final class PayloadCodec {
+public final class PayloadCodec {
 
     private PayloadCodec() {
     }
@@ -41,7 +41,7 @@ final class PayloadCodec {
         return bytes.toByteArray();
     }
 
-    static NodePayload decodeNode(byte[] payload, NameDictionary labelDict) throws IOException {
+    public static NodePayload decodeNode(byte[] payload, NameDictionary labelDict) throws IOException {
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload));
         int labelCount = in.readInt();
         List<String> labels = new ArrayList<>(labelCount);
@@ -51,9 +51,9 @@ final class PayloadCodec {
         return new NodePayload(labels, readStrictMap(in));
     }
 
-    static final class NodePayload {
-        final List<String> labels;
-        final Map<String, Object> properties;
+    public static final class NodePayload {
+        public final List<String> labels;
+        public final Map<String, Object> properties;
 
         NodePayload(List<String> labels, Map<String, Object> properties) {
             this.labels = labels;
@@ -74,7 +74,7 @@ final class PayloadCodec {
         return bytes.toByteArray();
     }
 
-    static EdgePayload decodeEdge(byte[] payload, NameDictionary typeDict) throws IOException {
+    public static EdgePayload decodeEdge(byte[] payload, NameDictionary typeDict) throws IOException {
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload));
         String type = typeDict.nameOf(in.readInt());
         long start = in.readLong();
@@ -82,11 +82,11 @@ final class PayloadCodec {
         return new EdgePayload(type, start, end, readStrictMap(in));
     }
 
-    static final class EdgePayload {
-        final String type;
-        final long startNodeId;
-        final long endNodeId;
-        final Map<String, Object> properties;
+    public static final class EdgePayload {
+        public final String type;
+        public final long startNodeId;
+        public final long endNodeId;
+        public final Map<String, Object> properties;
 
         EdgePayload(String type, long startNodeId, long endNodeId, Map<String, Object> properties) {
             this.type = type;

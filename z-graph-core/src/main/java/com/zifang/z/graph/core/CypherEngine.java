@@ -1298,9 +1298,7 @@ public class CypherEngine {
         }
         if (upperBody.equals("INDEXES")) {
             List<Map<String, Object>> rows = new ArrayList<>();
-            InMemoryGraphStore ims = unwrapInMemoryStore(store);
-            if (ims != null) {
-                for (List<String> index : ims.getPropertyIndexes()) {
+            for (List<String> index : store.getPropertyIndexes()) {
                     Map<String, Object> row = new LinkedHashMap<>();
                     row.put("Name", index.get(0) + "_" + index.get(1));
                     String label = index.get(0);
@@ -1310,7 +1308,6 @@ public class CypherEngine {
                     row.put("On", label);
                     row.put("Property", index.get(1));
                     rows.add(row);
-                }
             }
             return rows;
         }
@@ -1660,48 +1657,24 @@ public class CypherEngine {
     }
 
     private List<Map<String, Object>> executeShowStats() {
-        InMemoryGraphStore ims = unwrapInMemoryStore(store);
-        if (ims == null) {
-            throw new CypherException("SHOW STATS requires InMemoryGraphStore");
-        }
+        // 走 GraphStore 公共面，任何实现（引擎视图 / 写事务 / 内存图）都可用。
         Map<String, Object> stats = new LinkedHashMap<>();
-        stats.putAll(ims.getStats());
+        stats.put("nodeCount", store.getNodeCount());
+        stats.put("edgeCount", store.getEdgeCount());
+        Set<String> labels = new java.util.TreeSet<>();
+        Set<String> edgeTypes = new java.util.TreeSet<>();
+        for (Node node : store.getAllNodes()) {
+            labels.addAll(node.getLabels());
+        }
+        for (Edge edge : store.getAllEdges()) {
+            edgeTypes.add(edge.getType());
+        }
+        stats.put("labelCount", labels.size());
+        stats.put("edgeTypeCount", edgeTypes.size());
+        stats.put("propertyIndexCount", store.getPropertyIndexes().size());
+        stats.put("tagSchemaCount", store.listTags().size());
+        stats.put("edgeTypeSchemaCount", store.listEdgeTypes().size());
         return Colls.listOf(stats);
-    }
-
-    /**
-     * 把 ReadOnlyGraphStore / GraphWriteTransaction 之类的包装层解开,露出底层
-     * InMemoryGraphStore。返回 null 时说明 store 不是内存图。
-     */
-    private static InMemoryGraphStore unwrapInMemoryStore(GraphStore store) {
-        if (store instanceof InMemoryGraphStore) return (InMemoryGraphStore) store;
-        if (store instanceof ReadOnlyGraphStore) {
-            GraphStore delegate = reflectDelegate((ReadOnlyGraphStore) store);
-            if (delegate instanceof InMemoryGraphStore) return (InMemoryGraphStore) delegate;
-        }
-        // GraphWriteTransaction 直接实现 GraphStore,反射取出 workingStore 字段
-        if (store instanceof GraphWriteTransaction) {
-            try {
-                java.lang.reflect.Field f = GraphWriteTransaction.class.getDeclaredField("workingStore");
-                f.setAccessible(true);
-                Object ws = f.get(store);
-                if (ws instanceof InMemoryGraphStore) return (InMemoryGraphStore) ws;
-            } catch (ReflectiveOperationException ignored) {
-                // 回落到 null
-            }
-        }
-        return null;
-    }
-
-    /** 通过反射取出 ReadOnlyGraphStore.delegate 字段,避免公开 API 暴露实现细节。 */
-    private static GraphStore reflectDelegate(ReadOnlyGraphStore ros) {
-        try {
-            java.lang.reflect.Field f = ReadOnlyGraphStore.class.getDeclaredField("delegate");
-            f.setAccessible(true);
-            return (GraphStore) f.get(ros);
-        } catch (ReflectiveOperationException e) {
-            return null;
-        }
     }
 
     // ==================== CALL 过程调用 ====================
@@ -1851,12 +1824,8 @@ public class CypherEngine {
     }
 
     private List<Map<String, Object>> listIndexes() {
-        InMemoryGraphStore ims = unwrapInMemoryStore(store);
-        if (ims == null) {
-            return Colls.listOf();
-        }
         List<Map<String, Object>> rows = new ArrayList<>();
-        for (List<String> index : ims.getPropertyIndexes()) {
+        for (List<String> index : store.getPropertyIndexes()) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("Name", index.get(0) + "." + index.get(1));
             String label = index.get(0);
@@ -1897,13 +1866,13 @@ public class CypherEngine {
         }
         String label = parts[0].trim();
         String property = parts[1].trim();
-        if (!(store instanceof InMemoryGraphStore)) {
-            throw new CypherException("Index management requires InMemoryGraphStore");
-        }
-        InMemoryGraphStore ims = (InMemoryGraphStore) store;
-        boolean created = ims.createPropertyIndex(label, property);
-        if (!created && !ims.hasPropertyIndex(label, property)) {
-            throw new CypherException("Failed to create index: " + label + "." + property);
+        try {
+            boolean created = store.createPropertyIndex(label, property);
+            if (!created && !store.hasPropertyIndex(label, property)) {
+                throw new CypherException("Failed to create index: " + label + "." + property);
+            }
+        } catch (UnsupportedOperationException e) {
+            throw new CypherException("Index management is not supported on this store: " + e.getMessage());
         }
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("Kind", kind);
@@ -1933,13 +1902,13 @@ public class CypherEngine {
         }
         String label = parts[0].trim();
         String property = parts[1].trim();
-        if (!(store instanceof InMemoryGraphStore)) {
-            throw new CypherException("Index management requires InMemoryGraphStore");
-        }
-        InMemoryGraphStore ims = (InMemoryGraphStore) store;
-        boolean dropped = ims.dropPropertyIndex(label, property);
-        if (!dropped) {
-            throw new CypherException("Index not found: " + label + "." + property);
+        try {
+            boolean dropped = store.dropPropertyIndex(label, property);
+            if (!dropped) {
+                throw new CypherException("Index not found: " + label + "." + property);
+            }
+        } catch (UnsupportedOperationException e) {
+            throw new CypherException("Index management is not supported on this store: " + e.getMessage());
         }
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("Kind", kind);
@@ -2064,8 +2033,6 @@ public class CypherEngine {
      */
     private IndexedSeed tryIndexSeed(String pattern, String whereClause) {
         if (whereClause == null || whereClause.trim().isEmpty()) return null;
-        if (!(store instanceof InMemoryGraphStore)) return null;
-        InMemoryGraphStore ims = (InMemoryGraphStore) store;
         Matcher patMatch = Pattern.compile("^\\s*\\(\\s*(\\w+)\\s*:\\s*(\\w+)\\s*\\)\\s*$").matcher(pattern.trim());
         if (!patMatch.matches()) return null;
         String var = patMatch.group(1);
@@ -2075,17 +2042,22 @@ public class CypherEngine {
         if (!whereMatch.matches()) return null;
         String property = whereMatch.group(1);
         Object value = evaluateLiteral(whereMatch.group(2));
-        if (!ims.hasPropertyIndex(label, property)) return null;
-        List<Long> ids = ims.findNodesByProperty(label, property, value);
-        List<MatchBinding> bindings = new ArrayList<>(ids.size());
-        for (long id : ids) {
-            Node node = store.getNode(id);
-            if (node == null) continue;
-            MatchBinding binding = new MatchBinding();
-            binding.variables.put(var, node);
-            bindings.add(binding);
+        try {
+            if (!store.hasPropertyIndex(label, property)) return null;
+            List<Long> ids = store.findNodesByProperty(label, property, value);
+            List<MatchBinding> bindings = new ArrayList<>(ids.size());
+            for (long id : ids) {
+                Node node = store.getNode(id);
+                if (node == null) continue;
+                MatchBinding binding = new MatchBinding();
+                binding.variables.put(var, node);
+                bindings.add(binding);
+            }
+            return new IndexedSeed(bindings);
+        } catch (UnsupportedOperationException unsupported) {
+            // 实现不提供索引能力 → 回落标签扫描
+            return null;
         }
-        return new IndexedSeed(bindings);
     }
 
     // ==================== 工具方法 ====================

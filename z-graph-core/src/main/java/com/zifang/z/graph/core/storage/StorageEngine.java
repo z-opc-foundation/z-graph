@@ -262,35 +262,35 @@ public final class StorageEngine {
 
     // ==================== 读：交给 RefViewGraphStore ====================
 
-    VersionStore versionStore() {
+    public VersionStore versionStore() {
         return versions;
     }
 
-    PostingStore labelPostings() {
+    public PostingStore labelPostings() {
         return labelPosts;
     }
 
-    PostingStore adjOutPostings() {
+    public PostingStore adjOutPostings() {
         return adjOutPosts;
     }
 
-    PostingStore adjInPostings() {
+    public PostingStore adjInPostings() {
         return adjInPosts;
     }
 
-    PostingStore etypePostings() {
+    public PostingStore etypePostings() {
         return etypePosts;
     }
 
-    NameDictionary labelDictionary() {
+    public NameDictionary labelDictionary() {
         return labelDict;
     }
 
-    NameDictionary typeDictionary() {
+    public NameDictionary typeDictionary() {
         return typeDict;
     }
 
-    NameDictionary indexNameDictionary() {
+    public NameDictionary indexNameDictionary() {
         return indexNameDict;
     }
 
@@ -317,9 +317,14 @@ public final class StorageEngine {
         etypePosts.force();
     }
 
+    /** versions.bin 的追加区字节数。 */
+    public synchronized long payloadBytes() {
+        return versions.payloadBytes();
+    }
+
     public synchronized java.util.Map<String, Object> stats() {
         Map<String, Object> stats = new java.util.LinkedHashMap<>();
-        stats.put("versionRecords", versions.versionRecordCount());
+        stats.put("versionRecordCount", versions.versionRecordCount());
         stats.put("nextNodeId", header.nextNodeId());
         stats.put("nextEdgeId", header.nextEdgeId());
         stats.put("nextCommitSeq", header.nextCommitSeq());
@@ -342,7 +347,7 @@ public final class StorageEngine {
     }
 
     /** applyDelta 内部读「当前链头」用：与任何 ref 无关，只看最新已落盘状态。 */
-    static final Visibility ALWAYS_VISIBLE = new Visibility() {
+    public static final Visibility ALWAYS_VISIBLE = new Visibility() {
         @Override
         public boolean isVisible(long commitSeq) {
             return true;

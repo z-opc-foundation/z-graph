@@ -12,29 +12,29 @@ import java.nio.file.Path;
  * 读路径沿链回溯，取第一条对给定 {@link Visibility} 可见的版本 —— 这就是
  * undo log 式的引擎原生 MVCC 解析，任何 ref（含 main head）走同一条路。</p>
  */
-final class VersionStore {
+public final class VersionStore {
 
-    static final int KIND_UPSERT_NODE = 0;
-    static final int KIND_UPSERT_EDGE = 1;
-    static final int KIND_DELETE_NODE = 2;
-    static final int KIND_DELETE_EDGE = 3;
-    static final int KIND_UPSERT_TAG = 4;
-    static final int KIND_DELETE_TAG = 5;
-    static final int KIND_UPSERT_EDGE_TYPE = 6;
-    static final int KIND_DELETE_EDGE_TYPE = 7;
-    static final int KIND_UPSERT_INDEX = 8;
-    static final int KIND_DELETE_INDEX = 9;
+    public static final int KIND_UPSERT_NODE = 0;
+    public static final int KIND_UPSERT_EDGE = 1;
+    public static final int KIND_DELETE_NODE = 2;
+    public static final int KIND_DELETE_EDGE = 3;
+    public static final int KIND_UPSERT_TAG = 4;
+    public static final int KIND_DELETE_TAG = 5;
+    public static final int KIND_UPSERT_EDGE_TYPE = 6;
+    public static final int KIND_DELETE_EDGE_TYPE = 7;
+    public static final int KIND_UPSERT_INDEX = 8;
+    public static final int KIND_DELETE_INDEX = 9;
 
     static final int RECORD_BYTES = 64;
 
-    static final class VersionRecord {
-        final long versionId;
-        final int kind;
-        final long entityId;
-        final long commitSeq;
-        final long prevVersionId;
-        final long payloadOffset;
-        final int payloadLen;
+    public static final class VersionRecord {
+        public final long versionId;
+        public final int kind;
+        public final long entityId;
+        public final long commitSeq;
+        public final long prevVersionId;
+        public final long payloadOffset;
+        public final int payloadLen;
 
         VersionRecord(long versionId, int kind, long entityId, long commitSeq,
                       long prevVersionId, long payloadOffset, int payloadLen) {
@@ -47,7 +47,7 @@ final class VersionStore {
             this.payloadLen = payloadLen;
         }
 
-        boolean isDelete() {
+        public boolean isDelete() {
             return kind == KIND_DELETE_NODE || kind == KIND_DELETE_EDGE
                     || kind == KIND_DELETE_TAG || kind == KIND_DELETE_EDGE_TYPE
                     || kind == KIND_DELETE_INDEX;
@@ -98,7 +98,7 @@ final class VersionStore {
      */
 
     /** 追加一条版本并更新对应链头；payload 可为空（删除类指令）。返回 versionId。 */
-    synchronized long append(int kind, long entityId, long commitSeq, byte[] commitHash16,
+    public synchronized long append(int kind, long entityId, long commitSeq, byte[] commitHash16,
                              byte[] payload) throws IOException {
         long versionId = header.allocateVersionId();
         long prev = headOf(kind, entityId);
@@ -163,7 +163,7 @@ final class VersionStore {
 
     // ==================== 解析 ====================
 
-    VersionRecord read(long versionId) throws IOException {
+    public VersionRecord read(long versionId) throws IOException {
         byte[] record = new byte[RECORD_BYTES];
         indexFile.read(versionId, record);
         java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(record);
@@ -176,7 +176,7 @@ final class VersionStore {
         return new VersionRecord(versionId, kind, entityId, commitSeq, prev, payloadOffset, payloadLen);
     }
 
-    byte[] payload(VersionRecord record) throws IOException {
+    public byte[] payload(VersionRecord record) throws IOException {
         if (record.payloadOffset < 0 || record.payloadLen == 0) {
             return new byte[0];
         }
@@ -184,7 +184,7 @@ final class VersionStore {
     }
 
     /** 实体在可见范围内的最新版本；全链不可见返回 null。 */
-    VersionRecord latestVisible(int kind, long entityId, Visibility visibility) throws IOException {
+    public VersionRecord latestVisible(int kind, long entityId, Visibility visibility) throws IOException {
         long cursor = headOf(kind, entityId);
         while (cursor >= 0) {
             VersionRecord record = read(cursor);
@@ -197,7 +197,7 @@ final class VersionStore {
     }
 
     /** 实体的可见版本链，从新到旧。 */
-    java.util.List<VersionRecord> historyVisible(int kind, long entityId, Visibility visibility) throws IOException {
+    public java.util.List<VersionRecord> historyVisible(int kind, long entityId, Visibility visibility) throws IOException {
         java.util.List<VersionRecord> result = new java.util.ArrayList<>();
         long cursor = headOf(kind, entityId);
         while (cursor >= 0) {
@@ -212,6 +212,10 @@ final class VersionStore {
 
     long nodeCount() {
         return nodeHeads.recordCount();
+    }
+
+    long payloadBytes() {
+        return payloadFile.size();
     }
 
     long versionRecordCount() {

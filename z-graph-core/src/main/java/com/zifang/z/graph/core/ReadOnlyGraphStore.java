@@ -139,11 +139,14 @@ public final class ReadOnlyGraphStore implements GraphStore {
         // 只读视图没有待回滚的变更。
     }
 
+    @Override
     public boolean hasPropertyIndex(String label, String propertyKey) {
-        if (!(delegate instanceof InMemoryGraphStore)) {
-            return false;
-        }
-        return ((InMemoryGraphStore) delegate).hasPropertyIndex(label, propertyKey);
+        return delegate.hasPropertyIndex(label, propertyKey);
+    }
+
+    @Override
+    public List<List<String>> getPropertyIndexes() {
+        return delegate.getPropertyIndexes();
     }
 
     @Override

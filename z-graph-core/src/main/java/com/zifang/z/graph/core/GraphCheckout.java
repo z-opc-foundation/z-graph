@@ -9,7 +9,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 从指定 commit 切出的查询视图。视图绑定 immutable commit，不会跟随任何分支继续变化。
+ * 从指定 commit 切出的查询视图。视图绑定 immutable commit，不会跟随任何分支继续变化；
+ * 读经由引擎按可见性即时解析（{@code RefViewGraphStore}），没有物化快照。
  */
 public final class GraphCheckout {
 
@@ -17,10 +18,10 @@ public final class GraphCheckout {
     private final ReadOnlyGraphStore store;
     private final CypherEngine cypherEngine;
 
-    GraphCheckout(GraphCommit commit, InMemoryGraphStore snapshot) {
+    GraphCheckout(GraphCommit commit, GraphStore snapshot, GraphVersionStore repository) {
         this.commit = commit;
         this.store = new ReadOnlyGraphStore(snapshot);
-        this.cypherEngine = new CypherEngine(store);
+        this.cypherEngine = new CypherEngine(this.store, repository);
     }
 
     public GraphCommit getCommit() {

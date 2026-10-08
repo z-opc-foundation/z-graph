@@ -14,22 +14,22 @@ import java.util.Set;
 /**
  * 一个分支上的隔离写工作区。提交前的变更只存在于当前事务，不会污染已有 commit。
  *
- * <p>工作区是 {@link VersionOverlayStore}：读穿过上一个 commit 的不可物化视图，
- * 写只登记本事务触碰过的实体。因此开事务不再复制整图，提交时登记出来的增量
- * 就是这个 commit 的全部数据。</p>
+ * <p>工作区是 {@link TxBuffer}：读穿过 beginWrite 时分支 head 的引擎视图（按
+ * 可见性即时解析），写只登记本事务触碰过的实体。因此开事务不再复制任何图状态，
+ * 提交时登记出来的增量指令集就是这个 commit 的全部数据。</p>
  */
 public final class GraphWriteTransaction implements GraphStore {
 
     private final GraphVersionStore repository;
     private final String branch;
     private final String baseCommitId;
-    private final VersionOverlayStore workingStore;
+    private final TxBuffer workingStore;
     private boolean closed;
 
     GraphWriteTransaction(GraphVersionStore repository,
                           String branch,
                           String baseCommitId,
-                          VersionOverlayStore workingStore) {
+                          TxBuffer workingStore) {
         this.repository = repository;
         this.branch = branch;
         this.baseCommitId = baseCommitId;
@@ -58,7 +58,7 @@ public final class GraphWriteTransaction implements GraphStore {
         ensureOpen();
         GraphDelta delta = workingStore.pendingDelta();
         GraphCommit commit = repository.commit(branch, baseCommitId, delta.freeze(),
-                workingStore.getNodeCount(), workingStore.getEdgeCount(), author, message, workingStore);
+                workingStore.getNodeCount(), workingStore.getEdgeCount(), author, message);
         closed = true;
         return commit;
     }

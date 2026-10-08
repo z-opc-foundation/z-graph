@@ -35,8 +35,18 @@ public final class RefViewGraphStore implements GraphStore {
     private Long cachedEdgeCount;
 
     public RefViewGraphStore(StorageEngine engine, Visibility visibility) {
+        this(engine, visibility, null, null);
+    }
+
+    /**
+     * commit 不可变 ⇒ 其实体计数也是常量，直接用 commit object 里声明的计数播种，
+     * beginWrite 的 TxBuffer 构造（要读 base 计数）才能保持 O(1)。
+     */
+    public RefViewGraphStore(StorageEngine engine, Visibility visibility, Long pinnedNodeCount, Long pinnedEdgeCount) {
         this.engine = engine;
         this.visibility = visibility;
+        this.cachedNodeCount = pinnedNodeCount;
+        this.cachedEdgeCount = pinnedEdgeCount;
     }
 
     private static UnsupportedOperationException readOnly() {
