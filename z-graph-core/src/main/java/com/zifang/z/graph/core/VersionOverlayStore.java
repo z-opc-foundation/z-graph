@@ -560,26 +560,26 @@ final class VersionOverlayStore implements GraphStore {
 
     // ==================== 属性索引定义 ====================
 
-    boolean hasPropertyIndex(String label, String propertyKey) {
+    public boolean hasPropertyIndex(String label, String propertyKey) {
         GraphDelta.IndexKey key = new GraphDelta.IndexKey(label, propertyKey);
         if (pending.indexDeletes().contains(key)) return false;
         if (pending.indexUpserts().contains(key)) return true;
         return baseIndexDefinitions().contains(new InMemoryGraphStore.IndexDefinition(label, propertyKey));
     }
 
-    boolean createPropertyIndex(String label, String propertyKey) {
+    public boolean createPropertyIndex(String label, String propertyKey) {
         if (hasPropertyIndex(label, propertyKey)) return false;
         pending.putIndex(new GraphDelta.IndexKey(label, propertyKey));
         return true;
     }
 
-    boolean dropPropertyIndex(String label, String propertyKey) {
+    public boolean dropPropertyIndex(String label, String propertyKey) {
         if (!hasPropertyIndex(label, propertyKey)) return false;
         pending.deleteIndex(new GraphDelta.IndexKey(label, propertyKey));
         return true;
     }
 
-    List<List<String>> getPropertyIndexes() {
+    public List<List<String>> getPropertyIndexes() {
         List<List<String>> result = new ArrayList<>();
         for (InMemoryGraphStore.IndexDefinition definition : indexDefinitions()) {
             result.add(Colls.listOf(definition.label(), definition.propertyKey()));

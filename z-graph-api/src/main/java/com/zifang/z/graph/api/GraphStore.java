@@ -75,6 +75,31 @@ public interface GraphStore {
     /** 按标签+属性精确匹配查找节点 */
     List<Long> findNodesByProperty(String label, String propertyKey, Object propertyValue);
 
+    // ==================== 属性索引（能力方法）====================
+
+    /**
+     * (label, propertyKey) 上是否声明了属性索引。引擎需要按接口使用索引能力，
+     * 不再依赖任何具体实现的 instanceof。
+     */
+    default boolean hasPropertyIndex(String label, String propertyKey) {
+        throw new UnsupportedOperationException("Property indexes not supported by this store");
+    }
+
+    /** 声明一个属性索引；已存在返回 false。 */
+    default boolean createPropertyIndex(String label, String propertyKey) {
+        throw new UnsupportedOperationException("Property indexes not supported by this store");
+    }
+
+    /** 删除一个属性索引；不存在返回 false。 */
+    default boolean dropPropertyIndex(String label, String propertyKey) {
+        throw new UnsupportedOperationException("Property indexes not supported by this store");
+    }
+
+    /** 已声明的属性索引清单，每项 [label, propertyKey]。 */
+    default List<List<String>> getPropertyIndexes() {
+        throw new UnsupportedOperationException("Property indexes not supported by this store");
+    }
+
     /** 获取所有节点，结果按节点 ID 升序排列。 */
     List<Node> getAllNodes();
 

@@ -14,27 +14,27 @@ import java.util.Map;
  * <p>类型标签沿用历史仓库格式，V2/V3 的旧文件仍然可以读入；新增的 schema 段以固定
  * 顺序写在每个 commit 的增量尾部，读写两端必须同步修改。</p>
  */
-final class GraphCodec {
+public final class GraphCodec {
 
-    static final int STORAGE_MAGIC = 0x5A475246;
+    public static final int STORAGE_MAGIC = 0x5A475246;
     /** V4 起仓库按 commit 存增量，不再内联整图快照。 */
-    static final int STORAGE_VERSION = 4;
+    public static final int STORAGE_VERSION = 4;
     /** 仍可读取的历史格式下界。 */
-    static final int LEGACY_STORAGE_VERSION = 2;
+    public static final int LEGACY_STORAGE_VERSION = 2;
 
     private GraphCodec() {
     }
 
-    static void writeString(DataOutputStream out, String value) throws IOException {
+    public static void writeString(DataOutputStream out, String value) throws IOException {
         out.writeBoolean(value != null);
         if (value != null) out.writeUTF(value);
     }
 
-    static String readString(DataInputStream in) throws IOException {
+    public static String readString(DataInputStream in) throws IOException {
         return in.readBoolean() ? in.readUTF() : null;
     }
 
-    static void writeValue(DataOutputStream out, Object value) throws IOException {
+    public static void writeValue(DataOutputStream out, Object value) throws IOException {
         if (value == null) {
             out.writeByte(0);
         } else if (value instanceof String) {
@@ -77,7 +77,7 @@ final class GraphCodec {
     }
 
     @SuppressWarnings("unchecked")
-    static Map<String, Object> readMap(DataInputStream in) throws IOException {
+    public static Map<String, Object> readMap(DataInputStream in) throws IOException {
         Object value = readValue(in);
         if (!(value instanceof Map)) {
             throw new IOException("Expected property map in graph payload");
@@ -85,7 +85,7 @@ final class GraphCodec {
         return (Map<String, Object>) value;
     }
 
-    static Object readValue(DataInputStream in) throws IOException {
+    public static Object readValue(DataInputStream in) throws IOException {
         byte type = in.readByte();
         Object result;
         switch (type) {
