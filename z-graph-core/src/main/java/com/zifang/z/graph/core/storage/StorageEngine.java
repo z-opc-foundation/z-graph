@@ -23,7 +23,7 @@ import java.util.Map;
  */
 public final class StorageEngine {
 
-    static final String INDEX_NAME_SEPARATOR = "\u0000";
+    public static final String INDEX_NAME_SEPARATOR = "\u0000";
 
     private final Path dir;
     private StoreHeader header;

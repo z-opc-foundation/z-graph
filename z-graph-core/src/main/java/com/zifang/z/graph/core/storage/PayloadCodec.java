@@ -105,12 +105,12 @@ public final class PayloadCodec {
         return bytes.toByteArray();
     }
 
-    static TagSchema decodeTagSchema(String name, byte[] payload) throws IOException {
+    public static TagSchema decodeTagSchema(String name, byte[] payload) throws IOException {
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload));
         return new TagSchema(name, readFields(in));
     }
 
-    static EdgeTypeSchema decodeEdgeTypeSchema(String name, byte[] payload) throws IOException {
+    public static EdgeTypeSchema decodeEdgeTypeSchema(String name, byte[] payload) throws IOException {
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload));
         return new EdgeTypeSchema(name, readFields(in));
     }

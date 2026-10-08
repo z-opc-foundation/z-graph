@@ -14,6 +14,7 @@ import com.zifang.z.graph.core.storage.RefStore;
 import com.zifang.z.graph.core.storage.RefViewGraphStore;
 import com.zifang.z.graph.core.storage.StorageEngine;
 import com.zifang.z.graph.core.storage.VersionStore;
+import com.zifang.z.graph.core.storage.Visibility;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -64,7 +65,7 @@ public final class GraphVersionStore {
     private static final String DEFAULT_BRANCH = "main";
 
     private final Path dataDir;
-    private final StorageEngine engine;
+    private volatile StorageEngine engine;
     private final CommitObjectStore commitStore;
     private final RefStore refStore;
     private final AncestryIndex ancestry;
@@ -96,6 +97,7 @@ public final class GraphVersionStore {
         Path storeDir = dir.resolve("store");
         Path commitsDir = dir.resolve("commits");
         try {
+            recoverCompactionCrash(dir);
             boolean existing = Files.exists(storeDir.resolve("header.bin"));
             if (existing) {
                 this.engine = StorageEngine.open(storeDir);
@@ -530,14 +532,45 @@ public final class GraphVersionStore {
         return snapshot;
     }
 
-    // ==================== 合并 ====================
+    // ==================== 合并（commit 级 replay） ====================
+
+    /** 合并触碰集的实体键：家族 + id（schema 家族用登记名）。 */
+    private static final class EntityKey {
+        final char family; // 'n' node, 'e' edge, 't' tag, 'y' edgeType, 'x' index
+        final long id;
+        final String name;
+
+        EntityKey(char family, long id) {
+            this(family, id, null);
+        }
+
+        EntityKey(char family, String name) {
+            this(family, -1L, name);
+        }
+
+        private EntityKey(char family, long id, String name) {
+            this.family = family;
+            this.id = id;
+            this.name = name;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof EntityKey)) return false;
+            EntityKey other = (EntityKey) o;
+            return family == other.family && id == other.id && Objects.equals(name, other.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(family, id, name);
+        }
+    }
 
     /**
-     * 将 source branch 合并到 target branch。只自动合并三方模型中一侧发生变化的实体；
-     * 同一节点/边两侧都发生不一致修改时返回冲突，且不会移动 target head。
-     *
-     * <p>过渡实现：三方快照经引擎解析视图装配后走既有字段级合并；Phase 3 换成
-     * commit 级 replay（只比较两侧相对 merge-base 触碰过的实体）。</p>
+     * 将 source branch 合并到 target branch：commit 级 replay——只对「两侧自
+     * merge-base 以来触碰过的实体」做三方字段合并，不物化任何整图。同一节点/边
+     * 两侧都发生不一致修改时返回冲突，且不会移动 target head。
      */
     public synchronized GraphMergeResult merge(String targetBranch,
                                                String sourceBranch,
@@ -556,27 +589,216 @@ public final class GraphVersionStore {
             throw new IllegalStateException("Branches do not have a common ancestor");
         }
         if (Objects.equals(baseId, sourceHeadId)) {
-            // source 已经包含 target 的全部历史，执行 fast-forward。
+            // source 自 base 起没有新工作：already up to date，target 原地不动。
+            return new GraphMergeResult(false, baseId, commitHandle(targetHeadId), Colls.listOf());
+        }
+        if (Objects.equals(baseId, targetHeadId)) {
+            // target 自 base 起没有新工作：fast-forward，ref 直接移到 source head，无新 commit。
             try {
                 refStore.put(targetBranch, sourceHeadId);
             } catch (IOException e) {
                 throw new IllegalStateException("Cannot fast-forward " + targetBranch, e);
             }
-            return new GraphMergeResult(true, baseId, commitHandle(sourceHeadId), Colls.listOf());
+            return new GraphMergeResult(true, targetHeadId, commitHandle(sourceHeadId), Colls.listOf());
         }
 
-        InMemoryGraphStore base = resolveToInMemory(baseId);
-        InMemoryGraphStore ours = resolveToInMemory(targetHeadId);
-        InMemoryGraphStore theirs = resolveToInMemory(sourceHeadId);
-        MergeState merged = mergeSnapshots(base, ours, theirs);
-        if (!merged.conflicts.isEmpty()) {
-            return new GraphMergeResult(false, baseId, null, merged.conflicts);
+        Set<Long> baseClosure = ancestry.closureOf(baseId);
+        Set<EntityKey> oursTouched = touchedEntities(targetHeadId, baseClosure);
+        Set<EntityKey> theirsTouched = touchedEntities(sourceHeadId, baseClosure);
+
+        List<String> conflicts = new ArrayList<>();
+        GraphDelta mergeDelta = new GraphDelta();
+        // node/edge 家族的合并结果（null = 已删除）与 ours 可见态，成对记录用于净增减计数。
+        Map<EntityKey, Object> mergedStates = new LinkedHashMap<>();
+        Map<EntityKey, Object> ourStates = new LinkedHashMap<>();
+
+        Set<EntityKey> allKeys = new LinkedHashSet<>(oursTouched);
+        allKeys.addAll(theirsTouched);
+        for (EntityKey key : allKeys) {
+            boolean inOurs = oursTouched.contains(key);
+            boolean inTheirs = theirsTouched.contains(key);
+            Object baseState = stateAt(key, baseId);
+            Object ourState = inOurs ? stateAt(key, targetHeadId) : baseState;
+            Object theirState = inTheirs ? stateAt(key, sourceHeadId) : baseState;
+
+            Object mergedState;
+            if (key.family == 'n' || key.family == 'e') {
+                mergedState = mergeEntityValue(key, baseState, ourState, theirState, conflicts);
+                mergedStates.put(key, mergedState);
+                ourStates.put(key, ourState);
+            } else {
+                // schema 家族沿用既有语义：ours 侧赢（含删除），只有 theirs 触碰时取 theirs。
+                mergedState = inOurs ? ourState : theirState;
+            }
+            applyMergedState(mergeDelta, key, ourState, mergedState);
+        }
+        // 合并后仍可见的边不允许指向合并后不可见的节点（对齐旧快照合并的冲突语义）。
+        for (Map.Entry<EntityKey, Object> entry : mergedStates.entrySet()) {
+            if (entry.getKey().family != 'e' || entry.getValue() == null) continue;
+            Edge edge = (Edge) entry.getValue();
+            if (!mergedNodeVisible(edge.getStartNodeId(), targetHeadId, mergedStates)
+                    || !mergedNodeVisible(edge.getEndNodeId(), targetHeadId, mergedStates)) {
+                conflicts.add("edge:" + edge.getId() + " references a deleted node");
+            }
+        }
+        if (!conflicts.isEmpty()) {
+            return new GraphMergeResult(false, baseId, null, conflicts);
         }
 
-        GraphDelta mergeDelta = GraphDelta.between(ours, merged.store).freeze();
-        GraphCommit mergeCommit = createCommitAndAdvance(targetBranch, Colls.listOf(targetHeadId, sourceHeadId),
-                author, message, mergeDelta, merged.store.getNodeCount(), merged.store.getEdgeCount(), null, null);
+        // 净增减只看 node/edge 家族：ours 无 + 合并有 = +1；ours 有 + 合并无 = -1。
+        long nodeCount = metaOf(targetHeadId).nodeCount;
+        long edgeCount = metaOf(targetHeadId).edgeCount;
+        for (Map.Entry<EntityKey, Object> entry : mergedStates.entrySet()) {
+            EntityKey key = entry.getKey();
+            Object ourState = ourStates.get(key);
+            Object mergedState = entry.getValue();
+            if (ourState == null && mergedState != null) {
+                if (key.family == 'n') nodeCount++; else edgeCount++;
+            } else if (ourState != null && mergedState == null) {
+                if (key.family == 'n') nodeCount--; else edgeCount--;
+            }
+        }
+
+        GraphCommit mergeCommit = createCommitAndAdvance(targetBranch,
+                Colls.listOf(targetHeadId, sourceHeadId), author, message, mergeDelta.freeze(),
+                nodeCount, edgeCount, null, null);
         return new GraphMergeResult(true, baseId, mergeCommit, Colls.listOf());
+    }
+
+    /** 把合并结果落进 delta：与 ours-head 状态相同则不写，不同则 upsert/delete。 */
+    private void applyMergedState(GraphDelta mergeDelta, EntityKey key, Object ourState, Object mergedState) {
+        if (sameState(mergedState, ourState)) {
+            return;
+        }
+        if (key.family == 'n') {
+            if (mergedState == null) mergeDelta.deleteNode(key.id);
+            else mergeDelta.putNode((Node) mergedState);
+        } else if (key.family == 'e') {
+            if (mergedState == null) mergeDelta.deleteEdge(key.id);
+            else mergeDelta.putEdge((Edge) mergedState);
+        } else if (key.family == 't') {
+            if (mergedState == null) mergeDelta.deleteTag(key.name);
+            else mergeDelta.putTag((TagSchema) mergedState);
+        } else if (key.family == 'y') {
+            if (mergedState == null) mergeDelta.deleteEdgeType(key.name);
+            else mergeDelta.putEdgeType((EdgeTypeSchema) mergedState);
+        } else if (key.family == 'x') {
+            int cut = key.name.indexOf(StorageEngine.INDEX_NAME_SEPARATOR);
+            GraphDelta.IndexKey indexKey = new GraphDelta.IndexKey(
+                    key.name.substring(0, cut), key.name.substring(cut + 1));
+            if (mergedState == null) mergeDelta.deleteIndex(indexKey);
+            else mergeDelta.putIndex(indexKey);
+        }
+    }
+
+    /** 合并后该节点是否可见：合并触碰过则以合并结果为准，否则沿用 target head 的可见态。 */
+    private boolean mergedNodeVisible(long nodeId, String targetHeadId, Map<EntityKey, Object> mergedStates) {
+        EntityKey key = new EntityKey('n', nodeId);
+        if (mergedStates.containsKey(key)) {
+            return mergedStates.get(key) != null;
+        }
+        return stateAt(key, targetHeadId) != null;
+    }
+
+    private boolean sameState(Object a, Object b) {
+        if (a instanceof Node && b instanceof Node) return sameEntity((Node) a, (Node) b);
+        if (a instanceof Edge && b instanceof Edge) return sameEntity((Edge) a, (Edge) b);
+        return Objects.equals(a, b);
+    }
+
+    /** 节点/边的三方字段合并（复用快照时代的字段级判定，语义不变）。 */
+    private Object mergeEntityValue(EntityKey key, Object baseState, Object ourState, Object theirState,
+                                    List<String> conflicts) {
+        if (key.family == 'n') {
+            return mergeNode(key.id, (Node) baseState, (Node) ourState, (Node) theirState, conflicts);
+        }
+        return mergeEdge(key.id, (Edge) baseState, (Edge) ourState, (Edge) theirState, conflicts);
+    }
+
+    /** base..head 区间（不含 base）内所有 commit 触碰过的实体键。 */
+    private Set<EntityKey> touchedEntities(String headId, Set<Long> baseClosure) {
+        Set<EntityKey> touched = new LinkedHashSet<>();
+        for (Long seq : ancestry.closureOf(headId)) {
+            if (baseClosure.contains(seq)) continue;
+            CommitObjectStore.CommitMeta meta = metaBySeq(seq);
+            if (meta == null) continue;
+            for (Node node : meta.delta.nodeUpserts()) touched.add(new EntityKey('n', node.getId()));
+            for (long id : meta.delta.nodeDeletes()) touched.add(new EntityKey('n', id));
+            for (Edge edge : meta.delta.edgeUpserts()) touched.add(new EntityKey('e', edge.getId()));
+            for (long id : meta.delta.edgeDeletes()) touched.add(new EntityKey('e', id));
+            for (TagSchema schema : meta.delta.tagUpserts()) touched.add(new EntityKey('t', schema.getName()));
+            for (String name : meta.delta.tagDeletes()) touched.add(new EntityKey('t', name));
+            for (EdgeTypeSchema schema : meta.delta.edgeTypeUpserts()) touched.add(new EntityKey('y', schema.getName()));
+            for (String name : meta.delta.edgeTypeDeletes()) touched.add(new EntityKey('y', name));
+            for (GraphDelta.IndexKey key : meta.delta.indexUpserts()) {
+                touched.add(new EntityKey('x', key.label() + StorageEngine.INDEX_NAME_SEPARATOR + key.propertyKey()));
+            }
+            for (GraphDelta.IndexKey key : meta.delta.indexDeletes()) {
+                touched.add(new EntityKey('x', key.label() + StorageEngine.INDEX_NAME_SEPARATOR + key.propertyKey()));
+            }
+        }
+        return touched;
+    }
+
+    /** 实体在指定 ref 上的可见状态：节点/边为解码对象，schema 为声明，删除/缺席为 null。 */
+    private Object stateAt(EntityKey key, String refId) {
+        try {
+            Visibility visibility = ancestry.visibilityOf(refId);
+            VersionStore versionStore = engine.versionStore();
+            int kind;
+            long objectId;
+            switch (key.family) {
+                case 'n':
+                    kind = VersionStore.KIND_UPSERT_NODE;
+                    objectId = key.id;
+                    break;
+                case 'e':
+                    kind = VersionStore.KIND_UPSERT_EDGE;
+                    objectId = key.id;
+                    break;
+                case 't':
+                    int tagId = engine.labelDictionary().idOf(key.name);
+                    if (tagId < 0) return null;
+                    kind = VersionStore.KIND_UPSERT_TAG;
+                    objectId = tagId;
+                    break;
+                case 'y':
+                    int typeId = engine.typeDictionary().idOf(key.name);
+                    if (typeId < 0) return null;
+                    kind = VersionStore.KIND_UPSERT_EDGE_TYPE;
+                    objectId = typeId;
+                    break;
+                default:
+                    int indexId = engine.indexNameDictionary().idOf(key.name);
+                    if (indexId < 0) return null;
+                    kind = VersionStore.KIND_UPSERT_INDEX;
+                    objectId = indexId;
+                    break;
+            }
+            VersionStore.VersionRecord record = versionStore.latestVisible(kind, objectId, visibility);
+            if (record == null || record.isDelete()) {
+                return null;
+            }
+            byte[] payload = versionStore.payload(record);
+            switch (key.family) {
+                case 'n': {
+                    PayloadCodec.NodePayload decoded = PayloadCodec.decodeNode(payload, engine.labelDictionary());
+                    return new Node(key.id, decoded.labels, decoded.properties);
+                }
+                case 'e': {
+                    PayloadCodec.EdgePayload decoded = PayloadCodec.decodeEdge(payload, engine.typeDictionary());
+                    return new Edge(key.id, decoded.type, decoded.startNodeId, decoded.endNodeId, decoded.properties);
+                }
+                case 't':
+                    return PayloadCodec.decodeTagSchema(key.name, payload);
+                case 'y':
+                    return PayloadCodec.decodeEdgeTypeSchema(key.name, payload);
+                default:
+                    return new Object(); // 索引定义无载荷，存在即状态
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot resolve state for " + key.family + ":" + key.id + key.name, e);
+        }
     }
 
     /** 两侧闭包交集里 commitSeq 最新的公共祖先。 */
@@ -592,6 +814,15 @@ public final class GraphVersionStore {
             }
         }
         return best;
+    }
+
+    private CommitObjectStore.CommitMeta metaOf(String commitId) {
+        return requireCommit(commitId, "commit=" + commitId);
+    }
+
+    private CommitObjectStore.CommitMeta metaBySeq(long seq) {
+        String id = commitIdBySeq.get(seq);
+        return id == null ? null : commits.get(id);
     }
 
     // ==================== 回收 ====================
@@ -643,14 +874,109 @@ public final class GraphVersionStore {
             throw new IllegalStateException("Cannot prune branch refs", e);
         }
         if (!collected.isEmpty()) {
+            compactStorage();
             ancestry.invalidateAll();
-            try {
-                engine.persistAndForce();
-            } catch (IOException e) {
-                throw new IllegalStateException("Cannot persist after garbage collect", e);
-            }
         }
         return collected.size();
+    }
+
+    /**
+     * 压实：仍可达的 commit delta 按 commitSeq 序重放进新引擎目录，原子换名取代旧
+     * store/。不可达版本与墓碑随之消失，versionRecordCount/payloadBytes 回落到可达
+     * 历史的真实规模；commit id/commitSeq/refs 不变，ancestry 闭包因此不受影响。
+     *
+     * <p>换名两步 move（store/ → store.retired.<ts>/ → store.compacting/ → store/）
+     * 之间崩溃由构造器 {@link #recoverCompactionCrash} 收尾。旧引擎 close 后既有
+     * 检出视图仍可读——Java 规范保证 mmap 缓冲在 GC 前始终有效，新视图一律取新引擎。</p>
+     */
+    private void compactStorage() {
+        List<CommitObjectStore.CommitMeta> ordered = new ArrayList<>(commits.values());
+        ordered.sort(Comparator.comparingLong(meta -> meta.commitSeq));
+        Path store = dataDir.resolve("store");
+        Path compacting = dataDir.resolve("store.compacting");
+        StorageEngine oldEngine = engine;
+        try {
+            deleteRecursively(compacting);
+            StorageEngine fresh = StorageEngine.create(compacting);
+            try {
+                for (CommitObjectStore.CommitMeta meta : ordered) {
+                    fresh.applyDelta(meta.commitSeq, digest16Of(meta.id), meta.delta);
+                }
+                fresh.persistAndForce();
+            } finally {
+                fresh.close();
+            }
+            Path retired = dataDir.resolve("store.retired." + System.nanoTime());
+            Files.move(store, retired);
+            Files.move(compacting, store);
+            engine = StorageEngine.open(store);
+            oldEngine.close();
+            deleteRecursively(retired);
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot compact store", e);
+        }
+    }
+
+    /** commit id 前 32 个 hex 字符 = SHA-256 摘要前 16 字节，即版本记录里的 commitHash16。 */
+    private static byte[] digest16Of(String commitId) {
+        byte[] digest = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            digest[i] = (byte) Integer.parseInt(commitId.substring(i * 2, i * 2 + 2), 16);
+        }
+        return digest;
+    }
+
+    /**
+     * 压实换名窗口的崩溃恢复。store/ 完整 ⇒ 要么压实没开始要么只差删旧目录，
+     * 孤儿目录全清；store/ 缺席且 retired 与 compacting 同在 ⇒ 两步 move 之间崩了，
+     * 收尾完成换名；retired 单独在场（理论不可达）⇒ 挪回去保数据。
+     */
+    private static void recoverCompactionCrash(Path dir) throws IOException {
+        Path store = dir.resolve("store");
+        Path compacting = dir.resolve("store.compacting");
+        Path retired = findRetiredStore(dir);
+        if (Files.exists(store.resolve("header.bin"))) {
+            if (Files.exists(compacting)) deleteRecursively(compacting);
+            if (retired != null) deleteRecursively(retired);
+            return;
+        }
+        if (retired != null && Files.exists(compacting)) {
+            Files.move(compacting, store);
+            deleteRecursively(retired);
+            return;
+        }
+        if (retired != null) {
+            Files.move(retired, store);
+        }
+        if (Files.exists(compacting)) {
+            deleteRecursively(compacting);
+        }
+    }
+
+    private static Path findRetiredStore(Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) {
+            return null;
+        }
+        try (java.util.stream.Stream<Path> entries = Files.list(dir)) {
+            List<Path> hits = new ArrayList<>();
+            entries.filter(path -> path.getFileName().toString().startsWith("store.retired.")).forEach(hits::add);
+            return hits.isEmpty() ? null : hits.get(0);
+        }
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (java.util.stream.Stream<Path> walk = Files.walk(root)) {
+            walk.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.delete(path);
+                } catch (IOException e) {
+                    throw new IllegalStateException("Cannot delete " + path, e);
+                }
+            });
+        }
     }
 
     /** 当前仍可从分支 head 到达的 commit 数。 */
@@ -735,77 +1061,7 @@ public final class GraphVersionStore {
         }
     }
 
-    // ==================== 内部：三方合并（过渡实现） ====================
-
-    private MergeState mergeSnapshots(InMemoryGraphStore base,
-                                      InMemoryGraphStore ours,
-                                      InMemoryGraphStore theirs) {
-        Map<Long, Node> baseNodes = indexNodes(base.getAllNodes());
-        Map<Long, Node> ourNodes = indexNodes(ours.getAllNodes());
-        Map<Long, Node> theirNodes = indexNodes(theirs.getAllNodes());
-        Map<Long, Edge> baseEdges = indexEdges(base.getAllEdges());
-        Map<Long, Edge> ourEdges = indexEdges(ours.getAllEdges());
-        Map<Long, Edge> theirEdges = indexEdges(theirs.getAllEdges());
-
-        List<String> conflicts = new ArrayList<>();
-        Map<Long, Node> mergedNodes = new LinkedHashMap<>();
-        for (Long id : unionKeys(baseNodes, ourNodes, theirNodes)) {
-            Node selected = mergeNode(id, baseNodes.get(id), ourNodes.get(id), theirNodes.get(id), conflicts);
-            if (selected != null) {
-                mergedNodes.put(id, selected);
-            }
-        }
-
-        Map<Long, Edge> mergedEdges = new LinkedHashMap<>();
-        for (Long id : unionKeys(baseEdges, ourEdges, theirEdges)) {
-            Edge selected = mergeEdge(id, baseEdges.get(id), ourEdges.get(id), theirEdges.get(id), conflicts);
-            if (selected != null) {
-                mergedEdges.put(id, selected);
-            }
-        }
-
-        InMemoryGraphStore result = new InMemoryGraphStore();
-        if (conflicts.isEmpty()) {
-            mergedNodes.values().stream()
-                    .sorted(Comparator.comparingLong(Node::getId))
-                    .forEach(node -> result.addNode(node.getId(), node.getLabels(), node.getProperties()));
-            mergedEdges.values().stream()
-                    .sorted(Comparator.comparingLong(Edge::getId))
-                    .forEach(edge -> {
-                        if (result.getNode(edge.getStartNodeId()) == null || result.getNode(edge.getEndNodeId()) == null) {
-                            conflicts.add("edge:" + edge.getId() + " references a deleted node");
-                        } else {
-                            result.addEdge(edge.getId(), edge.getType(), edge.getStartNodeId(), edge.getEndNodeId(),
-                                    edge.getProperties());
-                        }
-                    });
-            copyMergeMetadata(ours, theirs, result);
-        }
-        return new MergeState(result, conflicts);
-    }
-
-    /**
-     * 合并提交还要带走两侧的 schema 和索引定义：这两类元数据不参与三方冲突判定，
-     * 但只要有一侧声明过，合并后的视图就必须仍然认得它。
-     */
-    private static void copyMergeMetadata(InMemoryGraphStore ours,
-                                          InMemoryGraphStore theirs,
-                                          InMemoryGraphStore result) {
-        theirs.listTags().stream()
-                .filter(name -> ours.getTagSchema(name) == null)
-                .forEach(name -> result.putTagSchema(theirs.getTagSchema(name)));
-        ours.listTags().forEach(name -> result.putTagSchema(ours.getTagSchema(name)));
-        theirs.listEdgeTypes().stream()
-                .filter(name -> ours.getEdgeTypeSchema(name) == null)
-                .forEach(name -> result.putEdgeTypeSchema(theirs.getEdgeTypeSchema(name)));
-        ours.listEdgeTypes().forEach(name -> result.putEdgeTypeSchema(ours.getEdgeTypeSchema(name)));
-        Set<GraphDelta.IndexKey> keys = new LinkedHashSet<>();
-        ours.getPropertyIndexes().forEach(item -> keys.add(new GraphDelta.IndexKey(item.get(0), item.get(1))));
-        theirs.getPropertyIndexes().forEach(item -> keys.add(new GraphDelta.IndexKey(item.get(0), item.get(1))));
-        for (GraphDelta.IndexKey key : keys) {
-            result.registerIndexDefinition(key.label(), key.propertyKey());
-        }
-    }
+    // ==================== 内部：三方合并（字段级判定，被 commit 级 replay 复用） ====================
 
     private Node mergeNode(long id,
                            Node base,
@@ -901,36 +1157,6 @@ public final class GraphVersionStore {
                 && left.getStartNodeId() == right.getStartNodeId()
                 && left.getEndNodeId() == right.getEndNodeId()
                 && Objects.equals(left.getProperties(), right.getProperties());
-    }
-
-    private static Map<Long, Node> indexNodes(List<Node> nodes) {
-        Map<Long, Node> result = new LinkedHashMap<>();
-        for (Node node : nodes) result.put(node.getId(), node);
-        return result;
-    }
-
-    private static Map<Long, Edge> indexEdges(List<Edge> edges) {
-        Map<Long, Edge> result = new LinkedHashMap<>();
-        for (Edge edge : edges) result.put(edge.getId(), edge);
-        return result;
-    }
-
-    private static <T> Set<Long> unionKeys(Map<Long, T> first, Map<Long, T> second, Map<Long, T> third) {
-        Set<Long> result = new LinkedHashSet<>();
-        result.addAll(first.keySet());
-        result.addAll(second.keySet());
-        result.addAll(third.keySet());
-        return result;
-    }
-
-    private static final class MergeState {
-        private final InMemoryGraphStore store;
-        private final List<String> conflicts;
-
-        private MergeState(InMemoryGraphStore store, List<String> conflicts) {
-            this.store = store;
-            this.conflicts = conflicts;
-        }
     }
 
     // ==================== 内部：旧版整图快照读取 ====================

@@ -414,6 +414,46 @@ class MvccVersioningTest {
     }
 
     @Test
+    void compactingGcReclaimsVersionRecordsAndKeepsHistoryReadable(@TempDir Path directory) {
+        GraphVersionStore repository = new GraphVersionStore(directory);
+        GraphCommit seedCommit = seed(repository, 3);
+        repository.createBranch("scratch", repository.getBranchHead("main").getId());
+        for (int i = 0; i < 10; i++) {
+            GraphWriteTransaction write = repository.beginWrite("scratch");
+            write.addNode("Junk", Colls.mapOf("i", i));
+            write.commit("junk", "junk " + i);
+        }
+        long beforeRecords = stat(repository.versionStats(), "versionRecordCount");
+
+        int collected = repository.garbageCollect("main");
+        long afterRecords = stat(repository.versionStats(), "versionRecordCount");
+        assertEquals(10, collected);
+        assertTrue(afterRecords < beforeRecords,
+                "压实必须回收不可达版本记录: " + beforeRecords + " -> " + afterRecords);
+
+        // 压实后 main 全部历史 commit 仍逐个可读，计数与节点内容不损。
+        List<GraphCommit> mainLog = repository.log("main");
+        assertEquals(2, mainLog.size());
+        assertEquals(3, repository.checkout(mainLog.get(0).getId()).getStore().getNodeCount());
+        assertEquals(0, repository.checkout(mainLog.get(1).getId()).getStore().getNodeCount());
+        long p0 = onlyNodeId(repository.checkout(seedCommit.getId()), "P0");
+        assertFalse(repository.nodeVersions(p0).isEmpty());
+
+        // 压实后写路径继续工作（新引擎接管），计数连续。
+        GraphWriteTransaction write = repository.beginWrite("main");
+        write.addNode("Person", Colls.mapOf("name", "after-gc"));
+        GraphCommit post = write.commit("gc", "after gc");
+        assertEquals(4, repository.checkoutBranch("main").getStore().getNodeCount());
+        assertEquals(4, repository.checkout(post.getId()).getStore().getNodeCount());
+
+        // reopen 幂等：head、分支与压实后的视图读数一致。
+        GraphVersionStore reopened = new GraphVersionStore(directory);
+        assertEquals(post.getId(), reopened.getBranchHead("main").getId());
+        assertEquals(4, reopened.checkoutBranch("main").getStore().getNodeCount());
+        assertFalse(reopened.listBranches().contains("scratch"));
+    }
+
+    @Test
     void garbageCollectDropsUnreachableHistoryButKeepsRetainedBranches(@TempDir Path directory) {
         GraphVersionStore repository = new GraphVersionStore(directory);
         GraphCommit seedCommit = seed(repository, 5);

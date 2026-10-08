@@ -2,6 +2,9 @@ package com.zifang.z.graph.core;
 
 import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.api.GraphMergeResult;
+import com.zifang.z.graph.api.GraphStore;
+import com.zifang.z.graph.api.Node;
+import com.zifang.z.graph.api.TagSchema;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -12,6 +15,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.zifang.z.graph.api.Colls;
@@ -194,5 +198,114 @@ class GraphVersionStoreTest {
 
         stale.addNode("Person", Colls.mapOf("name", "stale"));
         assertThrows(IllegalStateException.class, () -> stale.commit("stale", "must fail"));
+    }
+
+    @Test
+    void mergeIsNoOpWhenSourceHasNoWorkBeyondBase() {
+        GraphVersionStore repository = new GraphVersionStore();
+        GraphWriteTransaction initial = repository.beginWrite("main");
+        initial.addNode("Person", Colls.mapOf("name", "Alice"));
+        GraphCommit base = initial.commit("alice", "base");
+        repository.createBranch("feature", base.getId());
+
+        GraphWriteTransaction mainWrite = repository.beginWrite("main");
+        mainWrite.addNode("Person", Colls.mapOf("name", "Bob"));
+        GraphCommit mainHead = mainWrite.commit("main", "main only");
+
+        // source 停在 base：already up to date，target 绝不能被回卷到 source。
+        GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "noop merge");
+        assertFalse(merge.isMerged());
+        assertFalse(merge.hasConflicts());
+        assertEquals(mainHead.getId(), repository.getBranchHead("main").getId());
+        assertEquals(2, repository.checkoutBranch("main").getStore().getNodeCount());
+    }
+
+    @Test
+    void mergeFastForwardsWhenTargetHasNoDivergentWork() {
+        GraphVersionStore repository = new GraphVersionStore();
+        GraphWriteTransaction initial = repository.beginWrite("main");
+        initial.addNode("Person", Colls.mapOf("name", "Alice"));
+        GraphCommit base = initial.commit("alice", "base");
+        repository.createBranch("feature", base.getId());
+
+        GraphWriteTransaction featureWrite = repository.beginWrite("feature");
+        featureWrite.addNode("Person", Colls.mapOf("name", "Bob"));
+        GraphCommit featureHead = featureWrite.commit("feature", "feature only");
+
+        GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "ff merge");
+        assertTrue(merge.isMerged());
+        assertFalse(merge.hasConflicts());
+        assertEquals(featureHead.getId(), repository.getBranchHead("main").getId());
+        assertEquals(featureHead.getId(), merge.getCommit().getId(),
+                "fast-forward 不产生新 commit，main head 直接指到 source head");
+        assertEquals(2, repository.checkoutBranch("main").getNodeCount());
+    }
+
+    @Test
+    void deletionsAndSchemaChangesPropagateThroughMerge() {
+        GraphVersionStore repository = new GraphVersionStore();
+        GraphWriteTransaction initial = repository.beginWrite("main");
+        Node alice = initial.addNode("Person", Colls.mapOf("name", "Alice"));
+        Node bob = initial.addNode("Person", Colls.mapOf("name", "Bob"));
+        initial.addEdge("KNOWS", alice.getId(), bob.getId(), Colls.mapOf());
+        initial.createPropertyIndex("Person", "name");
+        GraphCommit base = initial.commit("seed", "base");
+        repository.createBranch("feature", base.getId());
+
+        // ours：删 bob（级联删 KNOWS）+ 删索引定义。
+        GraphWriteTransaction mainWrite = repository.beginWrite("main");
+        mainWrite.removeNode(bob.getId());
+        mainWrite.dropPropertyIndex("Person", "name");
+        mainWrite.commit("main", "prune bob and index");
+
+        // theirs：加节点 + 新 tag 声明。
+        GraphWriteTransaction featureWrite = repository.beginWrite("feature");
+        featureWrite.addNode("Person", Colls.mapOf("name", "Carol"));
+        featureWrite.createTag(new TagSchema("City", Colls.listOf(
+                new TagSchema.Field("name", TagSchema.DataType.STRING, false))));
+        featureWrite.commit("feature", "carol and city tag");
+
+        GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "merge deletions");
+        assertTrue(merge.isMerged());
+        GraphStore mergedView = repository.checkoutBranch("main").getStore();
+        assertNull(mergedView.getNode(bob.getId()), "ours 侧的删除必须传播进合并结果");
+        assertEquals(0, mergedView.getEdgeCount(), "级联删除的边也必须传播");
+        assertEquals(2, mergedView.getNodeCount());
+        assertFalse(mergedView.hasPropertyIndex("Person", "name"), "索引定义的删除必须传播");
+        assertNotNull(mergedView.getTagSchema("City"), "theirs 侧的 tag 声明必须传播");
+        assertEquals(2, merge.getCommit().getNodeCount());
+        assertEquals(0, merge.getCommit().getEdgeCount());
+
+        // base commit 的时间旅行不受合并影响。
+        GraphStore baseView = repository.checkout(base.getId()).getStore();
+        assertNotNull(baseView.getNode(bob.getId()));
+        assertEquals(1, baseView.getEdgeCount());
+        assertTrue(baseView.hasPropertyIndex("Person", "name"));
+    }
+
+    @Test
+    void modifyDeleteConflictBlocksMerge() {
+        GraphVersionStore repository = new GraphVersionStore();
+        GraphWriteTransaction initial = repository.beginWrite("main");
+        Node alice = initial.addNode("Person", Colls.mapOf("name", "Alice", "age", 30));
+        GraphCommit base = initial.commit("seed", "base");
+        repository.createBranch("feature", base.getId());
+        long aliceId = alice.getId();
+
+        GraphWriteTransaction mainWrite = repository.beginWrite("main");
+        mainWrite.updateNode(aliceId, Colls.mapOf("age", 31));
+        GraphCommit mainHead = mainWrite.commit("main", "update age");
+
+        GraphWriteTransaction featureWrite = repository.beginWrite("feature");
+        featureWrite.removeNode(aliceId);
+        featureWrite.commit("feature", "delete alice");
+
+        GraphMergeResult merge = repository.merge("main", "feature", "maintainer", "conflicting merge");
+        assertFalse(merge.isMerged());
+        assertTrue(merge.hasConflicts());
+        assertTrue(merge.getConflicts().stream().anyMatch(c -> c.startsWith("node:" + aliceId)),
+                "modify/delete 必须以该节点为冲突主体: " + merge.getConflicts());
+        assertEquals(mainHead.getId(), repository.getBranchHead("main").getId());
+        assertNull(merge.getCommit());
     }
 }

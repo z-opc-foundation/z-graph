@@ -9,7 +9,7 @@ import java.nio.file.Path;
  * <p>全量驻留内存（name→id 表 + id→name 数组）；新名追加即落通道，刷盘随 commit 点
  * 统一 force。id 从 0 递增、永不复用，槽表文件直接用 dict id 做下标。</p>
  */
-final class NameDictionary {
+public final class NameDictionary {
 
     private final Path path;
     private final java.util.HashMap<String, Integer> ids = new java.util.HashMap<>();
@@ -54,7 +54,7 @@ final class NameDictionary {
         return ids.size();
     }
 
-    synchronized int idOf(String name) {
+    public synchronized int idOf(String name) {
         Integer id = ids.get(name);
         return id == null ? -1 : id;
     }

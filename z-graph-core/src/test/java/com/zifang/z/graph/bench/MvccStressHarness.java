@@ -594,9 +594,10 @@ public final class MvccStressHarness {
         record("s7_gc", "main", "collectedCommits", collected);
         record("s7_gc", "main", "releasedVersionRecords", released);
         verdict("s7_gc_reclaims", collected == branches * 40
+                        && released > 0
                         && repository.checkoutBranch("main").getNodeCount() == headNodes
                         && repository.listBranches().size() == 1,
-                String.format("回收 %d/%d commit，版本记录 %d -> %d（压实随 Phase 3 GC 重写恢复），"
+                String.format("回收 %d/%d commit，版本记录 %d -> %d（压实重放），"
                         + "保留分支视图与分支指针正确", collected, branches * 40, beforeVersions, afterVersions));
     }
 
