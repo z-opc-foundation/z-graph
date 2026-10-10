@@ -14,6 +14,7 @@ import ApiDocs from './console/pages/ApiDocs.jsx'
 export {withGraphServer, useGraphServer} from './console/serverHook.jsx'
 export {api} from './console/api'
 import HomePage from './pages/HomePage'
+import GraphApp from './pages/GraphApp.jsx'
 
 /** 菜单 + 路由清单（lead 008 §10/§14/§16 批量落地）。App 壳在 suit 侧组装。 */
 export const appMeta = { title: 'z-graph 图存储控制台', short: 'z-graph' }
@@ -31,7 +32,8 @@ export const menuItems = [
 ]
 
 export const routes = [
-    { path: '/z-graph/home', Component: HomePage },
+    { path: '/z-graph/home', Component: HomePage }},
+    { path: '/z-graph/:rest*', Component: GraphApp },
     { path: '/z-graph/dashboard', Component: withGraphServer(Dashboard) },
     { path: '/z-graph/graph', Component: withGraphServer(GraphView) },
     { path: '/z-graph/branches', Component: withGraphServer(Branches) },
