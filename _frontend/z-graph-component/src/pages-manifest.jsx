@@ -30,7 +30,7 @@ export const menuItems = [
     { key: '/z-graph/api-docs', label: 'API 文档', icon: <FileTextOutlined /> },
 ]
 
-export const routeTable = [
+export const routes = [
     { path: '/z-graph/home', Component: HomePage },
     { path: '/z-graph/dashboard', Component: withGraphServer(Dashboard) },
     { path: '/z-graph/graph', Component: withGraphServer(GraphView) },
