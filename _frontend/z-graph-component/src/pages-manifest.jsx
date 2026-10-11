@@ -9,6 +9,7 @@ import QueryPage from './console/pages/QueryPage.jsx'
 import Schema from './console/pages/Schema.jsx'
 import LogViewer from './console/pages/LogViewer.jsx'
 import ApiDocs from './console/pages/ApiDocs.jsx'
+import InstanceStatus from './pages/InstanceStatus.jsx'
 
 
 export {withGraphServer, useGraphServer} from './console/serverHook.jsx'
@@ -41,6 +42,7 @@ export const routes = [
     { path: '/z-graph/schema', Component: withGraphServer(Schema) },
     { path: '/z-graph/logs', Component: withGraphServer(LogViewer) },
     { path: '/z-graph/api-docs', Component: withGraphServer(ApiDocs) },
+    { path: '/z-graph/instance', Component: withGraphServer(InstanceStatus) },
     // catchall 放最后 —— 否则 `:rest*` 会先于具体路由匹配,导致 /z-graph/query
     // 全部跳进 GraphApp 的内层 /schema 路由(URL 变成 /z-graph/query/schema)。
     { path: '/z-graph/:rest*', Component: GraphApp },
