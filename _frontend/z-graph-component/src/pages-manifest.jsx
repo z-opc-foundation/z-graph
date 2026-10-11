@@ -32,7 +32,7 @@ export const menuItems = [
 ]
 
 export const routes = [
-    { path: '/z-graph/home', Component: HomePage }},
+    { path: '/z-graph/home', Component: HomePage },
     { path: '/z-graph/:rest*', Component: GraphApp },
     { path: '/z-graph/dashboard', Component: withGraphServer(Dashboard) },
     { path: '/z-graph/graph', Component: withGraphServer(GraphView) },

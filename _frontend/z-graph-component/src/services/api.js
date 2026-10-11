@@ -39,14 +39,14 @@ import request from '@/common'
  *   - `GET /meta/export`：响应带 `Content-Disposition: attachment`，是个下载件而不是表格数据。
  */
 export const graphApi = {
-    instance: () => request.get('/graph/__instance'),
-    health: () => request.get('/graph/health'),
-    branches: () => request.get('/graph/meta/branches'),
-    commits: () => request.get('/graph/meta/commits'),
-    schema: (branch) => request.get('/graph/meta/schema', {params: branch ? {branch} : {}}),
-    stats: (branch) => request.get('/graph/meta/stats', {params: branch ? {branch} : {}}),
-    metrics: () => request.get('/graph/meta/metrics'),
-    logs: (params) => request.get('/graph/meta/logs', {params}),
+    instance: () => request.get('/__instance').then((r) => r.data),
+    health: () => request.get('/health').then((r) => r.data),
+    branches: () => request.get('/meta/branches').then((r) => r.data),
+    commits: () => request.get('/meta/commits').then((r) => r.data),
+    schema: (branch) => request.get('/meta/schema', {params: branch ? {branch} : {}}).then((r) => r.data),
+    stats: (branch) => request.get('/meta/stats', {params: branch ? {branch} : {}}).then((r) => r.data),
+    metrics: () => request.get('/meta/metrics').then((r) => r.data),
+    logs: (params) => request.get('/meta/logs', {params}).then((r) => r.data),
     /**
      * 查询走 GET 而不是 POST：`handleQuery` 的 POST 分支用的是手搓的
      * `parseJsonStringMap`（按引号外逗号切 token、再按第一个冒号切 kv），
@@ -54,8 +54,24 @@ export const graphApi = {
      * 只有前者会被解析器啃掉。所以这里统一走 GET。
      */
     query: (cypher, branch, commit) =>
-        request.get('/graph/query', {params: commit ? {cypher, branch, commit} : {cypher, branch}}),
-    explain: (cypher, branch) => request.post('/graph/query/explain', {cypher, branch}),
+        request.get('/query', {params: commit ? {cypher, branch, commit} : {cypher, branch}}).then((r) => r.data),
+    explain: (cypher, branch) => request.post('/query/explain', {cypher, branch}).then((r) => r.data),
+}
+
+/**
+ * 让宿主（suit / 主壳 domainRoutes）注入 API 前缀：所有 graphApi 相对路径
+ * 拼到 `{prefix}{path}`，与 vite proxy / nginx 反代同源。
+ * 默认 '/api'：dev proxy 默认形态；走绝对地址（如直连 8090）时传完整 origin。
+ *
+ * 同时把 console/api.js 的 fetch 客户端也切到同一前缀 —— 那条路在
+ * withGraphServer HOC + console pages 里仍被使用，两边必须保持一致，
+ * 否则 health 报 200 而 instance 报 404 这种诡异分支。
+ */
+import {api as consoleApi} from '../console/api.js'
+
+export function configureGraph(apiBase = '/api') {
+    request.defaults.baseURL = apiBase
+    consoleApi.setBaseUrl(apiBase)
 }
 
 /**

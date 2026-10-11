@@ -43,3 +43,6 @@ node_modules/
 # 前端 node_modules / dist
 _frontend/**/node_modules/
 _frontend/**/dist/
+
+# ===== 本地 z-graph-server 数据目录(起 java server 时 ZVECTOR_DATA_DIR 指这里) =====
+/_tmp-zgraph/
