@@ -25,9 +25,34 @@ function NotFound() {
     )
 }
 
-// lead 008 §16：短期 hard-coded 登录（admin / 123456），CTC/SSO 接入后换共享 LoginPage loginApi
+// lead 008 §16：短期 hard-coded 登录（admin / 123456），CTC/SSO 接入后换共享 LoginPage loginApi。
+// 当前 LoginPage 来自 @yuku123/z-frontend-common 0.1.1 —— 它只走 loginApi 调真接口，没有
+// mockAuth 钩子；后端又没 /auth/login。所以 suit 侧先把用户名/密码校验在本地做掉，
+// 通过校验就直接 setItem 跳走，等 CTC 接 SSO 时把这层换回 LoginPage 原生路径。
+const MOCK_AUTH = { username: 'admin', password: '123456', user: { name: 'admin', role: '管理员' } }
+
+// LoginPage 把登录响应 res 透给 onSuccess，但 res 是后端返回的（这里没真后端所以是 undefined）。
+// 校验逻辑需要从 form 当前输入里读，强制每次从 DOM 取最新值。
+function readLoginForm() {
+    const inputs = document.querySelectorAll('input[placeholder]')
+    return {
+        username: inputs[0]?.value?.trim() || '',
+        password: inputs[1]?.value || '',
+    }
+}
+
 function LoginRoute() {
-    return <LoginPage />
+    const onMockLogin = () => {
+        const {username, password} = readLoginForm()
+        if (username !== MOCK_AUTH.username || password !== MOCK_AUTH.password) {
+            alert('用户名或密码错误（Mock：admin / 123456）')
+            return
+        }
+        localStorage.setItem('token', 'mock-' + Date.now())
+        localStorage.setItem('userInfo', JSON.stringify(MOCK_AUTH.user))
+        window.location.href = '/z-graph/home'
+    }
+    return <LoginPage onSuccess={onMockLogin} redirectUrl="/z-graph/home" />
 }
 
 function ProtectedShell() {
