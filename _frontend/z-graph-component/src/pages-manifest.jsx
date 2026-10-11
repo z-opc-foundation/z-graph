@@ -33,7 +33,6 @@ export const menuItems = [
 
 export const routes = [
     { path: '/z-graph/home', Component: HomePage },
-    { path: '/z-graph/:rest*', Component: GraphApp },
     { path: '/z-graph/dashboard', Component: withGraphServer(Dashboard) },
     { path: '/z-graph/graph', Component: withGraphServer(GraphView) },
     { path: '/z-graph/branches', Component: withGraphServer(Branches) },
@@ -42,6 +41,9 @@ export const routes = [
     { path: '/z-graph/schema', Component: withGraphServer(Schema) },
     { path: '/z-graph/logs', Component: withGraphServer(LogViewer) },
     { path: '/z-graph/api-docs', Component: withGraphServer(ApiDocs) },
+    // catchall 放最后 —— 否则 `:rest*` 会先于具体路由匹配,导致 /z-graph/query
+    // 全部跳进 GraphApp 的内层 /schema 路由(URL 变成 /z-graph/query/schema)。
+    { path: '/z-graph/:rest*', Component: GraphApp },
 ]
 
 export { default as HomePage } from './pages/HomePage'
