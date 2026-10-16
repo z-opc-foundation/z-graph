@@ -1,6 +1,6 @@
 package com.zifang.z.graph.starter.host;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.util.json.JsonUtil;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import java.nio.charset.StandardCharsets;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
@@ -64,7 +65,6 @@ public class GraphProxyController {
     private static final int MAX_BODY_BYTES = 4 * 1024 * 1024;
 
     private final ObjectProvider<GraphEmbeddedServerConfig> embeddedProvider;
-    private final ObjectMapper mapper = new ObjectMapper();
 
     /** 配置端口单独读一份: {@code zgraph.enabled} 不为 true 时内嵌 bean 根本不存在,
      *  但"这个端口上是不是有别人"这个问题仍然要能回答 —— 那是本卡验收第 1 条。 */
@@ -228,7 +228,7 @@ public class GraphProxyController {
     }
 
     private void writeJson(HttpServletResponse resp, int status, Object body) throws Exception {
-        byte[] out = mapper.writeValueAsBytes(body);
+        byte[] out = JsonUtil.toJson(body).getBytes(StandardCharsets.UTF_8);
         resp.setStatus(status);
         resp.setContentType("application/json;charset=UTF-8");
         resp.setContentLength(out.length);

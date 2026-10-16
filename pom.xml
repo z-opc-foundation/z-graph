@@ -99,6 +99,25 @@
 
     <dependencyManagement>
         <dependencies>
+
+        <!-- ⚠ z-util 三件必须同版本一起动：dependencyManagement 会连**传递依赖**一起改写，
+             只抬其中一件会被 BOM 把另外两件压回旧版（实测踩过）。JsonUtil.toPlainValue /
+             JsonCursor 需要 >= 1.2.2。 -->
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-util-core</artifactId>
+                <version>1.2.2</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-util-parser-json</artifactId>
+                <version>1.2.2</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-util-dsl-kernel</artifactId>
+                <version>1.2.2</version>
+            </dependency>
             <!-- 自家 6 个 reactor 坐标逐条钉 ${project.version}。这一格不是装饰：继承来的 DM 会改写
                  **传递依赖**的版本，而 fleet 里 z-graph 那一格钉的是 repo1 上的发布件（现值 1.0.7，
                  与本仓 HEAD 同格 ⇒ 今天量出来是 no-op），一旦对外落后于仓内就会把旧兄弟字节码打进新包。
