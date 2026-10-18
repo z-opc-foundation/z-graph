@@ -3,7 +3,7 @@ import {Alert, Button, Card, Col, Row, Space, Table, Tag, Tooltip} from 'antd'
 import {BranchesOutlined, HistoryOutlined, ReloadOutlined} from '@ant-design/icons'
 import {useNavigate} from 'react-router-dom'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isNotBoundError} from '../services/api'
-import {EmptyState, PageHeader} from '@/common/components/ui'
+import {EmptyState, PageHeader} from '@yuku123/z-frontend-common/ui'
 
 function fmtTime(ms) {
     if (ms == null) return '-'

@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useState} from 'react'
 import {Alert, Button, Card, Col, Descriptions, Empty, Modal, Row, Select, Space, Table, Tag} from 'antd'
 import {NodeIndexOutlined, ProfileOutlined, ReloadOutlined, TableOutlined} from '@ant-design/icons'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isNotBoundError} from '../services/api'
-import {EmptyState, PageHeader} from '@/common/components/ui'
+import {EmptyState, PageHeader} from '@yuku123/z-frontend-common/ui'
 
 /** /meta/schema 里三类对象的列：字段名逐个对着 CypherEngine.executeShow() 的 row.put(...) 核过 */
 const TAG_COLUMNS = [

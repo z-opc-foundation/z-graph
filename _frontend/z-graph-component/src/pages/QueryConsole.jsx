@@ -3,7 +3,7 @@ import {Alert, Button, Card, Col, Input, Row, Select, Space, Statistic, Table, T
 import {PlayCircleOutlined, ThunderboltOutlined} from '@ant-design/icons'
 import {useSearchParams} from 'react-router-dom'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isMutatingCypher} from '../services/api'
-import {EmptyState, PageHeader} from '@/common/components/ui'
+import {EmptyState, PageHeader} from '@yuku123/z-frontend-common/ui'
 
 const {TextArea} = Input
 

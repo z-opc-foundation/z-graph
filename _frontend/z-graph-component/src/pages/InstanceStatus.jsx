@@ -2,7 +2,7 @@ import {useCallback, useEffect, useState} from 'react'
 import {Alert, Button, Card, Descriptions, Space, Table, Tag} from 'antd'
 import {ReloadOutlined} from '@ant-design/icons'
 import {graphApi, graphErrorText} from '../services/api'
-import {PageHeader} from '@/common/components/ui'
+import {PageHeader} from '@yuku123/z-frontend-common/ui'
 
 const ENDPOINT_COLUMNS = [
     {title: '方法', dataIndex: 'method', key: 'method', width: 90, render: (v) => <Tag>{v}</Tag>},
