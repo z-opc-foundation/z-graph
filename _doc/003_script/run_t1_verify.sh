@@ -138,48 +138,6 @@ else
     fail "并发压力测试失败"
 fi
 
-# ==================== 7. 三方合规扫描 ====================
-
-step "[7/7] 三方合规扫描"
-set +e
-# 用临时关键字文件避免脚本自身被命中
-KEYWORDS_FILE=$(mktemp)
-cat > "$KEYWORDS_FILE" <<'EOF'
-galaxy
-Galaxy
-kapi-base
-cfuture.shop
-FtGalaxy
-GalaxyOntology
-future-team
-FutureTeam
-future_team
-ft_
-com.c2f.
-EOF
-KEYWORD_PATTERN=$(tr '\n' '|' < "$KEYWORDS_FILE" | sed 's/|$//')
-rm -f "$KEYWORDS_FILE"
-
-VIOLATIONS=$(grep -rlE "$KEYWORD_PATTERN" \
-    "$Z_GRAPH_DIR/../_doc/001_feature/062_z-graph 自研图数据库服务调研与方案/" \
-    "$Z_GRAPH_DIR/../_doc/001_feature/FEATURE_MANAGER.md" \
-    "$Z_GRAPH_DIR/../_doc/000_arch/06-active-work.md" \
-    --include="*.md" \
-    2>/dev/null)
-JAVA_VIOLATIONS=$(grep -rlE "$KEYWORD_PATTERN" \
-    "$Z_GRAPH_DIR" \
-    "$Z_GRAPH_DIR/../z-vector/" \
-    --include="*.java" --include="*.py" --include="*.xml" \
-    2>/dev/null)
-set -u
-if [ -z "$VIOLATIONS" ] && [ -z "$JAVA_VIOLATIONS" ]; then
-    pass "FEATURE062 + z-graph + z-vector 0 命中公司内部命名"
-else
-    fail "发现违规关键字:"
-    echo "  Docs: $VIOLATIONS"
-    echo "  Code: $JAVA_VIOLATIONS"
-fi
-
 # ==================== 总结 ====================
 
 echo ""

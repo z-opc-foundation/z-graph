@@ -69,7 +69,7 @@ mvn -B test
 
 ```bash
 cd /Users/zifang/workplace/idea_workplace/z-opc/z-graph
-bash poc/run_t1_verify.sh full    # 一键跑全流程(环境 + 单测 + 服务 + 3 类 E2E + 合规扫描)
+bash poc/run_t1_verify.sh full    # 一键跑全流程(环境 + 单测 + 服务 + 3 类 E2E)
 ```
 
 子测试脚本:
