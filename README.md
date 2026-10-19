@@ -469,7 +469,7 @@ v5 引擎口径（2026-10-09，`MvccStressHarness --profile=full` 12/12 PASS，M
 | 并发 | 8 线程同分支乐观写：冲突如实拒绝、0 丢失更新；8 分支并行 400/400 成功 |
 | 读等价 | 13 个 ref 上引擎解析视图与内存镜像逐实体比对 0 走样 |
 
-历史 T1 报告（[`_doc/001_arch/TEST_REPORT.md`](_doc/001_arch/TEST_REPORT.md)，2026-08-31，Bolt POC 路径）
+历史 T1 报告（[`_doc/005_testing/01-test-report.md`](_doc/005_testing/01-test-report.md)，2026-08-31，Bolt POC 路径）
 的 500/500 与 QPS 5278 属于**旧协议路径**的历史快照，不描述当前引擎，别拿它当现况。
 
 旧 README 里两张表**已从本文删除**："100 万节点 / 500 万边：单节点 add 80,000 QPS、shortestPath 3,500 QPS、
@@ -531,8 +531,8 @@ _Maintained by the z-opc-foundation organization._
 
 本项目文档统一收口在 `_doc/` 下：
 
-- [`_doc/001_arch/`](_doc/001_arch/) — 架构与测试记录：
-  - [`TEST_REPORT.md`](_doc/001_arch/TEST_REPORT.md) — T1 阶段（2026-08-31）Bolt POC 端到端报告：单元 25/25、
+- [`_doc/005_testing/`](_doc/005_testing/) — 测试记录与验收产物：
+  - [`01-test-report.md`](_doc/005_testing/01-test-report.md) — T1 阶段（2026-08-31）Bolt POC 端到端报告：单元 25/25、
     正常路径 10/10、错误路径 9/9、并发 500/500 与 QPS 5278 的原始输出，后半节补记版本化图增量验证
     （`GraphVersionStore` 9/9、`CypherEngine` 15/15、`InMemoryGraphStore` 12/12、Bolt 事务 E2E）。
     ⚠ 它是**历史快照**：里面的 `poc/` 路径、"BEGIN 不支持只回 IGNORED"、"仅 RETURN 字面量"等结论
