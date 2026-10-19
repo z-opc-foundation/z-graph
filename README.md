@@ -171,12 +171,12 @@ Maven reactor 只有 **5 个模块**（`z-graph-api` / `z-graph-protocol` / `z-g
 | 层级 | 技术（实测版本） |
 |------|------------------|
 | 语言 / 运行时 | Java 8（`z-boot-parent` 下发 source/target 8 ⇒ class-file 52；1.0.7 起全仓降档） |
-| 二进制协议 | Netty 4.1.138.Final（`netty-all`，版本由地板 `z-boot-dependencies` 的 netty-bom 供给） |
+| 二进制协议 | Netty 4.1.138.Final（`netty-all`，版本由 `z-boot-parent` 自带地板的 netty-bom 供给） |
 | HTTP 控制面 | JDK `com.sun.net.httpserver.HttpServer`（**不是** Spring MVC / WebFlux） |
 | Spring 集成 | `spring-boot-autoconfigure:2.7.18`（仅 starter 模块依赖它，web 层不在依赖里） |
 | 日志 | `log4j-api:2.25.4` + 运行期 `slf4j-simple:2.0.13`（bolt-server） |
 | 有意的版本分歧 | `slf4j-api` 2.0.13、`junit` 5.10.2 / `junit-platform` 1.10.2、`objenesis` 3.2 —— 根 POM 按坐标写**直接**条目顶住地板下压，注释里逐条写了原因 |
-| 测试 | JUnit 5（Jupiter）；172 个 `@Test`，分布在 20 个测试类 |
+| 测试 | JUnit 5（Jupiter）；195 个 `@Test`，分布在 25 个测试类（2026-10-19 按盘面实测订正） |
 | 前端 | React 18.3.1 + ReactDOM + Vite 5.4.10；自写 CSS，**无 AntD / 无组件库** |
 | 构建 / 发布 | Maven（flatten-maven-plugin 1.5.0 `oss` + `updatePomFile`）；`central` profile 走 central-publishing-maven-plugin 0.8.0 |
 | 部署 | Docker / docker-compose profiles / k8s 清单 / nginx；GHCR 由 `build-images.yml` 构建推送 |
@@ -193,7 +193,7 @@ cd z-graph
 mvn clean install -DskipTests
 ```
 
-第三方版本一律由 `z-boot-parent:1.1.0` → `z-boot-dependencies`（地板）+ `z-boot-fleet`（兄弟仓权威表）供给，
+第三方版本一律由 `z-boot-parent:1.1.0` 供给（第三方地板与兄弟仓权威表均已并入 parent 自身），
 模块 POM 里不该再出现字面版本钉。构建解析不到 `io.github.yuku123:z-boot-parent:1.1.0` 时先确认能连 repo1。
 注意 flatten 绑在 `process-resources`、`flatten.clean` 绑在 `clean`，所以判定"跑过"要以带 `clean` 的构建为准。
 
@@ -531,14 +531,16 @@ _Maintained by the z-opc-foundation organization._
 
 本项目文档统一收口在 `_doc/` 下：
 
+- [`_doc/001_arch/`](_doc/001_arch/) — 架构与总览：
+  - [`00-overview.md`](_doc/001_arch/00-overview.md) — 项目总览：v5 存储引擎的版本链与文件布局、MVCC 读/写路径与三方合并、
+    OpenCypher 子集的支持矩阵与缺口、Bolt 消息矩阵、13 个 HTTP context、控制台 8 个 tab、部署端口与源码包树
+
 - [`_doc/005_testing/`](_doc/005_testing/) — 测试记录与验收产物：
   - [`01-test-report.md`](_doc/005_testing/01-test-report.md) — T1 阶段（2026-08-31）Bolt POC 端到端报告：单元 25/25、
     正常路径 10/10、错误路径 9/9、并发 500/500 与 QPS 5278 的原始输出，后半节补记版本化图增量验证
     （`GraphVersionStore` 9/9、`CypherEngine` 15/15、`InMemoryGraphStore` 12/12、Bolt 事务 E2E）。
     ⚠ 它是**历史快照**：里面的 `poc/` 路径、"BEGIN 不支持只回 IGNORED"、"仅 RETURN 字面量"等结论
     已被后续实现推翻，其中 Java 源码行数表对应的还是 Java 17 时代的骨架。
-
-- `_doc/002_deploy/` — 目前为空目录（部署资产实际躺在根 `deploy/`，见「部署」一节）
 
 - [`_doc/003_script/`](_doc/003_script/) — E2E 驱动与运维脚本：
   - [`test_http_control_plane.py`](_doc/003_script/test_http_control_plane.py) — HTTP 控制面端到端（标准库，
@@ -553,7 +555,9 @@ _Maintained by the z-opc-foundation organization._
   - [`run_t1_verify.sh`](_doc/003_script/run_t1_verify.sh) — T1 全流程编排（同上，历史债）
   - [`all-in-one-entrypoint.sh`](_doc/003_script/all-in-one-entrypoint.sh) — all-in-one 容器入口：拷前端产物、并行拉起 Java 服务与 nginx
   - [`deploy_maven_center.sh`](_doc/003_script/deploy_maven_center.sh) — Central 发布：`publish`（`mvn deploy -Pcentral`）/ `verify` / `gpg-init` / `readme`
-
-- `_doc/004_skill/` — 目前为空目录（暂无 skill 定义）
+  - [`verify_central.sh`](_doc/003_script/verify_central.sh) — 对真实 Maven Central 校验发布件
 
 根 `poc/` 现为**空目录**且未被 git 跟踪，历史 Bolt 实验已迁到 [`_doc/003_script/`](_doc/003_script/)。
+
+> `002_deploy` / `004_skill` / `006_release` / `007_backlog` / `008_troubleshooting` 五个槽位**按需不建** ——
+> 部署资产实际躺在根 `deploy/`（docker / kubernetes / nginx），本仓没有对应文档内容，不留空目录。

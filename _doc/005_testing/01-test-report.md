@@ -1,6 +1,6 @@
 # T1 端到端测试报告(2026-08-31)
 
-> **所属 FEATURE**:[FEATURE062](file:///Users/zifang/workplace/idea_workplace/z-opc/_doc/001_feature/062_z-graph%20%E8%87%AA%E7%A0%94%E5%9B%BE%E6%95%B0%E6%8D%AE%E5%BA%93%E6%9C%8D%E5%8A%A1%E8%B0%83%E7%A0%94%E4%B8%8E%E6%96%B9%E6%A1%88/feature062.md)
+> **所属 FEATURE**:[FEATURE062](../../../z-opc/_doc/001_feature/062_z-graph%20%E8%87%AA%E7%A0%94%E5%9B%BE%E6%95%B0%E6%8D%AE%E5%BA%93%E6%9C%8D%E5%8A%A1%E8%B0%83%E7%A0%94%E4%B8%8E%E6%96%B9%E6%A1%88/feature062.md)
 > **T1 子文档**:`T1_协议研究_POC.md`
 
 ---
