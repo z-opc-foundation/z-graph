@@ -24,7 +24,7 @@ Bolt 4.4 规范；**只采用公开架构与协议资料，不复制上游代码
 |------|-----|
 | **仓库** | `z-graph`（remote: `github.com/z-opc-foundation/z-graph`，分支 `main`） |
 | **Maven 坐标** | `io.github.yuku123:z-graph`（聚合 POM）+ 5 个 reactor 子坐标 |
-| **当前版本** | `1.1.0`（v5 存储引擎版本；根 POM 与 5 个子 POM **逐字面写 1.1.0**，本仓没用 `${revision}`；发布形状由 flatten-maven-plugin 1.5.0 `oss` 模式自包含） |
+| **当前版本** | `1.0.8`（根 POM 与 5 个子 POM **逐字面写 1.0.8**，本仓没用 `${revision}`；发布形状由 flatten-maven-plugin 1.5.0 `oss` 模式自包含）——v5 引擎这批改动**尚未发版**，计划中的下一版是 `1.1.0`（见「Maven Central」行） |
 | **父项目** | `io.github.yuku123:z-boot-parent:1.1.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘；旧 README 写的 1.0.21 是过期记录） |
 | **Maven Central** | 实测 2026-10-09：`1.0.8` 及更早在 repo1 可读（ranged GET 200）；**`1.1.0` 尚未发布**（repo1 直连 404），发布走 `deploy_maven_center.sh` 并以 `/deployments` 状态为准 |
 | **默认端口** | Bolt `7687` · HTTP 控制面 `8090`（`ZGraphServer` 两个都起）；控制台 dev `5173` / 容器 `3333` / all-in-one `3000` |
@@ -40,7 +40,7 @@ Bolt 4.4 规范；**只采用公开架构与协议资料，不复制上游代码
 | 节点 / 边 CRUD、多标签节点 | `z-graph-api` `GraphStore` · `InMemoryGraphStore.addNode(long, Collection<String>, Map)` · `Node.getLabels()` | 边带类型与属性；`getOutEdges` / `getInEdges` / `getEdgesByType` |
 | Tag / EdgeType schema | `TagSchema` / `EdgeTypeSchema` + `CypherEngine` 的 `CREATE TAG` / `CREATE EDGE [TYPE]` / `DROP TAG` / `DROP EDGE` / `ALTER TAG` / `ALTER EDGE` / `REBUILD` | Nebula 风格声明式属性、类型与 NOT NULL 校验；覆盖前按旧 schema 校验存量数据 |
 | 属性索引 + 索引下推（**窄口径**） | `InMemoryGraphStore.createPropertyIndex` · `CypherEngine#tryIndexSeed` | 只有模式恰为 `(v:Label)`、WHERE 恰为 `v.prop = 字面量`、且 `(Label, prop)` 索引存在时才替换全表扫描；其余仍走标签扫描 |
-| OpenCypher 子集 | `CypherEngine`（2255 行，手写解析）+ `CypherExecutor`（`RETURN` 字面量旧路径） | 见下方「Cypher 支持矩阵」 |
+| OpenCypher 子集 | `CypherEngine`（手写解析）+ `CypherExecutor`（`RETURN` 字面量旧路径） | 见下方「Cypher 支持矩阵」 |
 | 变长路径 | `CypherEngine` 的 `(a)-[:TYPE*min..max]->(b)` | 反向 `<-[]->`、无方向 `-[]-`、类型过滤均支持 |
 | N 跳邻居 | `GraphStore.traverse(startNodeId, maxDepth, edgeType)` | 返回可达节点集合 |
 | MVCC 版本化图 | `GraphVersionStore`：`beginWrite` / `commit` / `checkout` / `checkoutBranch` / `createBranch` / `log` / `merge` / `nodeVersions` / `nodeVersionAt` / `garbageCollect` / `versionStats` / `reachableCommitCount` | 写事务（`TxBuffer`，原 VersionOverlayStore）只是暂存指令集的缓冲，**永不充当视图**；提交 = 版本链追加 + 内容哈希 commit object 落盘 + ref 原子移动（提交点）。读一律由 `RefViewGraphStore` 沿链按 ancestry 解析，引擎堆内不存在整图状态对象（`NoMirrorTest` 结构断言常驻） |
@@ -174,7 +174,7 @@ Maven reactor 只有 **5 个模块**（`z-graph-api` / `z-graph-protocol` / `z-g
 | 二进制协议 | Netty 4.1.138.Final（`netty-all`，版本由 `z-boot-parent` 自带地板的 netty-bom 供给） |
 | HTTP 控制面 | JDK `com.sun.net.httpserver.HttpServer`（**不是** Spring MVC / WebFlux） |
 | Spring 集成 | `spring-boot-autoconfigure:2.7.18`（仅 starter 模块依赖它，web 层不在依赖里） |
-| 日志 | `log4j-api:2.25.4` + 运行期 `slf4j-simple:2.0.13`（bolt-server） |
+| 日志 | `log4j-api:2.25.4`（各模块唯一的日志坐标；**无** slf4j-simple binding —— 库件不替应用写日志栈，bolt-server 运行时只有 log4j-api） |
 | 有意的版本分歧 | `slf4j-api` 2.0.13、`junit` 5.10.2 / `junit-platform` 1.10.2、`objenesis` 3.2 —— 根 POM 按坐标写**直接**条目顶住地板下压，注释里逐条写了原因 |
 | 测试 | JUnit 5（Jupiter）；195 个 `@Test`，分布在 25 个测试类（2026-10-19 按盘面实测订正） |
 | 前端 | React 18.3.1 + ReactDOM + Vite 5.4.10；自写 CSS，**无 AntD / 无组件库** |
@@ -364,7 +364,15 @@ mvn test                     # 195 个 @Test / 25 个测试类，不需要外部
 mvn -pl z-graph-core test    # 只跑引擎：161 个用例
 ```
 
-分布：`z-graph-core` 19 个测试类共 161 个用例（`MvccVersioningTest` 16、`CypherEngineTest` 15、
+> **计数口径（读表前先看这句）**：本节与「技术栈」表里的「195 个 `@Test` / 25 个测试类」是同一份
+> **2026-10-19 快照（2026-10-20 复核同值）**，口径是 `find . -path '*/src/test/*' -name '*.java'`
+> 的文件数与 `@Test` 注解数，**排除本仓 README 自守卫测试 `ReadmeClaimsTest`** —— 该守卫在快照之后
+> 加入 `z-graph-core`（自带 3 个用例），所以这些数说的是「守卫上线之前」的盘面，不是「此刻」的盘面。
+> 守卫本身（`z-graph-core/src/test/java/com/zifang/z/graph/core/ReadmeClaimsTest.java`）负责把本 README 里的
+> 定量主张（版本号 / 父项目版本 / reactor 模块数 / HTTP context 数 / 控制台 tab 数 / 环形缓冲条数 /
+> 聚合函数数 / 默认端口）与源码对齐：README 改了就红。
+
+分布：`z-graph-core` 18 个测试类共 161 个用例（`MvccVersioningTest` 16、`CypherEngineTest` 15、
 `GraphVersionStoreTest` 13（含 FF/删除传播/modify-delete 冲突等 merge 语义）、`ExplainAndDescribeTest` 13、
 `DdlAndPathTest` 13、`InMemoryGraphStoreTest` 12、`IndexOptimizerAndAlterTest` 12、`SchemaManagementTest` 12、
 `ShowAndAggregationTest` 12、`CypherExecutorTest` 11、`DiskStoreTest` 10（record 往返/reopen 幂等/链回溯/
