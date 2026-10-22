@@ -3,7 +3,7 @@ import {Alert, Button, Card, Col, Input, Row, Select, Space, Statistic, Table, T
 import {PlayCircleOutlined, ThunderboltOutlined} from '@ant-design/icons'
 import {useSearchParams} from 'react-router-dom'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isMutatingCypher} from '../services/api'
-import {EmptyState, PageHeader} from '@yuku123/z-frontend-common/ui'
+import {DEFAULT_PAGINATION, EmptyState, ListTable, PageHeader} from '@yuku123/z-frontend-common/ui'
 
 const {TextArea} = Input
 
@@ -121,8 +121,7 @@ export default function QueryConsole() {
 
     return (
         <div>
-            <PageHeader title="图查询"
-                        subtitle="Cypher 执行与执行计划（数据源 GET /api/graph/query、POST /api/graph/query/explain）"/>
+            <PageHeader title="图查询"/>
             <Row gutter={16}>
                 <Col span={16}>
                     <Card title="查询语句">
@@ -214,14 +213,23 @@ export default function QueryConsole() {
                     <Alert type="error" showIcon message={`查询失败：${graphErrorText(error)}`}
                            description="上游所有 catch 分支都只回 {error: msg}：Cypher 语法错、Tag 不存在、head 冲突（409 Stale head）都在这里。503 则是内嵌实例没 bind。"/>
                 ) : (
-                    <Table size="small" rowKey={(r, i) => i} loading={running} dataSource={rows ?? []}
-                           columns={columns} scroll={{x: 'max-content'}}
-                           pagination={{size: 'small', pageSize: 20, showSizeChanger: true}}
-                           locale={{
-                               emptyText: rows === null
-                                   ? <EmptyState title="还没有执行过查询" description="点「执行」或「执行计划」。这里没有预置示例数据。"/>
-                                   : <EmptyState title="返回 0 行" description="查询成功执行、上游确实给了空数组（空图或未命中）。"/>
-                           }}/>
+                    // 结果集走基座 ListTable：分页 / 查询 / EmptyState 三件套统一口径。
+                    // 结果列是查询动态决定的，所以 searchKeys 直接取当前列的 dataIndex ——
+                    // 过滤框按结果集里出现过的任意字段做端侧匹配。
+                    <ListTable
+                        rows={rows ?? []}
+                        rowKey={(r, i) => i}
+                        loading={running}
+                        columns={columns}
+                        scroll={{x: 'max-content'}}
+                        searchKeys={columns.map((c) => c.dataIndex).filter(Boolean)}
+                        searchPlaceholder="按结果列过滤"
+                        emptyTitle={rows === null ? '还没有执行过查询' : '返回 0 行'}
+                        emptyDescription={rows === null
+                            ? '点「执行」或「执行计划」。这里没有预置示例数据。'
+                            : '查询成功执行、上游确实给了空数组（空图或未命中）。'}
+                        pagination={{...DEFAULT_PAGINATION, size: 'small', pageSize: 20}}
+                        cardProps={{variant: 'borderless', styles: {body: {padding: 0}}}}/>
                 )}
             </Card>
 

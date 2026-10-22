@@ -2,7 +2,7 @@ import {useCallback, useEffect, useState} from 'react'
 import {Alert, Button, Card, Descriptions, Space, Table, Tag} from 'antd'
 import {ReloadOutlined} from '@ant-design/icons'
 import {graphApi, graphErrorText} from '../services/api'
-import {PageHeader} from '@yuku123/z-frontend-common/ui'
+import {DEFAULT_PAGINATION, ListTable, PageHeader} from '@yuku123/z-frontend-common/ui'
 
 const ENDPOINT_COLUMNS = [
     {title: '方法', dataIndex: 'method', key: 'method', width: 90, render: (v) => <Tag>{v}</Tag>},
@@ -94,8 +94,7 @@ export default function InstanceStatus() {
 
     return (
         <div>
-            <PageHeader title="实例与端口"
-                        subtitle="GraphProxyController 自省接口 GET /api/graph/__instance + 控制面自报的 /meta/metrics"/>
+            <PageHeader title="实例与端口"/>
             <Card extra={<Space>
                 <Button icon={<ReloadOutlined/>} loading={loading} onClick={fetch}>刷新</Button>
             </Space>}>
@@ -218,12 +217,25 @@ export default function InstanceStatus() {
                     <Alert type="info" showIcon
                            message={metricsError ? '读不到请求日志（同上）' : '日志缓冲为空 —— 控制面刚起或还没打过请求'}/>
                 ) : (
-                    <Table size="small" rowKey={(r) => `${r.timestamp}-${r.requestId}`} loading={loading}
-                           dataSource={logs.entries ?? []} columns={ENDPOINT_COLUMNS}
-                           pagination={{
-                               size: 'small', total: logs.total ?? 0, pageSize: 20,
-                               showTotal: (t) => `环形缓冲 ${t} 条 / 容量 ${logs.bufferSize ?? '-'}`
-                           }}/>
+                    // 列表页三件套（分页 + 查询 + EmptyState）由基座 ListTable 一次带齐。
+                    // 日志是上游环形缓冲的最近 20 条窗口，所以分页用基座默认口径 + pageSize 20，
+                    // 并在 showTotal 里保留"环形缓冲 / 容量"这两个运维要看的数。
+                    <ListTable
+                        rows={logs.entries ?? []}
+                        rowKey={(r) => `${r.timestamp}-${r.requestId}`}
+                        loading={loading}
+                        columns={ENDPOINT_COLUMNS}
+                        searchKeys={['path', 'requestId', 'clientIp']}
+                        searchPlaceholder="按路径 / 请求 ID / 来源 IP 过滤"
+                        emptyTitle="暂无请求日志"
+                        emptyDescription="控制面刚起或还没打过请求"
+                        pagination={{
+                            ...DEFAULT_PAGINATION,
+                            size: 'small',
+                            pageSize: 20,
+                            showTotal: (t) => `环形缓冲 ${logs.total ?? 0} 条 / 容量 ${logs.bufferSize ?? '-'}，本页 ${t} 条`
+                        }}
+                        cardProps={{variant: 'borderless', styles: {body: {padding: 0}}}}/>
                 )}
             </Card>
         </div>

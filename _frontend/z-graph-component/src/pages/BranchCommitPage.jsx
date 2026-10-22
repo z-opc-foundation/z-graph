@@ -1,9 +1,9 @@
 import {useCallback, useEffect, useMemo, useState} from 'react'
-import {Alert, Button, Card, Col, Row, Space, Table, Tag, Tooltip} from 'antd'
+import {Alert, Button, Card, Col, Row, Space, Tag, Tooltip} from 'antd'
 import {BranchesOutlined, HistoryOutlined, ReloadOutlined} from '@ant-design/icons'
 import {useNavigate} from 'react-router-dom'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isNotBoundError} from '../services/api'
-import {EmptyState, PageHeader} from '@yuku123/z-frontend-common/ui'
+import {EmptyState, ListTable, PageHeader} from '@yuku123/z-frontend-common/ui'
 
 function fmtTime(ms) {
     if (ms == null) return '-'
@@ -86,7 +86,7 @@ export default function BranchCommitPage() {
     if (error) {
         return (
             <div>
-                <PageHeader title="分支与提交" subtitle="GET /api/graph/meta/branches + /api/graph/meta/commits"/>
+                <PageHeader title="分支与提交"/>
                 <Alert type={isNotBoundError(error) ? 'error' : 'warning'} showIcon
                        message={`提交历史读取失败：${graphErrorText(error)}`}
                        description={isNotBoundError(error)
@@ -98,8 +98,7 @@ export default function BranchCommitPage() {
 
     return (
         <div>
-            <PageHeader title="分支与提交"
-                        subtitle="z-graph 的 Git 式版本面：分支 head 与全量 commit 图（数据源 /api/graph/meta/branches、/meta/commits）"/>
+            <PageHeader title="分支与提交"/>
             <Card title={<Space><BranchesOutlined/>分支（{branches.length}）</Space>}
                   extra={<Button icon={<ReloadOutlined/>} loading={loading} onClick={fetch}>刷新</Button>}>
                 <Row gutter={[16, 16]}>
@@ -137,62 +136,65 @@ export default function BranchCommitPage() {
                 </Row>
             </Card>
 
-            <Card style={{marginTop: 16}}
-                  title={<Space><HistoryOutlined/>提交历史（全量 commit 图，{visible.length} 条）</Space>}
-                  extra={filter
-                      ? <Space><Tag color="processing" closable onClose={() => setFilter(null)}>
-                          branch = {filter}
-                        </Tag></Space>
-                      : <span style={{fontSize: 12, color: '#64748b'}}>点分支卡片可筛选</span>}>
-                <Table size="small" rowKey="id" loading={loading} dataSource={visible}
-                       pagination={{size: 'small', pageSize: 20, showSizeChanger: true}}
-                       columns={[
-                           {
-                               title: 'commit', dataIndex: 'id', key: 'id', width: 170,
-                               render: (v) => <Tooltip title={v}><code>{`${String(v).slice(0, 12)}…`}</code></Tooltip>
-                           },
-                           {
-                               title: '分支', dataIndex: 'branch', key: 'branch', width: 110,
-                               render: (v) => <Tag color={v === DEFAULT_BRANCH ? 'blue' : 'geekblue'}>{v}</Tag>
-                           },
-                           {title: '作者', dataIndex: 'author', key: 'author', width: 110},
-                           {
-                               title: '说明', dataIndex: 'message', key: 'message',
-                               ellipsis: {showTitle: false},
-                               render: (v) => <Tooltip title={v} placement="topLeft">
-                                   <span>{v || '-'}</span></Tooltip>
-                           },
-                           {title: '时间', dataIndex: 'timestamp', key: 'timestamp', width: 190, render: fmtTime},
-                           {title: '点', dataIndex: 'nodeCount', key: 'nodeCount', width: 70},
-                           {title: '边', dataIndex: 'edgeCount', key: 'edgeCount', width: 70},
-                           {
-                               title: '父提交', dataIndex: 'parents', key: 'parents', width: 150,
-                               render: (ps) => !Array.isArray(ps) || ps.length === 0
-                                   ? <Tag>根提交</Tag>
-                                   : <Space direction="vertical" size={0}>
-                                       {ps.map((p) => (
-                                           <Tooltip key={p}
-                                                    title={byId.has(p) ? `${byId.get(p).message} · ${fmtTime(byId.get(p).timestamp)}` : p}>
-                                               <code style={{fontSize: 12}}>{`${String(p).slice(0, 8)}…`}</code>
-                                           </Tooltip>
-                                       ))}
-                                   </Space>
-                           },
-                           {
-                               title: '操作', key: 'action', width: 130,
-                               render: (_, r) => (
-                                   <Button type="link" size="small"
-                                           onClick={() => navigate(`/graph/query?branch=${encodeURIComponent(r.branch)}&commit=${encodeURIComponent(r.id)}`)}>
-                                       按此版本查
-                                   </Button>
-                               )
-                           },
-                       ]}
-                       locale={{
-                           emptyText: <EmptyState title="没有任何提交"
-                                                  description="GET /api/graph/meta/commits 通了但返回空数组 —— 上游 GraphVersionStore 构造时至少会有一个 Initial graph 根提交，所以这一格为空要去「实例与端口」页确认应答者。"/>
-                       }}/>
-            </Card>
+            {/* 提交历史表走基座 ListTable：分页 / 查询 / EmptyState 三件套统一口径，
+                分支筛选的 Tag 放 cardExtra，与搜索框并排。 */}
+            <ListTable
+                cardTitle={<Space><HistoryOutlined/>提交历史（全量 commit 图，{visible.length} 条）</Space>}
+                cardExtra={filter
+                    ? <Space><Tag color="processing" closable onClose={() => setFilter(null)}>
+                        branch = {filter}
+                    </Tag></Space>
+                    : <span style={{fontSize: 12, color: '#64748b'}}>点分支卡片可筛选</span>}
+                rows={visible}
+                rowKey="id"
+                loading={loading}
+                searchKeys={['id', 'author', 'message']}
+                searchPlaceholder="按 commit / 作者 / 说明过滤"
+                emptyTitle="没有任何提交"
+                emptyDescription="GET /api/graph/meta/commits 通了但返回空数组 —— 上游 GraphVersionStore 构造时至少会有一个 Initial graph 根提交，所以这一格为空要去「实例与端口」页确认应答者。"
+                cardProps={{style: {marginTop: 16}}}
+                columns={[
+                    {
+                        title: 'commit', dataIndex: 'id', key: 'id', width: 170,
+                        render: (v) => <Tooltip title={v}><code>{`${String(v).slice(0, 12)}…`}</code></Tooltip>
+                    },
+                    {
+                        title: '分支', dataIndex: 'branch', key: 'branch', width: 110,
+                        render: (v) => <Tag color={v === DEFAULT_BRANCH ? 'blue' : 'geekblue'}>{v}</Tag>
+                    },
+                    {title: '作者', dataIndex: 'author', key: 'author', width: 110},
+                    {
+                        title: '说明', dataIndex: 'message', key: 'message',
+                        ellipsis: {showTitle: false},
+                        render: (v) => <Tooltip title={v} placement="topLeft">
+                            <span>{v || '-'}</span></Tooltip>
+                    },
+                    {title: '时间', dataIndex: 'timestamp', key: 'timestamp', width: 190, render: fmtTime},
+                    {title: '点', dataIndex: 'nodeCount', key: 'nodeCount', width: 70},
+                    {title: '边', dataIndex: 'edgeCount', key: 'edgeCount', width: 70},
+                    {
+                        title: '父提交', dataIndex: 'parents', key: 'parents', width: 150,
+                        render: (ps) => !Array.isArray(ps) || ps.length === 0
+                            ? <Tag>根提交</Tag>
+                            : <Space direction="vertical" size={0}>
+                                {ps.map((p) => (
+                                    <Tooltip key={p}
+                                             title={byId.has(p) ? `${byId.get(p).message} · ${fmtTime(byId.get(p).timestamp)}` : p}>
+                                        <code style={{fontSize: 12}}>{`${String(p).slice(0, 8)}…`}</code>
+                                    </Tooltip>
+                                ))}
+                            </Space>
+                    },
+                    {
+                        title: '操作', key: 'action', width: 130,
+                        render: (_, r) => (
+                            <Button type="link" size="small"
+                                    onClick={() => navigate(`/graph/query?branch=${encodeURIComponent(r.branch)}&commit=${encodeURIComponent(r.id)}`)}>
+                                按此版本查
+                            </Button>
+                        )
+                    },
+                ]}/>
         </div>
     )
 }
