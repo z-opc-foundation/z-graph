@@ -1,6 +1,6 @@
 import { BranchesOutlined, CodeOutlined, DashboardOutlined, DatabaseOutlined, FileTextOutlined, HistoryOutlined, HomeOutlined, PartitionOutlined, ProfileOutlined } from '@ant-design/icons'
 import './console/styles.css'
-import {withGraphServer} from './console/serverHook.jsx'
+import {withGraphServer, withGraphConsole} from './console/serverHook.jsx'
 import Dashboard from './console/pages/Dashboard.jsx'
 import GraphView from './console/pages/GraphView.jsx'
 import Branches from './console/pages/Branches.jsx'
@@ -12,7 +12,7 @@ import ApiDocs from './console/pages/ApiDocs.jsx'
 import InstanceStatus from './pages/InstanceStatus.jsx'
 
 
-export {withGraphServer, useGraphServer} from './console/serverHook.jsx'
+export {withGraphServer, withGraphConsole, useGraphServer} from './console/serverHook.jsx'
 export {api} from './console/api'
 import HomePage from './pages/HomePage'
 import GraphApp from './pages/GraphApp.jsx'
@@ -34,14 +34,17 @@ export const menuItems = [
 
 export const routes = [
     { path: '/z-graph/home', Component: HomePage },
-    { path: '/z-graph/dashboard', Component: withGraphServer(Dashboard) },
-    { path: '/z-graph/graph', Component: withGraphServer(GraphView) },
-    { path: '/z-graph/branches', Component: withGraphServer(Branches) },
-    { path: '/z-graph/commits', Component: withGraphServer(Commits) },
-    { path: '/z-graph/query', Component: withGraphServer(QueryPage) },
-    { path: '/z-graph/schema', Component: withGraphServer(Schema) },
-    { path: '/z-graph/logs', Component: withGraphServer(LogViewer) },
-    { path: '/z-graph/api-docs', Component: withGraphServer(ApiDocs) },
+    // 旧版 console 页面（吃 src/console/styles.css）⇒ 必须走 withGraphConsole，
+    // 否则那份样式表里的裸元素选择器会泄漏到主壳（详见 console/serverHook.jsx 注释）。
+    { path: '/z-graph/dashboard', Component: withGraphConsole(Dashboard) },
+    { path: '/z-graph/graph', Component: withGraphConsole(GraphView) },
+    { path: '/z-graph/branches', Component: withGraphConsole(Branches) },
+    { path: '/z-graph/commits', Component: withGraphConsole(Commits) },
+    { path: '/z-graph/query', Component: withGraphConsole(QueryPage) },
+    { path: '/z-graph/schema', Component: withGraphConsole(Schema) },
+    { path: '/z-graph/logs', Component: withGraphConsole(LogViewer) },
+    { path: '/z-graph/api-docs', Component: withGraphConsole(ApiDocs) },
+    // 新版页面（antd 实现）不吃 console 样式表 ⇒ 不加作用域
     { path: '/z-graph/instance', Component: withGraphServer(InstanceStatus) },
     // catchall 放最后 —— 否则 `:rest*` 会先于具体路由匹配,导致 /z-graph/query
     // 全部跳进 GraphApp 的内层 /schema 路由(URL 变成 /z-graph/query/schema)。
