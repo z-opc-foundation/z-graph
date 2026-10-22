@@ -323,7 +323,8 @@ CORS 白名单命中时回显具体 origin 并带 `Vary: Origin`，`*` 时直接
 |----------|------|------|
 | `Z_GRAPH_BOLT_PORT` | `7687` | Bolt 端口（首个命令行参数可覆盖） |
 | `Z_GRAPH_HTTP_PORT` | `8090` | 控制面端口（第二个命令行参数可覆盖） |
-| `Z_GRAPH_DATA_DIR` | 未设 = 进程临时目录 | 版本仓库目录；容器里默认 `/var/lib/z-graph` |
+| `Z_BASE_GRAPH_DATA_DIR` | 未设 = 进程临时目录 | 版本仓库目录（**规范键** `z.base.graph.data-dir` 的环境变量形态，优先）；容器里默认 `/var/lib/z-graph` |
+| `Z_GRAPH_DATA_DIR` | 未设 = 进程临时目录 | 版本仓库目录（**兼容别名**，规范键未设时生效）；容器里默认 `/var/lib/z-graph` |
 | `Z_GRAPH_API_TOKEN` | 未设 = 不鉴权 | 设置后启用 Bearer 校验（`Authorization: Bearer <token>` 或 `?token=`）。**值一律由部署侧注入，禁止写进 yml / 镜像 / 文档** |
 | `Z_GRAPH_RATE_LIMIT` | `0`（不限） | 每 IP 每分钟请求上限，1 分钟窗口，超限返回 429 |
 | `Z_GRAPH_CORS_ALLOWED_ORIGINS` | `*` | 逗号分隔 origin；系统属性 `z.graph.cors.allowedOrigins` 优先级更高 |
@@ -342,12 +343,48 @@ z:
     data-dir:                      # 留空 = 进程临时目录（引擎是磁盘追加式，不占用户指定路径）
 ```
 
+> ⚠ `z.graph.data-dir` 是**兼容别名**。**规范键是 `z.base.graph.data-dir`**
+> （对齐组织 `z.base.db.*` 家族命名），别名保留是因为既有部署已经在用它
+> （`deploy/kubernetes/z-graph.yaml` 的 `Z_GRAPH_DATA_DIR`、z-opc 的 `application.properties`），
+> 直接改前缀会打断现网。**新配置一律用规范键。**
+
 这 3 个键就是 `ZGraphProperties` 的全部字段。**1.1.0 起删掉了** `checkpoint-interval` /
 `max-retained-views` / `retained-whole-graph-views` / `view-layer-limit` 四个视图缓存键——视图缓存与
 检查点在 v5 引擎里已不存在（读一律即时解析），留着只会骗人；也没有 `mode`、`host`、`bolt-port`、
 `rest-port`、`persistence.*`、`cache.*` 这些键（控制面 bind 通配地址所以没有 host，starter 也压根不起
 Bolt）。`GraphControlServer` 在构造函数里就 bind，端口被占则容器启动直接失败；Bean 配
 `destroyMethod = "stop"`。
+
+### data-dir 三档行为（临时目录 / 显式目录 / 开发口径）
+
+| 档 | 触发条件 | 仓库落点 | 启动日志 |
+|----|----------|----------|----------|
+| **临时目录**（默认） | data-dir 留空 | `Files.createTempDirectory("z-graph-ephemeral-")` ⇒ **进程退出即弃**，重启数据全丢 | 非开发 profile ⇒ **WARN**（含配置指引）；开发 profile ⇒ 安静 |
+| **显式目录** | 配了 data-dir | 该目录（`store/` + `commits/` + `refs/`），**每个 commit 落盘，重启可恢复** | 无 WARN |
+| **开发口径** | data-dir 留空 **且** profile ∈ 静默集合 | 同「临时目录」 | **无 WARN**（临时目录是开发口径的预期行为，不该吵） |
+
+**解析优先级**（先到先得，空白值按「没配」处理往下走）：
+
+1. `z.base.graph.data-dir` —— **规范键**（属性形态）
+2. `Z_BASE_GRAPH_DATA_DIR` —— 规范键的环境变量形态
+3. `z.graph.data-dir` —— **兼容别名**（属性形态，既有部署在用）
+4. `Z_GRAPH_DATA_DIR` —— 兼容别名的环境变量形态
+
+规范键整体高于别名整体（同一个键的两种形态算一档）；别名内部仍是「属性形态高于环境变量形态」。
+**留空时的行为与改动前逐字一致**（落临时目录），兼容优先。
+
+**静默 profile 集合**：默认 `dev,local,localhost` —— 开发口径，临时目录是预期行为，不该吵。
+组织实际 profile 名是 `local` / `prod` / `localhost`（**没有 `dev`**），卡里说的 dev 按
+「开发环境」这一语义落到 `local` / `localhost` 上，`dev` 也一并留着兼容。
+`prod` 与其它 profile（以及**没设 profile** 时的 `default`）留空即 WARN —— 那正是「生产要显式化目录」
+这句话真正要生效的地方。可用 `z.base.graph.quiet-profiles`（逗号分隔）覆盖。
+
+**WARN 文案里写明了怎么配**（`z.base.graph.data-dir` / `Z_BASE_GRAPH_DATA_DIR`）以及
+「数据随进程退出丢弃」的后果 —— 光喊「没配」不给出路的日志没有用。
+
+WARN 只在 **starter 真的装了 Bean**（`z.graph.enabled=true`）时才有：开关关着时压根不装 Bean，
+也就没有启动日志可吵（两条装 Bean 的入口 `ZGraphAutoConfiguration` 与 `GraphEmbeddedServerConfig`
+共用同一份判定逻辑，口径对齐）。
 
 ### 优雅关闭
 
@@ -371,6 +408,12 @@ mvn -pl z-graph-core test    # 只跑引擎：161 个用例
 > 守卫本身（`z-graph-core/src/test/java/com/zifang/z/graph/core/ReadmeClaimsTest.java`）负责把本 README 里的
 > 定量主张（版本号 / 父项目版本 / reactor 模块数 / HTTP context 数 / 控制台 tab 数 / 环形缓冲条数 /
 > 聚合函数数 / 默认端口）与源码对齐：README 改了就红。
+>
+> **2026-10-22 追加**（data-dir 约定卡）：快照之后又加了 `z-graph-core` 的
+> `GraphVersionStoreDataDirRecoveryTest`（2 个用例）与 `z-graph-spring-boot-starter` 的
+> `ZGraphDataDirWarnTest`（14 个用例）+ `RecordingSlf4jProvider`（测试用日志 provider，0 个用例）
+> ⇒ 即此刻 `z-graph-core` 19 个测试类 / 166 个用例（含守卫 3 个）、
+> `z-graph-spring-boot-starter` 3 个测试类 / 22 个用例。
 
 分布：`z-graph-core` 18 个测试类共 161 个用例（`MvccVersioningTest` 16、`CypherEngineTest` 15、
 `GraphVersionStoreTest` 13（含 FF/删除传播/modify-delete 冲突等 merge 语义）、`ExplainAndDescribeTest` 13、

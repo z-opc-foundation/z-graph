@@ -2,14 +2,17 @@ package com.zifang.z.graph.starter.host;
 
 import com.zifang.z.graph.bolt.GraphControlServer;
 import com.zifang.z.graph.core.GraphVersionStore;
+import com.zifang.z.graph.starter.autoconfigure.ZGraphProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.EnvironmentAware;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.env.Environment;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -63,16 +66,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @Configuration
 @ConditionalOnProperty(prefix = "z.graph", name = "enabled", havingValue = "true")
-public class GraphEmbeddedServerConfig {
+public class GraphEmbeddedServerConfig implements EnvironmentAware {
 
     private static final Logger log = LoggerFactory.getLogger(GraphEmbeddedServerConfig.class);
 
     @Value("${z.graph.server.port:8090}")
     private int port;
 
-    /** 留空 = 纯内存 (进程重启即清空, 与 z-graph 独立进程默认行为一致); 配目录 = 每个 commit 落盘可恢复 */
-    @Value("${z.graph.data-dir:}")
-    private String dataDir;
+    /**
+     * 留空 = 纯内存 (进程重启即清空, 与 z-graph 独立进程默认行为一致); 配目录 = 每个 commit 落盘可恢复。
+     *
+     * <p>取值口径与 {@code ZGraphAutoConfiguration} **同一份**（见
+     * {@code ZGraphProperties.resolveDataDir}）：规范键 {@code z.base.graph.data-dir}
+     * 优先，兼容别名 {@code z.graph.data-dir} 次之，环境变量再后。
+     * 留空且非静默 profile 时启动 WARN（文案含配置指引）。</p>
+     */
+    private Environment environment;
 
     private static final AtomicBoolean SERVER_STARTED = new AtomicBoolean(false);
 
@@ -89,16 +98,28 @@ public class GraphEmbeddedServerConfig {
     @Bean(name = "zGraphVersionStore")
     public GraphVersionStore zGraphVersionStore() {
         GraphVersionStore created;
-        if (dataDir == null || dataDir.trim().isEmpty()) {
-            log.info("[z-graph] GraphVersionStore = in-memory (zgraph.data-dir 未配置, 重启即清空)");
+        String dataDir = ZGraphProperties.resolveDataDir(environment);
+        if (dataDir == null) {
+            log.info("[z-graph] GraphVersionStore = in-memory (data-dir 未配置, 重启即清空)");
             created = new GraphVersionStore();
         } else {
-            Path dir = Paths.get(dataDir.trim());
+            Path dir = Paths.get(dataDir);
             log.info("[z-graph] GraphVersionStore = durable, storageDirectory={}", dir);
             created = new GraphVersionStore(dir);
         }
+        // 留空 ⇒ 落进程临时目录 ⇒ 非静默 profile 必须 WARN（文案含配置指引），
+        // 与 ZGraphAutoConfiguration 同一份策略（两处口径对齐）。
+        String warning = ZGraphProperties.dataDirWarning(environment);
+        if (warning != null) {
+            log.warn(warning);
+        }
         this.store = created;
         return created;
+    }
+
+    @Override
+    public void setEnvironment(Environment environment) {
+        this.environment = environment;
     }
 
     @EventListener(ContextRefreshedEvent.class)

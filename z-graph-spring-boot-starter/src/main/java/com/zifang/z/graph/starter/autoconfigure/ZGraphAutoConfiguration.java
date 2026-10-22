@@ -10,6 +10,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.env.Environment;
 
 import java.io.IOException;
 import java.nio.file.Paths;
@@ -39,13 +40,19 @@ public class ZGraphAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public GraphVersionStore graphVersionStore(ZGraphProperties props) {
-        String dataDir = props.getDataDir();
-        GraphVersionStore store = dataDir == null || dataDir.trim().isEmpty()
+    public GraphVersionStore graphVersionStore(Environment env) {
+        // 规范键 z.base.graph.data-dir > 兼容别名 z.graph.data-dir > 环境变量 > 空。
+        // 兼容别名生效时行为与改动前逐字一致（只有规范键是新增的、且优先级更高）。
+        String dataDir = ZGraphProperties.resolveDataDir(env);
+        GraphVersionStore store = dataDir == null
                 ? new GraphVersionStore()
                 : new GraphVersionStore(Paths.get(dataDir));
-        log.info("z-graph 版本仓库就绪: dataDir={}",
-                dataDir == null || dataDir.trim().isEmpty() ? "(ephemeral)" : dataDir);
+        log.info("z-graph 版本仓库就绪: dataDir={}", dataDir == null ? "(ephemeral)" : dataDir);
+        // 留空 ⇒ 落进程临时目录 ⇒ 非静默 profile 必须 WARN（文案含配置指引）。
+        String warning = ZGraphProperties.dataDirWarning(env);
+        if (warning != null) {
+            log.warn(warning);
+        }
         return store;
     }
 

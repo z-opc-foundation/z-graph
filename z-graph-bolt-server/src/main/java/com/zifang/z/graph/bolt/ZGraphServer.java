@@ -17,7 +17,8 @@ import java.util.concurrent.CountDownLatch;
  *     <li>{@code z.graph.bindHost} (控制面 bind 地址,默认回环 127.0.0.1;
  *         容器里要对外暴露时传 {@code -Dz.graph.bindHost=0.0.0.0}。
  *         只认系统属性、**不设环境变量**,免得多一个新 env 名)</li>
- *     <li>{@code Z_GRAPH_DATA_DIR} / {@code z.graph.dataDir} (可选,仓库持久化目录)</li>
+ *     <li>{@code Z_GRAPH_DATA_DIR} / {@code z.graph.dataDir} (可选,仓库持久化目录;
+ *         兼容别名 —— 规范键是 {@code Z_BASE_GRAPH_DATA_DIR}, 优先)</li>
  *     <li>{@code Z_GRAPH_CORS_ALLOWED_ORIGINS} (逗号分隔 origin 列表)</li>
  * </ul>
  */
@@ -31,8 +32,7 @@ public final class ZGraphServer {
                 "Z_GRAPH_BOLT_PORT", "z.graph.boltPort", 7687);
         int httpPort = resolvePort(args.length > 1 ? args[1] : null,
                 "Z_GRAPH_HTTP_PORT", "z.graph.httpPort", 8090);
-        String dataDirectory = System.getenv().getOrDefault("Z_GRAPH_DATA_DIR",
-                System.getProperty("z.graph.dataDir"));
+        String dataDirectory = resolveDataDir();
 
         GraphVersionStore repository = dataDirectory == null
                 ? new GraphVersionStore()
@@ -65,6 +65,26 @@ public final class ZGraphServer {
         String propValue = System.getProperty(propKey);
         if (propValue != null && !propValue.trim().isEmpty()) return Integer.parseInt(propValue);
         return defaultPort;
+    }
+
+    /**
+     * 仓库目录解析：规范键环境变量 {@code Z_BASE_GRAPH_DATA_DIR} 优先，
+     * 兼容别名 {@code Z_GRAPH_DATA_DIR} 次之，系统属性 {@code z.graph.dataDir} 最后。
+     *
+     * <p>规范键与 starter 侧是同一个键（{@code z.base.graph.data-dir}）的两种形态；
+     * 兼容别名保留是因为既有部署（k8s ConfigMap）已经在用 {@code Z_GRAPH_DATA_DIR}，
+     * 改名等于打断线上配置。</p>
+     *
+     * @return 生效目录；null = 没配 ⇒ 落进程临时目录（进程退出即弃）
+     */
+    private static String resolveDataDir() {
+        String canonical = System.getenv("Z_BASE_GRAPH_DATA_DIR");
+        if (canonical != null && !canonical.trim().isEmpty()) return canonical.trim();
+        String compat = System.getenv("Z_GRAPH_DATA_DIR");
+        if (compat != null && !compat.trim().isEmpty()) return compat.trim();
+        String prop = System.getProperty("z.graph.dataDir");
+        if (prop != null && !prop.trim().isEmpty()) return prop.trim();
+        return null;
     }
 
     /**
