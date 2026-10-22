@@ -49,7 +49,7 @@ Bolt 4.4 规范；**只采用公开架构与协议资料，不复制上游代码
 | 磁盘存储（追加式版本链） | `com.zifang.z.graph.core.storage` 包：`StorageEngine` 门面 + `VersionStore` / `PostingStore` / `FixedRecordFile`（mmap 窗口）/ `AppendSegment` / `EntityHeadTable` 槽表 / `NameDictionary` / `CommitObjectStore` / `RefStore` / `AncestryIndex` | 布局见下方「存储架构（v5）」；`GraphCodec.STORAGE_VERSION=5`；v4 仓（`objects/`+`repository.bin`）open 时自动迁移并保留 legacyId 反查 |
 | GC 与压实 | `garbageCollect(keepBranches...)` | 不可达 commit object 删除 + 可达 delta 按 commitSeq 序重放进新引擎目录、原子换名；`versionRecordCount`/`payloadBytes` 回落到可达历史真实规模，保留分支的全部历史视图照常可读 |
 | Bolt 风格协议服务 | `BoltServer`（Netty pipeline）+ `z-graph-protocol`（`BoltConstants` / `BoltFrames` / `BoltMessageDecoder`）+ `BoltMessageHandler` | 消息面见下方「Bolt 消息矩阵」 |
-| HTTP 控制面 | `GraphControlServer`（JDK `com.sun.net.httpserver`，13 个 context） | 认证 / 限流 / 安全响应头 / CORS / GZIP / 请求日志 / 指标 |
+| HTTP 控制面 | `GraphControlServer`（JDK `com.sun.net.httpserver`，15 个 context） | 认证 / 限流 / 安全响应头 / CORS / GZIP / 请求日志 / 指标 |
 | Spring Boot 自动装配 | `ZGraphAutoConfiguration` + `ZGraphProperties`（前缀 `z.graph`，`AutoConfiguration.imports` 已注册） | `z.graph.enabled` **默认 false**；装的是 `GraphVersionStore` + 内嵌 HTTP 控制面，**不起 BoltServer** |
 | 可视化控制台 | `z-graph-console`（React 18 + Vite 5，`src/App.jsx` 8 个 tab） | 无 AntD 依赖，样式是自写的 `src/styles.css` |
 | 观测 | `/meta/metrics`（JSON）、`/meta/logs`（500 条环形缓冲）、`X-Request-ID` 复用/生成 | Prometheus 文本格式**未实现**，别按 exposition 接 |
@@ -283,7 +283,7 @@ Schema、请求日志、API 文档（`src/App.jsx` 的 `TABS`，页面实现在 
 
 ## 🔌 HTTP API
 
-`GraphControlServer` 注册 **13 个 context**（控制台的 `src/pages/ApiDocs.jsx` 文档化了其中 12 个业务端点，
+`GraphControlServer` 注册 **15 个 context**（控制台的 `src/pages/ApiDocs.jsx` 文档化了其中 12 个业务端点，
 不含 `/options`）：
 
 | 路径 | 方法 | 说明 |
@@ -300,6 +300,8 @@ Schema、请求日志、API 文档（`src/App.jsx` 的 `TABS`，页面实现在 
 | `/meta/logs` | GET | 环形缓冲最多 500 条；`?limit&offset&method&status=4xx\|5xx\|2xx\|精确码&path&requestId` |
 | `/meta/export` | GET | `?branch=` 导出节点 + 按类型取的边 + schema |
 | `/meta/import` | POST | body 的 `nodes` / `edges` 段以 Cypher `CREATE` 落地；非 POST → 405 |
+| `/maintenance/gc` | POST | 版本链 GC 一轮；`?keep=main,feature`（**留空 = 保留全部分支**）；回 `collected` / 前后 commit 数 / 分支列表 / 耗时 |
+| `/maintenance/snapshot` | POST | 导出分支 head 视图快照；`?branch=&dir=`（落盘目录）、`?stream=true`（二进制回传，元数据在 `X-Commit-Id` / `X-Snapshot-Sha256`） |
 | `/options` | OPTIONS | 204 + CORS 头；其他方法 405 |
 
 统一行为：安全响应头 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
@@ -584,7 +586,13 @@ _Maintained by the z-opc-foundation organization._
 
 - [`_doc/001_arch/`](_doc/001_arch/) — 架构与总览：
   - [`00-overview.md`](_doc/001_arch/00-overview.md) — 项目总览：v5 存储引擎的版本链与文件布局、MVCC 读/写路径与三方合并、
-    OpenCypher 子集的支持矩阵与缺口、Bolt 消息矩阵、13 个 HTTP context、控制台 8 个 tab、部署端口与源码包树
+    OpenCypher 子集的支持矩阵与缺口、Bolt 消息矩阵、15 个 HTTP context、控制台 8 个 tab、部署端口与源码包树
+
+- [`_doc/002_ops/`](_doc/002_ops/) — 运维口径：
+  - [`01_GC可达性与回收规则.md`](_doc/002_ops/01_GC可达性与回收规则.md) — **GC 回收什么、不回收什么**：
+    keep 集合怎么定、可达集（第一父链 ∪ 全父祖先闭包）怎么算、哪些 commit 不可回收、
+    压实做了什么、失败怎么可见。**逐条对得上 `GraphVersionStore.garbageCollect` 的实现**，
+    配套演练测试 `GraphMaintenanceRehearsalTest`（TASK-20261012-027）。
 
 - [`_doc/005_testing/`](_doc/005_testing/) — 测试记录与验收产物：
   - [`01-test-report.md`](_doc/005_testing/01-test-report.md) — T1 阶段（2026-08-31）Bolt POC 端到端报告：单元 25/25、

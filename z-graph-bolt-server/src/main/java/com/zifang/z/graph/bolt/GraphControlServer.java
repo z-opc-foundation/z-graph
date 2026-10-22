@@ -7,6 +7,7 @@ import com.zifang.z.graph.api.GraphCommit;
 import com.zifang.z.graph.api.GraphStore;
 import com.zifang.z.graph.core.CypherEngine;
 import com.zifang.z.graph.core.GraphCheckout;
+import com.zifang.z.graph.core.GraphMaintenanceService;
 import com.zifang.z.graph.core.GraphMetaService;
 import com.zifang.z.graph.core.GraphQueryService;
 import com.zifang.z.graph.core.GraphVersionStore;
@@ -15,6 +16,7 @@ import com.zifang.z.graph.core.GraphWriteTransaction;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
@@ -22,7 +24,11 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -62,6 +68,7 @@ public final class GraphControlServer {
 
     private final HttpServer server;
     private final GraphVersionStore repository;
+    private final GraphMaintenanceService maintenance;
     private final GraphMetaService metaService;
     private final GraphQueryService queryService;
     private final String bindHost;   // 实际 bind 的地址（默认回环）
@@ -103,6 +110,7 @@ public final class GraphControlServer {
      */
     public GraphControlServer(String host, int port, GraphVersionStore repository, String apiToken) throws IOException {
         this.repository = Objects.requireNonNull(repository, "repository");
+        this.maintenance = new GraphMaintenanceService(repository);
         this.metaService = new GraphMetaService(repository);
         this.queryService = new GraphQueryService(repository);
         this.bindHost = normalizeBindHost(host);
@@ -125,6 +133,9 @@ public final class GraphControlServer {
         server.createContext("/query/batch", logAndHandle(this::handleBatch));
         server.createContext("/query/explain", logAndHandle(this::handleExplain));
         server.createContext("/query", logAndHandle(this::handleQuery));
+        // 运维面（TASK-20261012-027）：GC 回收 + 快照导出，定时由 z-schedule 打过来。
+        server.createContext("/maintenance/gc", logAndHandle(this::handleMaintenanceGc));
+        server.createContext("/maintenance/snapshot", logAndHandle(this::handleMaintenanceSnapshot));
         // OPTIONS 预检 + CORS 头
         server.createContext("/options", logAndHandle(exchange -> writeNoContent(exchange)));
     }
@@ -401,6 +412,9 @@ public final class GraphControlServer {
         body.put("apiTokenEnabled", apiToken != null);
         body.put("rateLimitPerMinute", rateLimit);
         body.put("activeRateBuckets", rateBuckets.size());
+
+        // 运维面计数（GC / 快照）：失败不静默 ⇒ 这里能直接看出"跑了没、失败没"
+        body.put("maintenance", maintenance.stats());
 
         // JVM 内存
         Runtime runtime = Runtime.getRuntime();
@@ -815,6 +829,105 @@ public final class GraphControlServer {
                     "imported", imported,
                     "branch", branch,
                     "elapsedMs", elapsed));
+        } catch (Exception e) {
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * POST /maintenance/gc — 跑一轮版本链 GC（z-schedule 定时触发）。
+     * 参数: {@code ?keep=main,feature}（逗号分隔；<b>留空 = 保留全部分支</b>）
+     *
+     * <p>keep 的语义以 {@code GraphVersionStore.garbageCollect(String...)} 为准：
+     * 非空时<b>只有</b>列出的分支受保护，未列出的分支会被剪掉、其历史 commit 会被回收。
+     * 口径文档见 {@code _doc/002_ops/01_GC可达性与回收规则.md}。</p>
+     */
+    private void handleMaintenanceGc(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            writeJson(exchange, 405, Colls.mapOf("error", "POST required"));
+            return;
+        }
+        Map<String, String> params = queryParameters(exchange.getRequestURI());
+        String keepRaw = params.get("keep");
+        String[] keep = null;
+        if (keepRaw != null && !keepRaw.trim().isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (String part : keepRaw.split(",")) {
+                String name = part.trim();
+                if (!name.isEmpty()) {
+                    names.add(name);
+                }
+            }
+            if (!names.isEmpty()) {
+                keep = names.toArray(new String[0]);
+            }
+        }
+        try {
+            GraphMaintenanceService.GcOutcome outcome = maintenance.collectGarbage(keep);
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("collected", outcome.getCollected());
+            body.put("commitsBefore", outcome.getCommitsBefore());
+            body.put("commitsAfter", outcome.getCommitsAfter());
+            body.put("branchesBefore", outcome.getBranchesBefore());
+            body.put("branchesAfter", outcome.getBranchesAfter());
+            body.put("keepBranches", outcome.getKeepBranches());
+            body.put("durationMs", outcome.getDurationMs());
+            writeJson(exchange, 200, body);
+        } catch (Exception e) {
+            writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * POST /maintenance/snapshot — 导出指定分支 head 的视图快照。
+     * 参数: {@code ?branch=main}、{@code ?dir=/path/to/dir}（落盘目录）、{@code ?stream=true}（二进制回传）
+     *
+     * <p>两种模式：默认把快照写成文件并回 JSON 元数据（含 sha256）；
+     * {@code stream=true} 时把快照字节直接回传（调用方与 z-graph <b>不共享磁盘</b> 时用这条），
+     * 元数据放在响应头 {@code X-Commit-Id} / {@code X-Snapshot-Sha256}。</p>
+     */
+    private void handleMaintenanceSnapshot(HttpExchange exchange) throws IOException {
+        applyCorsHeaders(exchange);
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            writeJson(exchange, 405, Colls.mapOf("error", "POST required"));
+            return;
+        }
+        Map<String, String> params = queryParameters(exchange.getRequestURI());
+        String branch = params.getOrDefault("branch", "main");
+        boolean stream = "true".equalsIgnoreCase(params.get("stream"));
+        Path dir = null;
+        String dirRaw = params.get("dir");
+        if (dirRaw != null && !dirRaw.trim().isEmpty()) {
+            dir = Paths.get(dirRaw.trim());
+        }
+        try {
+            GraphMaintenanceService.SnapshotArtifact artifact = maintenance.exportSnapshot(branch, dir);
+            if (!stream) {
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("branch", artifact.getBranch());
+                body.put("commitId", artifact.getCommitId());
+                body.put("path", artifact.getPath().toString());
+                body.put("bytes", artifact.getBytes());
+                body.put("sha256", artifact.getSha256());
+                body.put("exportedAtMillis", artifact.getExportedAtMillis());
+                writeJson(exchange, 200, body);
+                return;
+            }
+            exchange.getResponseHeaders().set("Content-Type", "application/octet-stream");
+            exchange.getResponseHeaders().set("X-Commit-Id", artifact.getCommitId());
+            exchange.getResponseHeaders().set("X-Snapshot-Sha256", artifact.getSha256());
+            exchange.getResponseHeaders().set("Content-Disposition",
+                    "attachment; filename=\"" + artifact.getPath().getFileName() + "\"");
+            exchange.sendResponseHeaders(200, artifact.getBytes());
+            try (InputStream in = Files.newInputStream(artifact.getPath());
+                 OutputStream out = exchange.getResponseBody()) {
+                byte[] buffer = new byte[65536];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                }
+            }
         } catch (Exception e) {
             writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
         }
