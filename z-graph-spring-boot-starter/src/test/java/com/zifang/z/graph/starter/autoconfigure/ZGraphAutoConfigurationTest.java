@@ -23,6 +23,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.zifang.z.graph.api.Colls;
 
@@ -31,6 +32,9 @@ import com.zifang.z.graph.api.Colls;
  * 属性字段挂着但没人读，是这个 starter 上一版的病。
  */
 class ZGraphAutoConfigurationTest {
+
+    /** 控制面 token 必填（fail-closed，TASK-20261022-004）：测试必须显式给一个。 */
+    private static final String TOKEN = "starter-test-token";
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(ZGraphAutoConfiguration.class));
@@ -42,7 +46,7 @@ class ZGraphAutoConfigurationTest {
                         "没开 z.graph.enabled 就不该装仓库 Bean（更不该 bind 端口）"));
 
         // 阳性对照：同一个 runner 打开开关必须真有两个 Bean，否则上面那条"没有"只是空跑。
-        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0")
+        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0", "z.graph.api-token=" + TOKEN)
                 .run(ctx -> {
                     assertEquals(1, ctx.getBeanNamesForType(GraphVersionStore.class).length);
                     assertEquals(1, ctx.getBeanNamesForType(GraphControlServer.class).length);
@@ -51,7 +55,7 @@ class ZGraphAutoConfigurationTest {
 
     @Test
     void blankDataDirKeepsTheRepositoryOffDisk(@TempDir Path dir) {
-        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0")
+        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0", "z.graph.api-token=" + TOKEN)
                 .run(ctx -> {
                     GraphVersionStore store = ctx.getBean(GraphVersionStore.class);
                     GraphWriteTransaction tx = store.beginWrite("main");
@@ -64,7 +68,7 @@ class ZGraphAutoConfigurationTest {
     @Test
     void reportsThePortActuallyListeningAndServesHealth(@TempDir Path dir) {
         int[] boundPort = new int[1];
-        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0", "z.graph.data-dir=" + dir)
+        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0", "z.graph.api-token=" + TOKEN, "z.graph.data-dir=" + dir)
                 .run(ctx -> {
                     GraphControlServer server = ctx.getBean(GraphControlServer.class);
                     int port = server.port();
@@ -96,7 +100,7 @@ class ZGraphAutoConfigurationTest {
     void legacyViewCacheKnobsAreGoneAndStatsUseEngineFields() {
         // 视图缓存已亡：四个旧配置键即使被塞进来也只是 Spring 绑定不到的孤儿，
         // 上下文必须照常起，versionStats 走引擎新观测面。
-        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0",
+        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0", "z.graph.api-token=" + TOKEN,
                         "z.graph.checkpoint-interval=3",
                         "z.graph.max-retained-views=5",
                         "z.graph.retained-whole-graph-views=7",
@@ -110,8 +114,49 @@ class ZGraphAutoConfigurationTest {
                 });
     }
 
-    private static long number(Map<String, Object> stats, String key) {
-        Object raw = stats.get(key);
+    /**
+     * fail-closed（TASK-20261022-004）：开了 {@code z.graph.enabled=true} 却没有 token 时，
+     * 容器必须**起不来** —— 不是"起得来但不鉴权"。
+     */
+    @Test
+    void refusesToStartWithoutApiToken() {
+        // 环境变量里若恰好有 token，这条判据的前提就不成立（此时 token 会从 env 兜底），
+        // 这种情况下跳过而不是假装测过。
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                System.getenv("Z_GRAPH_API_TOKEN") == null || System.getenv("Z_GRAPH_API_TOKEN").trim().isEmpty(),
+                "当前进程环境里有 Z_GRAPH_API_TOKEN，缺-token 这条判据不适用");
+        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0")
+                .run(ctx -> {
+                    Throwable failure = ctx.getStartupFailure();
+                    assertNotNull(failure, "缺 token 竟然把上下文起起来了 ⇒ 控制面会不鉴权对外服务");
+                    String text = stackText(failure);
+                    assertTrue(text.contains("Z_GRAPH_API_TOKEN"), text);
+                    assertTrue(text.contains("fail-closed"), text);
+                });
+    }
+
+    /** 默认 bind 回环（不再是通配地址）。 */
+    @Test
+    void bindsLoopbackByDefault() {
+        runner.withPropertyValues("z.graph.enabled=true", "z.graph.port=0", "z.graph.api-token=" + TOKEN)
+                .run(ctx -> {
+                    GraphControlServer server = ctx.getBean(GraphControlServer.class);
+                    assertEquals("127.0.0.1", server.bindHost());
+                    assertTrue(server.boundAddress().getAddress().isLoopbackAddress(),
+                            "bind 地址不是回环：" + server.boundAddress());
+                });
+    }
+
+    /** 把异常链摊平成文本：断言要落在"为什么失败"上，而不是栈帧上。 */
+    private static String stackText(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            sb.append(cur.getClass().getName()).append(": ").append(cur.getMessage()).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static long number(Map<String, Object> stats, String key) {        Object raw = stats.get(key);
         assertTrue(raw instanceof Number, key + " 读回来是 " + raw);
         return ((Number) raw).longValue();
     }

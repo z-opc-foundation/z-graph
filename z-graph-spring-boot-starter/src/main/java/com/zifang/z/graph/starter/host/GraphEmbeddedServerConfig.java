@@ -48,13 +48,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 这条是 z-cache :6379 那次假孵化的直接教训 (端口被一个几天前的半僵尸 JVM 占着,
  * 内嵌实例因 {@code catch Throwable} 静默跳过, 页面照常打开)。
  *
- * <p><b>安全注意 (须由用户拍板, 这里只如实摊开)</b>: {@code GraphControlServer} 用
+ * <p><b>安全注意 (TASK-20261022-004 已收口)</b>: {@code GraphControlServer} 原来用
  * {@code new InetSocketAddress(port)} bind, 那是**通配地址** {@code *:port}
  * (实测外来实例的 lsof 就是 {@code TCP *:8090 (LISTEN)}), 而它唯一的鉴权是环境变量
- * {@code Z_GRAPH_API_TOKEN} (不设 = 完全不鉴权)。⇒ 一旦 {@code zgraph.enabled=true},
- * z-opc 这台机器就在局域网上开一个可读可写的裸图端口; {@code __instance} 会显示
- * {@code apiTokenConfigured=false} 来提示这件事。z-opc 侧的 {@code /api/graph/**} 反过来是
- * 被 {@code sso.intercept-paths} 覆盖的, 所以"只从 8888 出"这条约束本身仍然成立。
+ * {@code Z_GRAPH_API_TOKEN} (不设 = 完全不鉴权)。⇒ 现在两件事都改了:
+ * ① bind 地址**默认回环** (127.0.0.1), 要对外暴露必须显式给 host;
+ * ② {@code Z_GRAPH_API_TOKEN} **必填**, 缺了控制面**拒绝启动** (fail-closed)。
+ * 所以本类里 {@code new GraphControlServer(port, store)} 走的是"回环 + 必须有 token"这两条,
+ * 缺 token 时异常**不在这里被吞** —— 见下面的 catch 顺序。z-opc 侧的 {@code /api/graph/**}
+ * 反过来是被 {@code sso.intercept-paths} 覆盖的, 所以"只从 8888 出"这条约束本身仍然成立。
  *
  * <p><b>生命周期</b>: {@code GraphControlServer.start()} 自己注册了 JVM shutdown hook
  * ({@code server.stop(5)} 优雅关闭), 这里不重复注册第二个。
@@ -110,7 +112,14 @@ public class GraphEmbeddedServerConfig {
             server.start();
             // port() 来自 server.getAddress().getPort() —— 真 bind 出来的端口, 0 表示内核没给到
             boundPort = server.port();
-            log.info("[z-graph] GraphControlServer bound on port {} (endpoints: /health /meta/* /query*)", boundPort);
+            log.info("[z-graph] GraphControlServer bound on {}:{} (endpoints: /health /meta/* /query*)",
+                    server.bindHost(), boundPort);
+        } catch (GraphControlServer.MissingApiTokenException e) {
+            // 缺 token 是**安全前置条件**不满足, 不是端口问题 ⇒ 不吞: 让容器启动失败(退出码非 0)。
+            // 吞掉它就等于回到"控制面没起来但页面像正常"的老毛病, 而且失败原因会被端口话术盖住。
+            log.error("[z-graph] GraphControlServer 拒绝启动: 缺 API Token (Z_GRAPH_API_TOKEN 未设置) —— "
+                    + "控制面有写接口(/query 支持 CREATE/MERGE/DELETE, /meta/import 是写接口), 不设 token 就不启。", e);
+            throw e;
         } catch (Throwable t) {
             boundPort = 0;
             bindError = t.getClass().getSimpleName() + ": " + t.getMessage();

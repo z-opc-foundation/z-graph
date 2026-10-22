@@ -42,15 +42,31 @@ import com.zifang.z.graph.api.Colls;
  *
  * <p>端点：{@code /health}、{@code /meta/branches}、{@code /meta/commits}、
  * {@code /query?branch=main&cypher=...}。</p>
+ *
+ * <p><b>两条硬约束（TASK-20261022-004 收口）</b>：
+ * <ol>
+ *   <li><b>bind 地址默认回环</b>：控制面带写接口（{@code /query} 支持
+ *       CREATE/MERGE/DELETE，{@code /meta/import} 是写接口），通配地址（{@code *:port}）
+ *       等于把一张可读可写的图挂在局域网上。默认绑 {@code 127.0.0.1}，
+ *       要对外暴露必须显式给 host。</li>
+ *   <li><b>API Token 必填（fail-closed）</b>：token 缺失就**拒绝启动**，
+ *       而不是"照起 + 不鉴权"。旧的"不设 token = 完全不鉴权"是默认放行，
+ *       兜底只做在 z-opc 侧（L3 自己仍裸奔）—— 现在兜底下沉到 L3。</li>
+ * </ol>
+ * token 的环境变量名仍是 {@code Z_GRAPH_API_TOKEN}，**没有改名**（既有部署靠它注入）。</p>
  */
 public final class GraphControlServer {
+
+    /** 默认 bind 地址：回环。要对外暴露必须显式给 host（容器里用系统属性 {@code z.graph.bindHost}）。 */
+    public static final String DEFAULT_BIND_HOST = "127.0.0.1";
 
     private final HttpServer server;
     private final GraphVersionStore repository;
     private final GraphMetaService metaService;
     private final GraphQueryService queryService;
-    private final String apiToken;  // 可选 API Token (null=不验证)
-    private final int rateLimit;    // 每 IP 每分钟最大请求数 (0=不限)
+    private final String bindHost;   // 实际 bind 的地址（默认回环）
+    private final String apiToken;    // API Token（**必填**：缺了拒绝启动，见 requireApiToken）
+    private final int rateLimit;      // 每 IP 每分钟最大请求数 (0=不限)
     private final ConcurrentHashMap<String, long[]> rateBuckets = new ConcurrentHashMap<>();
     // 运行指标
     private final long startTimeMs = System.currentTimeMillis();
@@ -66,13 +82,36 @@ public final class GraphControlServer {
     private final AtomicInteger logIndex = new AtomicInteger();
 
     public GraphControlServer(int port, GraphVersionStore repository) throws IOException {
+        this(DEFAULT_BIND_HOST, port, repository, System.getenv().getOrDefault("Z_GRAPH_API_TOKEN", null));
+    }
+
+    /** 带 bind 地址的构造：host 决定监听在哪（默认回环由 {@link #DEFAULT_BIND_HOST} 兜底）。 */
+    public GraphControlServer(String host, int port, GraphVersionStore repository) throws IOException {
+        this(host, port, repository, System.getenv().getOrDefault("Z_GRAPH_API_TOKEN", null));
+    }
+
+    /** 显式给 token、bind 地址取默认回环 —— 主要给测试用（环境变量在 JVM 里改不了）。 */
+    public GraphControlServer(int port, GraphVersionStore repository, String apiToken) throws IOException {
+        this(DEFAULT_BIND_HOST, port, repository, apiToken);
+    }
+
+    /**
+     * 完整构造：bind 地址 + 端口 + 仓库 + API Token。
+     *
+     * <p>token 显式给进来是为了让"能不能起来"这件事**可测**：环境变量在 JVM 里改不了，
+     * 没有这个重载就没法在测试里断言"缺 token ⇒ 拒绝启动"。</p>
+     */
+    public GraphControlServer(String host, int port, GraphVersionStore repository, String apiToken) throws IOException {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.metaService = new GraphMetaService(repository);
         this.queryService = new GraphQueryService(repository);
+        this.bindHost = normalizeBindHost(host);
+        // fail-closed：token 必须在**绑端口之前**判掉 —— 否则"拒绝启动"会变成
+        // "端口已经占了但服务没起来"，把宿主的端口资源也一起搭进去。
+        this.apiToken = requireApiToken(apiToken);
         // 读取安全配置
-        this.apiToken = System.getenv().getOrDefault("Z_GRAPH_API_TOKEN", null);
         this.rateLimit = Integer.parseInt(System.getenv().getOrDefault("Z_GRAPH_RATE_LIMIT", "0"));
-        this.server = HttpServer.create(new InetSocketAddress(port), 128);
+        this.server = HttpServer.create(new InetSocketAddress(this.bindHost, port), 128);
         // 注册所有端点,通过日志过滤器包装
         server.createContext("/health", logAndHandle(this::handleHealth));
         server.createContext("/meta/branches", logAndHandle(this::handleBranches));
@@ -88,6 +127,50 @@ public final class GraphControlServer {
         server.createContext("/query", logAndHandle(this::handleQuery));
         // OPTIONS 预检 + CORS 头
         server.createContext("/options", logAndHandle(exchange -> writeNoContent(exchange)));
+    }
+
+    /**
+     * 缺 API Token ⇒ 拒绝启动（fail-closed）。
+     *
+     * <p>为什么不是"照起 + 页面提示没配 token"：控制面有写接口，
+     * "默认放行"意味着同一台机器上的任何进程/任何容器网络都能读写这张图。
+     * 缺 token 是**部署没配好**，不是"可以先跑着"。</p>
+     */
+    private static String requireApiToken(String token) {
+        if (token != null && !token.trim().isEmpty()) {
+            return token.trim();
+        }
+        String message = "[z-graph] fail-closed: API Token 未设置 —— GraphControlServer 的唯一鉴权面就是它"
+                + "（不设 = 完全不鉴权：/query 支持 CREATE/MERGE/DELETE，/meta/import 是写接口）。"
+                + "修法二选一：① 设环境变量 Z_GRAPH_API_TOKEN=<随机长串> 后再起；"
+                + "② 本进程不需要 HTTP 控制面 ⇒ 别起它。";
+        // 先往 stderr 打再抛：控制面常常起在容器里，日志系统未必已经就位，
+        // 异常栈有时被上层吞掉，而"为什么没起来"必须一定看得见。
+        System.err.println(message);
+        throw new MissingApiTokenException(message);
+    }
+
+    /** bind 地址缺省/空白 ⇒ 回环（绝不退化成通配）。 */
+    private static String normalizeBindHost(String host) {
+        if (host == null || host.trim().isEmpty()) {
+            return DEFAULT_BIND_HOST;
+        }
+        return host.trim();
+    }
+
+    /**
+     * 缺 API Token 的专用异常类型。
+     *
+     * <p>单列一个类型（而不是裸 {@code IllegalStateException}）：调用方要能区分
+     * "缺 token —— 安全前置条件不满足，进程不该起来" 与 "端口被占 —— 端口问题，
+     * 这个面不可用但宿主进程本身可以照常服务"。</p>
+     */
+    public static final class MissingApiTokenException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+
+        public MissingApiTokenException(String message) {
+            super(message);
+        }
     }
 
     /** 日志过滤器:记录每个请求的方法、路径、状态码和耗时,并执行认证和限流。 */
@@ -118,8 +201,9 @@ public final class GraphControlServer {
                 return;
             }
 
-            // API Token 认证（/health 和 /options 豁免）
-            if (apiToken != null && !path.equals("/health")) {
+            // API Token 认证（/health 和 /options 豁免）—— token 是**必填**的（fail-closed），
+            // 所以这里不是"配了才校验"，而是"永远校验"。
+            if (!path.equals("/health")) {
                 String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
                 String tokenFromQuery = queryParameters(exchange.getRequestURI()).get("token");
                 String provided = null;
@@ -256,7 +340,7 @@ public final class GraphControlServer {
             server.stop(5);
             System.out.println("[INFO] HTTP 控制面已关闭");
         }));
-        System.out.println("[INFO] HTTP 控制面启动于端口 " + server.getAddress().getPort());
+        System.out.println("[INFO] HTTP 控制面启动于 " + bindHost + ":" + server.getAddress().getPort());
     }
 
     public void stop() {
@@ -265,6 +349,21 @@ public final class GraphControlServer {
 
     public int port() {
         return server.getAddress().getPort();
+    }
+
+    /** 配置上要 bind 的地址（默认回环）。 */
+    public String bindHost() {
+        return bindHost;
+    }
+
+    /**
+     * 内核**实际**绑定的 socket 地址。
+     *
+     * <p>判"是不是还在通配"要看这个返回值，不是看配置值 ——
+     * 端口传 0 时配置值与实际值根本不是一回事。</p>
+     */
+    public InetSocketAddress boundAddress() {
+        return server.getAddress();
     }
 
     private void handleHealth(HttpExchange exchange) throws IOException {

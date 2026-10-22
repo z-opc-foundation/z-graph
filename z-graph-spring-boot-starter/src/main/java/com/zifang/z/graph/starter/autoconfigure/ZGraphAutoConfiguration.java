@@ -24,6 +24,10 @@ import java.nio.file.Paths;
  *
  * <p>实际监听端口一律以 {@link GraphControlServer#port()} 为准。配 {@code port: 0} 时
  * 内核分配的那个端口只有这个 getter 知道，读配置值会把调用方指向一个没人监听的端口。</p>
+ *
+ * <p><b>fail-closed（TASK-20261022-004）</b>：API Token 缺失时这个 Bean 直接创建失败 ⇒
+ * 容器启动失败、退出码非 0 —— 不会再出现"控制面起来了但不鉴权"。
+ * token 取自属性 {@code z.graph.api-token} 或环境变量 {@code Z_GRAPH_API_TOKEN}（名字未变）。</p>
  */
 @AutoConfiguration
 @ConditionalOnClass({GraphVersionStore.class, GraphControlServer.class})
@@ -49,10 +53,28 @@ public class ZGraphAutoConfiguration {
     @ConditionalOnMissingBean
     public GraphControlServer graphControlServer(GraphVersionStore store, ZGraphProperties props)
             throws IOException {
-        GraphControlServer server = new GraphControlServer(props.getPort(), store);
+        String token = resolveApiToken(props);
+        // 缺 token ⇒ GraphControlServer 构造里就抛（fail-closed）⇒ 容器启动失败、退出码非 0。
+        // 这里是**故意不 catch**：控制面有写接口，"先起来再说"等于裸奔。
+        GraphControlServer server = new GraphControlServer(props.getHost(), props.getPort(), store, token);
         server.start();
-        log.info("z-graph HTTP 控制面已 bind: 配置端口={}, 实际端口={} (未设 Z_GRAPH_API_TOKEN 即不鉴权)",
-                props.getPort(), server.port());
+        log.info("z-graph HTTP 控制面已 bind: bind 地址={}, 配置端口={}, 实际端口={} (API Token 已配置; 未设即拒绝启动)",
+                server.bindHost(), props.getPort(), server.port());
         return server;
+    }
+
+    /**
+     * API Token 取值顺序：Spring 属性 {@code z.graph.api-token} → 环境变量 {@code Z_GRAPH_API_TOKEN}。
+     *
+     * <p>环境变量名**没有改**（既有的部署只注入它，改名等于打断线上配置）；
+     * 属性名 {@code z.graph.api-token} 正好是它的宽松绑定形式，所以两个来源等价。</p>
+     */
+    private static String resolveApiToken(ZGraphProperties props) {
+        String configured = props.getApiToken();
+        if (configured != null && !configured.trim().isEmpty()) {
+            return configured.trim();
+        }
+        String env = System.getenv("Z_GRAPH_API_TOKEN");
+        return env == null || env.trim().isEmpty() ? null : env.trim();
     }
 }

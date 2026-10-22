@@ -26,7 +26,9 @@ class ZGraphServerTest {
         int controlPort = pickFreePort();
         BoltServer bolt = new BoltServer(0, repository);
         bolt.start();
-        GraphControlServer control = new GraphControlServer(controlPort, repository);
+        // 控制面 token 必填（fail-closed，TASK-20261022-004）：环境变量在 JVM 里改不了，
+        // 所以显式传 token 走 4 参构造。
+        GraphControlServer control = new GraphControlServer(controlPort, repository, "test-token-zgraph-server");
         control.start();
         try {
             assertNotNull(bolt.port());

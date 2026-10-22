@@ -41,9 +41,9 @@ import java.util.regex.Pattern;
  * </ol>
  *
  * <p>只挂在 {@code /api/**} 下, 不开裸路径 —— 裸路径不在 {@code sso.intercept-paths} 内, 等于不设防
- * (TASK-20260924-018 的教训)。上游 {@code GraphControlServer} 反过来是 bind 通配地址、
- * 默认无鉴权的 ({@code Z_GRAPH_API_TOKEN} 未设即不设防), 所以"前端只走 8888"这条不只是规约,
- * 是实际的安全边界。
+ * (TASK-20260924-018 的教训)。上游 {@code GraphControlServer} 现在是 **bind 回环** +
+ * **token 必填** (TASK-20261022-004 收口: 缺 {@code Z_GRAPH_API_TOKEN} 就拒绝启动),
+ * 所以"前端只走 8888"这条不只是规约, 是实际的安全边界。
  *
  * <p><b>上游端点</b> (逐个对着 z-graph-bolt-server 的
  * {@code GraphControlServer} 构造函数核过, 不是照 README 抄的):
@@ -70,6 +70,16 @@ public class GraphProxyController {
      *  但"这个端口上是不是有别人"这个问题仍然要能回答 —— 那是本卡验收第 1 条。 */
     @Value("${z.graph.server.port:8090}")
     private int configuredPort;
+
+    /**
+     * 控制面 API Token（Spring 属性形态）。
+     *
+     * <p>token 现在有两个来源：属性 {@code z.graph.api-token} 与环境变量 {@code Z_GRAPH_API_TOKEN}
+     * （前者是后者的宽松绑定形式）。代理转发时**两个都要认** —— 只认 env 的话，
+     * 用属性注入 token 的部署会被自己的代理打成 401。</p>
+     */
+    @Value("${z.graph.api-token:}")
+    private String configuredApiToken;
 
     public GraphProxyController(ObjectProvider<GraphEmbeddedServerConfig> embeddedProvider) {
         this.embeddedProvider = embeddedProvider;
@@ -98,8 +108,8 @@ public class GraphProxyController {
                 : cfg.getBindError());
         // 本 JVM 没 bind 成 + 配置端口上有人应答 ⇒ 那是别人的进程。此时页面的一切数据都不属于本次构建。
         out.put("foreignListenerSuspected", bound <= 0 && anyoneOnConfigured);
-        // GraphControlServer 的唯一鉴权是环境变量; 不设 = 通配端口完全不设防
-        out.put("apiTokenConfigured", System.getenv("Z_GRAPH_API_TOKEN") != null);
+        // GraphControlServer 的唯一鉴权是 API Token; 未设 = 拒绝启动（fail-closed）
+        out.put("apiTokenConfigured", resolveApiToken() != null);
         out.put("upstreamEndpoints", Arrays.asList("/health", "/meta/branches", "/meta/commits",
                 "/meta/schema", "/meta/stats", "/meta/metrics", "/meta/logs", "/meta/export",
                 "/meta/import", "/query", "/query/batch", "/query/explain"));
@@ -141,12 +151,11 @@ public class GraphProxyController {
         conn.setReadTimeout(UPSTREAM_TIMEOUT_MS);
         conn.setRequestMethod(req.getMethod());
         conn.setRequestProperty("Accept", "application/json");
-        // 上游 GraphControlServer 的唯一鉴权是环境变量 Z_GRAPH_API_TOKEN (它自己读 env，
-        // 见其构造函数第 67 行)，认 Authorization: Bearer <token> 或 ?token=。
-        // 8091 是通配地址端口 (HttpServer.create(new InetSocketAddress(port), …) 没有 bind 地址参数)，
-        // 所以启动脚本必须 export 一个随机 token 才不会在局域网上裸一个可写图库；
-        // 同 JVM 的这里从同一个 env 取值，两边天然一致，也不需要把 token 落到任何配置文件里。
-        String apiToken = System.getenv("Z_GRAPH_API_TOKEN");
+        // 上游 GraphControlServer 的唯一鉴权是 API Token（认 Authorization: Bearer <token> 或 ?token=），
+        // token 来源有属性 z.graph.api-token 与环境变量 Z_GRAPH_API_TOKEN 两个（名字未变），
+        // 两个都要认 —— 只认 env 的话，用属性注入 token 的部署会被自己的代理打成 401。
+        // 上游现在默认 bind 回环 + token 必填 (TASK-20261022-004)，所以这里必须把同一个 token 带上。
+        String apiToken = resolveApiToken();
         if (apiToken != null && !apiToken.isEmpty()) {
             conn.setRequestProperty("Authorization", "Bearer " + apiToken);
         }
@@ -187,9 +196,21 @@ public class GraphProxyController {
         resp.getOutputStream().flush();
     }
 
+    /**
+     * 控制面 API Token：属性 {@code z.graph.api-token} 优先，其次环境变量 {@code Z_GRAPH_API_TOKEN}。
+     *
+     * <p>两处都没有 ⇒ 返回 null（此时上游控制面根本不会起来 —— fail-closed）。</p>
+     */
+    private String resolveApiToken() {
+        if (configuredApiToken != null && !configuredApiToken.trim().isEmpty()) {
+            return configuredApiToken.trim();
+        }
+        String env = System.getenv("Z_GRAPH_API_TOKEN");
+        return env == null || env.trim().isEmpty() ? null : env.trim();
+    }
+
     /** "/api/graph/meta/schema" → "/meta/schema"; 不在白名单内返回 null */
-    private String subPath(String uri) {
-        if (uri == null || !uri.startsWith(PREFIX)) return null;
+    private String subPath(String uri) {        if (uri == null || !uri.startsWith(PREFIX)) return null;
         String sub = uri.substring(PREFIX.length());
         if (sub.isEmpty()) sub = "/";
         if (sub.indexOf("..") >= 0 || !SAFE_PATH.matcher(sub).matches()) return null;

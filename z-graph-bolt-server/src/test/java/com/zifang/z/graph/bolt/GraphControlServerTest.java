@@ -20,6 +20,12 @@ import com.zifang.z.graph.api.Colls;
 
 class GraphControlServerTest {
 
+    /**
+     * 控制面现在 **token 必填**（fail-closed，见 TASK-20261022-004）：token 缺失 ⇒ 构造即抛。
+     * 环境变量在 JVM 里改不了，所以测试显式把 token 传进去（4 参构造）。
+     */
+    private static final String TOKEN = "test-token-graph-control";
+
     @Test
     void exposesMetaHealthAndCommitBoundQuery() throws Exception {
         GraphVersionStore repository = new GraphVersionStore();
@@ -27,7 +33,7 @@ class GraphControlServerTest {
         write.addNode("Person", Colls.mapOf("name", "Control Alice"));
         String commitId = write.commit("test", "control server").getId();
 
-        GraphControlServer server = new GraphControlServer(0, repository);
+        GraphControlServer server = new GraphControlServer(0, repository, TOKEN);
         server.start();
         try {
             String base = "http://127.0.0.1:" + server.port();
@@ -61,7 +67,7 @@ class GraphControlServerTest {
         write.addNode("Person", Colls.mapOf("name", "Gate Alice"));
         String realCommit = write.commit("test", "gate status codes").getId();
 
-        GraphControlServer server = new GraphControlServer(0, repository);
+        GraphControlServer server = new GraphControlServer(0, repository, TOKEN);
         server.start();
         try {
             String base = "http://127.0.0.1:" + server.port();
@@ -92,6 +98,7 @@ class GraphControlServerTest {
     private static Response get(String url) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
         connection.setRequestMethod("GET");
+        connection.setRequestProperty("Authorization", "Bearer " + TOKEN);
         try {
             int status = connection.getResponseCode();
             // 4xx/5xx 的正文在 errorStream 里，而这些断言正好要读它
@@ -106,13 +113,10 @@ class GraphControlServerTest {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         byte[] chunk = new byte[4096];
         int read;
-        try {
-            while ((read = stream.read(chunk)) != -1) {
-                buffer.write(chunk, 0, read);
-            }
-        } finally {
-            stream.close();
+        while ((read = stream.read(chunk)) != -1) {
+            buffer.write(chunk, 0, read);
         }
+        stream.close();
         return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
     }
 

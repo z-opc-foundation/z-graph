@@ -34,6 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ZGraphStarterBootstrapTest {
 
+    /** 控制面 token 必填（fail-closed，TASK-20261022-004）。 */
+    private static final String TOKEN = "bootstrap-test-token";
+
     @SpringBootConfiguration
     @EnableAutoConfiguration
     static class PlainApp {
@@ -43,7 +46,7 @@ class ZGraphStarterBootstrapTest {
     void plainBootApplicationPicksThePlaneUpWithZeroRegistration() throws Exception {
         try (ConfigurableApplicationContext ctx = new SpringApplicationBuilder(PlainApp.class)
                 .web(WebApplicationType.NONE)
-                .properties("z.graph.enabled=true", "z.graph.port=0")
+                .properties("z.graph.enabled=true", "z.graph.port=0", "z.graph.api-token=" + TOKEN)
                 .run()) {
             GraphVersionStore store = ctx.getBean(GraphVersionStore.class);
             GraphControlServer server = ctx.getBean(GraphControlServer.class);
@@ -109,6 +112,8 @@ class ZGraphStarterBootstrapTest {
     private static Response get(String url) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         connection.setRequestMethod("GET");
+        // 控制面除了 /health 都要 token（fail-closed 之后 token 是必填项，不是可选项）
+        connection.setRequestProperty("Authorization", "Bearer " + TOKEN);
         try {
             int status = connection.getResponseCode();
             // 4xx/5xx 的正文在 errorStream 里，断言消息要用到它
