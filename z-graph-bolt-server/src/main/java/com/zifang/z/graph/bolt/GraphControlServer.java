@@ -873,6 +873,10 @@ public final class GraphControlServer {
             body.put("branchesAfter", outcome.getBranchesAfter());
             body.put("keepBranches", outcome.getKeepBranches());
             body.put("durationMs", outcome.getDurationMs());
+            // 头里也带一份：调度侧（z-schedule）不该为了取一个数去解析 JSON
+            exchange.getResponseHeaders().set("X-Gc-Collected", String.valueOf(outcome.getCollected()));
+            exchange.getResponseHeaders().set("X-Gc-Commits-Before", String.valueOf(outcome.getCommitsBefore()));
+            exchange.getResponseHeaders().set("X-Gc-Commits-After", String.valueOf(outcome.getCommitsAfter()));
             writeJson(exchange, 200, body);
         } catch (Exception e) {
             writeJson(exchange, statusFor(e), Colls.mapOf("error", e.getMessage()));
@@ -903,7 +907,11 @@ public final class GraphControlServer {
         }
         try {
             GraphMaintenanceService.SnapshotArtifact artifact = maintenance.exportSnapshot(branch, dir);
+            exchange.getResponseHeaders().set("X-Commit-Id", artifact.getCommitId());
+            exchange.getResponseHeaders().set("X-Snapshot-Sha256", artifact.getSha256());
+            exchange.getResponseHeaders().set("X-Snapshot-Bytes", String.valueOf(artifact.getBytes()));
             if (!stream) {
+                exchange.getResponseHeaders().set("X-Snapshot-Path", artifact.getPath().toString());
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("branch", artifact.getBranch());
                 body.put("commitId", artifact.getCommitId());
