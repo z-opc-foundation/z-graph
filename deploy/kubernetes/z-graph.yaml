@@ -7,6 +7,20 @@
 #
 # 当前 z-graph-server 是单实例内存存储,多实例属于 topology 演示;
 # 生产多副本方案需要外部共享存储(NFS/CSI)替换 PVC。
+#
+# ⚠ 2026-10-23（TASK-20261023-014）清单硬化 —— 修掉两处会让「apply 了也起不来/连不上」的缺陷:
+#   ① 后端必须带 `-Dz.graph.bindHost=0.0.0.0`：GraphControlServer 默认 bind **回环**
+#      （127.0.0.1，见 GraphControlServer.DEFAULT_BIND_HOST）⇒ 容器内只听回环时，
+#      ClusterIP Service `z-graph-server:8090` 连不上（readiness 探 127.0.0.1 反而会过 ⇒ 假绿）。
+#   ② 后端必须注入 `Z_GRAPH_API_TOKEN`：控制面 **fail-closed**（token 缺失 ⇒ 进程拒绝启动、
+#      退出码非 0，见 ZGraphServer / GraphControlServer）。**值只从 Secret 注入，禁止写进本文件。**
+#
+# ⚠ apply 前的前置（人工执行，本文件不代劳）:
+#   kubectl -n z-graph create secret generic z-graph-api-token --from-literal=token=<随机长串>
+#   （Secret 不存在 ⇒ Pod 卡 CreateContainerConfigError ⇒ 响亮失败，符合 fail-closed 语义）
+# ⚠ 镜像 tag 请**钉版本**并先灌进每个目标节点的 k3s containerd（见
+#   006_部署方案/010_发版收尾清单.md）；`ghcr.io` 若不可达，`imagePullPolicy: IfNotPresent`
+#   仍要求镜像**已在节点上**。
 
 ---
 apiVersion: v1
@@ -15,6 +29,17 @@ metadata:
   name: z-graph
   labels:
     app.kubernetes.io/part-of: z-graph
+
+---
+# ===== API Token Secret（模板；值由人工签发后注入，**禁止提交真值**）=====
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: z-graph-api-token
+#   namespace: z-graph
+# type: Opaque
+# stringData:
+#   token: "<在此填入人工签发的随机长串；本文件不得留真值>"
 
 ---
 # ===== 后端 ConfigMap:记录公共环境变量 =====
@@ -77,6 +102,17 @@ spec:
               containerPort: 7687
             - name: http
               containerPort: 8090
+          env:
+            # ⚠ 控制面 bind 地址：默认回环 ⇒ Service 连不上（见文件头 ①）。
+            #   只认系统属性 `z.graph.bindHost`（不读环境变量，见 ZGraphServer.resolveBindHost）。
+            - name: JAVA_OPTS
+              value: "-Dz.graph.bindHost=0.0.0.0"
+            # ⚠ API Token 必填（fail-closed，见文件头 ②）：值只从 Secret 来，**不入库**。
+            - name: Z_GRAPH_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: z-graph-api-token
+                  key: token
           envFrom:
             - configMapRef:
                 name: z-graph-config
@@ -157,6 +193,16 @@ spec:
           env:
             - name: Z_GRAPH_API_UPSTREAM
               value: z-graph-server:8090
+            # ⚠ 已知缺口（TASK-20261023-014 记录，未在本次改动里修）：
+            #   后端控制面现在 fail-closed ⇒ 除 /health 外全部要 Bearer token；
+            #   而 nginx 代理（deploy/nginx/frontend.conf）**不转发 Authorization 头**
+            #   ⇒ 控制台页面上的 API 调用会 401。
+            #   修法二选一（都需要给本容器挂同一个 Secret）：
+            #     ① frontend.conf 的 location /api/ 里加
+            #        `proxy_set_header Authorization "Bearer ${Z_GRAPH_API_TOKEN}";`
+            #        （该文件是 nginx 官方模板，envsubst 会替换占位符）
+            #     ② 或让前端自己带 token 调控制面。
+            #   ⚠ 本次**不代拍**：它与「biz-graph 快照」链路无关（快照直连 8090，不经前端）。
           readinessProbe:
             httpGet:
               path: /healthz
