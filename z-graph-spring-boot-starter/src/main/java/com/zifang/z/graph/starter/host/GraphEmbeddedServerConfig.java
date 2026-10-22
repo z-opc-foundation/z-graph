@@ -70,6 +70,15 @@ public class GraphEmbeddedServerConfig implements EnvironmentAware {
 
     private static final Logger log = LoggerFactory.getLogger(GraphEmbeddedServerConfig.class);
 
+    /**
+     * 横幅行的统一前缀 —— 三个中间件 (cache / graph / vector) 用同一句,
+     * 运维只要 grep 这一个串就能把"内嵌面没起来"从启动日志里捞出来。
+     */
+    public static final String SELFCHECK_TAG = "[EMBEDDED-SELFCHECK]";
+
+    /** 启动自检失败时是否让进程以非零退出码退出。**默认关** —— 本地多实例并存是正常形态, 不能因此起不来。 */
+    public static final String FAILFAST_PROPERTY = "z.embedded.selfcheck.failfast";
+
     @Value("${z.graph.server.port:8090}")
     private int port;
 
@@ -149,7 +158,80 @@ public class GraphEmbeddedServerConfig implements EnvironmentAware {
             log.error("[z-graph] GraphControlServer start FAILED on configured port {} —— /api/graph/** 将返回 503."
                     + " 若该端口已有监听者, 那它是**别的进程**, 不是本 JVM; 用 lsof -nP -iTCP:{} -sTCP:LISTEN 确认属主",
                     port, port, t);
+            // ★ TASK-20260925-023: 原来只到"记一行 error"为止 —— 没人主动翻日志就看不见。
+            // 现在把失败抬到**监控面**: readiness 打成 REFUSING_TRAFFIC ⇒ 带 actuator 的宿主
+            // /actuator/health 变红; 再加上启动自检 runner 打的横幅行, "没人主动看页面"时也能发现。
+            try {
+                org.springframework.boot.availability.AvailabilityChangeEvent.publish(
+                        event.getApplicationContext(),
+                        org.springframework.boot.availability.ReadinessState.REFUSING_TRAFFIC);
+            } catch (Throwable ignored) {
+                // 抬监控面失败不许反过来盖掉 bind 失败这条主因
+                log.warn("[z-graph] 抬 readiness 状态失败 (bind 失败仍是主因): {}", ignored.getMessage());
+            }
         }
+    }
+
+    /**
+     * 启动自检: boot 完成后拨自己的内嵌端口, 属主不对就在横幅上打一行。
+     *
+     * <p>默认只报错不退出 (开关 {@value #FAILFAST_PROPERTY} 默认关):
+     * 本地多实例并存是正常形态, 不能因为别人占了端口就起不来。
+     * 但**监控面必须变红** —— bind 失败时 readiness 已被打成 {@code REFUSING_TRAFFIC},
+     * 带 actuator 的宿主 {@code /actuator/health} 会随之变红。
+     *
+     * <p><b>为什么这一侧没有具名 health 组件</b>: z-graph-spring-boot-starter 的依赖里
+     * <b>没有 actuator</b> (本卡对 z-graph 仓的授权只允许改这一个 java 文件, 不许动它的 pom),
+     * 所以这里只能走 spring-boot core 的 readiness 通道 (actuator 宿主上表现为
+     * {@code /actuator/health} 的 {@code readinessState} 组件变 DOWN), 而不是
+     * {@code zGraphEmbedded} 这样一个具名组件。z-cache / z-vector 两侧是具名组件。
+     */
+    @Bean
+    public org.springframework.boot.ApplicationRunner zGraphEmbeddedSelfCheckRunner(
+            final org.springframework.context.ApplicationContext applicationContext,
+            final Environment environment) {
+        return new org.springframework.boot.ApplicationRunner() {
+            @Override
+            public void run(org.springframework.boot.ApplicationArguments args) {
+                if (isRunning()) {
+                    log.info("{} [OK] z-graph 内嵌实例已 bind 127.0.0.1:{} —— 内嵌面可用",
+                            SELFCHECK_TAG, boundPort);
+                    System.out.println(SELFCHECK_TAG + " [OK] z-graph embedded instance bound 127.0.0.1:"
+                            + boundPort);
+                    return;
+                }
+                boolean foreign = isConfiguredPortAnswering();
+                String msg = SELFCHECK_TAG + " [DOWN] z-graph 内嵌实例**没有起来** (尝试 bind 127.0.0.1:"
+                        + port + ", 失败原因: " + bindError + ")。"
+                        + (foreign
+                        ? "该端口**可以连上** ⇒ 应答者是**别的进程**, 不是本 JVM —— "
+                        + "页面会显示\"没有数据\", 那不是数据问题, 是实例没起。"
+                        : "该端口连不上 ⇒ 本 JVM 的内嵌实例确实没 bind 上。")
+                        + "查属主: lsof -nP -iTCP:" + port + " -sTCP:LISTEN";
+                log.error(msg);
+                System.out.println(msg);
+                try {
+                    org.springframework.boot.availability.AvailabilityChangeEvent.publish(
+                            applicationContext,
+                            org.springframework.boot.availability.ReadinessState.REFUSING_TRAFFIC);
+                } catch (Throwable ignored) {
+                    log.warn("[z-graph] 抬 readiness 状态失败: {}", ignored.getMessage());
+                }
+                if (isFailFast(environment)) {
+                    throw new IllegalStateException(msg
+                            + " —— 开关 " + FAILFAST_PROPERTY + "=true ⇒ 进程以非零退出码退出。");
+                }
+            }
+        };
+    }
+
+    /** fail-fast 开关: System property 优先 (static 块也能读到), 再看 Spring 环境。 */
+    public static boolean isFailFast(Environment environment) {
+        String v = System.getProperty(FAILFAST_PROPERTY);
+        if (v == null && environment != null) {
+            v = environment.getProperty(FAILFAST_PROPERTY);
+        }
+        return Boolean.parseBoolean(v);
     }
 
     /** 内嵌实例实际 bind 成功的端口; 没 bind 成就是 0 (调用方须据此显式失败, 不许猜端口) */
