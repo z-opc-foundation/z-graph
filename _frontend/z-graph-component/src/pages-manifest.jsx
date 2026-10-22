@@ -1,4 +1,4 @@
-import { BranchesOutlined, CodeOutlined, DashboardOutlined, DatabaseOutlined, FileTextOutlined, HistoryOutlined, HomeOutlined, PartitionOutlined, ProfileOutlined } from '@ant-design/icons'
+import { BranchesOutlined, CodeOutlined, DashboardOutlined, DatabaseOutlined, FileTextOutlined, HistoryOutlined, HomeOutlined, PartitionOutlined, ProfileOutlined, ReadOutlined } from '@ant-design/icons'
 import './console/styles.css'
 import {withGraphServer, withGraphConsole} from './console/serverHook.jsx'
 import Dashboard from './console/pages/Dashboard.jsx'
@@ -16,6 +16,7 @@ export {withGraphServer, withGraphConsole, useGraphServer} from './console/serve
 export {api} from './console/api'
 import HomePage from './pages/HomePage'
 import GraphApp from './pages/GraphApp.jsx'
+import ComponentDocPage from './pages/ComponentDoc.jsx'
 
 /** 菜单 + 路由清单（lead 008 §10/§14/§16 批量落地）。App 壳在 suit 侧组装。 */
 export const appMeta = { title: 'z-graph 图存储控制台', short: 'z-graph' }
@@ -30,6 +31,7 @@ export const menuItems = [
     { key: '/z-graph/schema', label: 'Schema', icon: <DatabaseOutlined /> },
     { key: '/z-graph/logs', label: '请求日志', icon: <ProfileOutlined /> },
     { key: '/z-graph/api-docs', label: 'API 文档', icon: <FileTextOutlined /> },
+    { key: '/z-graph/docs', label: '组件文档', icon: <ReadOutlined /> },
 ]
 
 export const routes = [
@@ -46,6 +48,7 @@ export const routes = [
     { path: '/z-graph/api-docs', Component: withGraphConsole(ApiDocs) },
     // 新版页面（antd 实现）不吃 console 样式表 ⇒ 不加作用域
     { path: '/z-graph/instance', Component: withGraphServer(InstanceStatus) },
+    { path: '/z-graph/docs', Component: ComponentDocPage },
     // catchall 放最后 —— 否则 `:rest*` 会先于具体路由匹配,导致 /z-graph/query
     // 全部跳进 GraphApp 的内层 /schema 路由(URL 变成 /z-graph/query/schema)。
     { path: '/z-graph/:rest*', Component: GraphApp },
@@ -53,3 +56,5 @@ export const routes = [
 
 export { default as HomePage } from './pages/HomePage'
 export { default as LoginPage } from './pages/LoginPage'
+// 主壳接线用：文档页统一以 ComponentDocPage 这个名字从主入口导出。
+export { default as ComponentDocPage } from './pages/ComponentDoc.jsx'
