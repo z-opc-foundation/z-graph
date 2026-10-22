@@ -1,6 +1,6 @@
 {
   "name": "@yuku123/z-graph-component",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "z-graph 可复用前端组件：图视图/分支/提交/Cypher 查询/Schema/日志（原 console 内化，lead 005 §9）",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,7 +14,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "vite build"
+    "build": "vite build && node scripts/check-css-scope.mjs",
+    "check:css-scope": "node scripts/check-css-scope.mjs"
   },
   "dependencies": {
     "@yuku123/z-frontend-common": "^1.1.1",
