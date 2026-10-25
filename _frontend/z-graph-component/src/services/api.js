@@ -1,4 +1,26 @@
-import request from '@yuku123/z-frontend-common'
+import {createRequest} from '@yuku123/z-frontend-common'
+
+/**
+ * z-graph **自己的** axios 实例（不是共享的那一个）。
+ *
+ * ⚠ 2026-10-25 修（生产实测：图 4 个面板全部 404）。
+ *   之前这里写的是 `import request from '@yuku123/z-frontend-common'`（**默认导出**）。
+ *   而那个包的默认导出不是 axios 实例，是「桶对象」：
+ *     const bucket = {..., request, authRequest, createRequest}
+ *     for (const verb of httpVerbs) bucket[verb] = (...a) => request[verb](...a)
+ *   ⇒ 桶上的 `get/post/...` 只是**转发函数**（请求发得出去，所以没人发现），
+ *     但 `configureGraph` 里那句 `request.defaults.baseURL = apiBase` 改的是
+ *     **桶对象上一个新建的 defaults 普通属性** ⇒ 真 axios 实例的 baseURL **纹丝不动**。
+ *   ⇒ 生产实测：图面板请求打的是 `/api/meta/branches`（默认 baseURL '/api' + 路径 '/meta/**'）
+ *     ⇒ 生产宿主真实挂载前缀是 `/api/graph/**` ⇒ 三个请求全 **404**。
+ *   ⇒ z-graph 是「一族里唯一一个需要**不同于 /api** 的 baseURL」的组件
+ *     （z-msg / z-mq / z-gw / z-cache / z-oss 都用 '/api'，用共享实例没问题），
+ *     所以它必须有自己的实例，才能让 `configureGraph` 改得动。
+ *   改法与 z-config / z-oss / z-meta / z-rpc 一致：`createRequest({baseURL: '/api'})`。
+ *   `createRequest` 走同一个 `setupInterceptors`（token 注入 / 401 跳登录 / 响应解包），
+ *   行为与共享实例一致。
+ */
+const request = createRequest({baseURL: '/api'})
 
 /**
  * z-graph 管理面数据源。

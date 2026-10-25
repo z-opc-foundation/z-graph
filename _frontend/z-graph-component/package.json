@@ -1,6 +1,6 @@
 {
   "name": "@yuku123/z-graph-component",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "z-graph 可复用前端组件：图视图/分支/提交/Cypher 查询/Schema/日志（原 console 内化，lead 005 §9）",
   "type": "module",
   "main": "./dist/index.js",
