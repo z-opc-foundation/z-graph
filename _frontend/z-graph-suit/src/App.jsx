@@ -29,39 +29,17 @@ function NotFound() {
 
 // lead 008 §16：CTC/SSO 接入前的 mock 登录。
 // mock 账号不写死在仓里（001 凭证规范）：构建期注入 VITE_MOCK_USER / VITE_MOCK_PASSWORD，
-// 未注入时登录页直接提示「未配置 mock 账号」。
-const MOCK_AUTH = {
-    username: import.meta.env.VITE_MOCK_USER || '',
-    password: import.meta.env.VITE_MOCK_PASSWORD || '',
-    user: { name: import.meta.env.VITE_MOCK_USER || '', role: '管理员' },
-}
-
-// LoginPage 把登录响应 res 透给 onSuccess，但 res 是后端返回的（这里没真后端所以是 undefined）。
-// 校验逻辑需要从 form 当前输入里读，强制每次从 DOM 取最新值。
-function readLoginForm() {
-    const inputs = document.querySelectorAll('input[placeholder]')
-    return {
-        username: inputs[0]?.value?.trim() || '',
-        password: inputs[1]?.value || '',
+// 未注入 ⇒ 不传 mockAuth，登录页提示「未配置 mock 账号」。
+const MOCK_AUTH = import.meta.env.VITE_MOCK_USER && import.meta.env.VITE_MOCK_PASSWORD
+    ? {
+        username: import.meta.env.VITE_MOCK_USER,
+        password: import.meta.env.VITE_MOCK_PASSWORD,
+        user: { name: import.meta.env.VITE_MOCK_USER, role: '管理员' },
     }
-}
+    : null
 
 function LoginRoute() {
-    const onMockLogin = () => {
-        if (!MOCK_AUTH.username || !MOCK_AUTH.password) {
-            alert('未配置 mock 账号（VITE_MOCK_USER / VITE_MOCK_PASSWORD）')
-            return
-        }
-        const {username, password} = readLoginForm()
-        if (username !== MOCK_AUTH.username || password !== MOCK_AUTH.password) {
-            alert('用户名或密码错误')
-            return
-        }
-        localStorage.setItem('token', 'mock-' + Date.now())
-        localStorage.setItem('userInfo', JSON.stringify(MOCK_AUTH.user))
-        window.location.href = '/z-graph/home'
-    }
-    return <LoginPage onSuccess={onMockLogin} redirectUrl="/z-graph/home" />
+    return <LoginPage mockAuth={MOCK_AUTH} />
 }
 
 function ProtectedShell() {
