@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useMemo, useState} from 'react'
-import {Alert, Button, Card, Col, Descriptions, Empty, Modal, Row, Select, Space, Table, Tag} from 'antd'
+import {Alert, Button, Card, Col, Descriptions, Empty, Input, Modal, Row, Select, Space, Table, Tag} from 'antd'
 import {NodeIndexOutlined, ProfileOutlined, ReloadOutlined, TableOutlined} from '@ant-design/icons'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isNotBoundError} from '../services/api'
 import {DEFAULT_PAGINATION, EmptyState} from '@yuku123/z-frontend-common/ui'
@@ -113,9 +113,15 @@ export default function SchemaPage() {
     }, [stats])
 
     const notBound = isNotBoundError(error)
+    const [keyword, setKeyword] = useState('')
     const tags = (schema?.tags ?? []).map((t) => ({...t, onFields: (n) => openFields('TAG', n)}))
     const edges = (schema?.edges ?? []).map((e) => ({...e, onFields: (n) => openFields('EDGE', n)}))
     const indexes = schema?.indexes ?? []
+
+    const matchName = (r) => `${r?.Name || ''}`.toLowerCase().includes(keyword.trim().toLowerCase())
+    const filteredTags = keyword.trim() ? tags.filter(matchName) : tags
+    const filteredEdges = keyword.trim() ? edges.filter(matchName) : edges
+    const filteredIndexes = keyword.trim() ? indexes.filter(matchName) : indexes
 
     return (
         <div>
@@ -130,6 +136,8 @@ export default function SchemaPage() {
                   title="当前分支概览"
                   extra={
                       <Space>
+                          <Input.Search allowClear placeholder="按点类型 / 边类型 / 索引名过滤" style={{width: 240}}
+                                        onChange={(e) => setKeyword(e.target.value)}/>
                           <span style={{fontSize: 12, color: '#64748b'}}>分支</span>
                           <Select size="small" style={{width: 160}} value={branch}
                                   options={branches.map((b) => ({value: b, label: b}))}
@@ -164,14 +172,14 @@ export default function SchemaPage() {
             <Row gutter={16} style={{marginTop: 16}}>
                 <Col span={12}>
                     <Card title={<Space><TableOutlined/>点类型 (TAG)</Space>} loading={loading}>
-                        <Table size="small" rowKey="Name" dataSource={tags} columns={TAG_COLUMNS}
+                        <Table size="small" rowKey="Name" dataSource={filteredTags} columns={TAG_COLUMNS}
                                pagination={DEFAULT_PAGINATION} loading={loading}
                                locale={{emptyText: schemaEmptyText(!!schema, '没有点类型')}}/>
                     </Card>
                 </Col>
                 <Col span={12}>
                     <Card title={<Space><NodeIndexOutlined/>边类型 (EDGE TYPE)</Space>} loading={loading}>
-                        <Table size="small" rowKey="Name" dataSource={edges} columns={EDGE_COLUMNS}
+                        <Table size="small" rowKey="Name" dataSource={filteredEdges} columns={EDGE_COLUMNS}
                                pagination={DEFAULT_PAGINATION} loading={loading}
                                locale={{emptyText: schemaEmptyText(!!schema, '没有边类型')}}/>
                     </Card>
@@ -179,7 +187,7 @@ export default function SchemaPage() {
             </Row>
 
             <Card style={{marginTop: 16}} title={<Space><ProfileOutlined/>属性索引</Space>} loading={loading}>
-                <Table size="small" rowKey="Name" dataSource={indexes} columns={INDEX_COLUMNS}
+                <Table size="small" rowKey="Name" dataSource={filteredIndexes} columns={INDEX_COLUMNS}
                        pagination={DEFAULT_PAGINATION} loading={loading}
                        locale={{emptyText: schemaEmptyText(!!schema, '没有属性索引')}}/>
             </Card>
