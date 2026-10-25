@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useState} from 'react'
 import {Alert, Button, Card, Col, Descriptions, Empty, Modal, Row, Select, Space, Table, Tag} from 'antd'
 import {NodeIndexOutlined, ProfileOutlined, ReloadOutlined, TableOutlined} from '@ant-design/icons'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isNotBoundError} from '../services/api'
-import {EmptyState, PageHeader} from '@yuku123/z-frontend-common/ui'
+import {DEFAULT_PAGINATION, EmptyState} from '@yuku123/z-frontend-common/ui'
 
 /** /meta/schema 里三类对象的列：字段名逐个对着 CypherEngine.executeShow() 的 row.put(...) 核过 */
 const TAG_COLUMNS = [
@@ -119,8 +119,6 @@ export default function SchemaPage() {
 
     return (
         <div>
-            <PageHeader title="图 Schema"
-                        subtitle="z-graph 点类型 / 边类型 / 属性索引（数据源 GET /api/graph/meta/schema，由 GraphProxyController 转发到本 JVM 内嵌的 GraphControlServer）"/>
             {error && (
                 <Alert style={{marginBottom: 16}} type={notBound ? 'error' : 'warning'} showIcon
                        message={`Schema 读取失败：${graphErrorText(error)}`}
@@ -167,14 +165,14 @@ export default function SchemaPage() {
                 <Col span={12}>
                     <Card title={<Space><TableOutlined/>点类型 (TAG)</Space>} loading={loading}>
                         <Table size="small" rowKey="Name" dataSource={tags} columns={TAG_COLUMNS}
-                               pagination={false} loading={loading}
+                               pagination={DEFAULT_PAGINATION} loading={loading}
                                locale={{emptyText: schemaEmptyText(!!schema, '没有点类型')}}/>
                     </Card>
                 </Col>
                 <Col span={12}>
                     <Card title={<Space><NodeIndexOutlined/>边类型 (EDGE TYPE)</Space>} loading={loading}>
                         <Table size="small" rowKey="Name" dataSource={edges} columns={EDGE_COLUMNS}
-                               pagination={false} loading={loading}
+                               pagination={DEFAULT_PAGINATION} loading={loading}
                                locale={{emptyText: schemaEmptyText(!!schema, '没有边类型')}}/>
                     </Card>
                 </Col>
@@ -182,7 +180,7 @@ export default function SchemaPage() {
 
             <Card style={{marginTop: 16}} title={<Space><ProfileOutlined/>属性索引</Space>} loading={loading}>
                 <Table size="small" rowKey="Name" dataSource={indexes} columns={INDEX_COLUMNS}
-                       pagination={false} loading={loading}
+                       pagination={DEFAULT_PAGINATION} loading={loading}
                        locale={{emptyText: schemaEmptyText(!!schema, '没有属性索引')}}/>
             </Card>
 
@@ -209,7 +207,7 @@ export default function SchemaPage() {
                     <Alert type="error" showIcon message={`读取失败：${graphErrorText(fieldsError)}`}/>
                 ) : (
                     <Table size="small" rowKey="Field" loading={fieldsLoading}
-                           dataSource={fields?.rows ?? []} columns={FIELD_COLUMNS} pagination={false}
+                           dataSource={fields?.rows ?? []} columns={FIELD_COLUMNS} pagination={DEFAULT_PAGINATION}
                            locale={{emptyText: <Empty description="该类型没有字段（schema 里有名字但属性列表为空）"/>}}/>
                 )}
             </Modal>

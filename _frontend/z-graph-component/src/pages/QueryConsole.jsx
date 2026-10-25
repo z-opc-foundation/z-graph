@@ -3,7 +3,7 @@ import {Alert, Button, Card, Col, Input, Row, Select, Space, Statistic, Table, T
 import {PlayCircleOutlined, ThunderboltOutlined} from '@ant-design/icons'
 import {useSearchParams} from 'react-router-dom'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isMutatingCypher} from '../services/api'
-import {DEFAULT_PAGINATION, EmptyState, ListTable, PageHeader} from '@yuku123/z-frontend-common/ui'
+import {DEFAULT_PAGINATION, EmptyState, ListTable} from '@yuku123/z-frontend-common/ui'
 
 const {TextArea} = Input
 
@@ -121,7 +121,6 @@ export default function QueryConsole() {
 
     return (
         <div>
-            <PageHeader title="图查询"/>
             <Row gutter={16}>
                 <Col span={16}>
                     <Card title="查询语句">
@@ -192,7 +191,9 @@ export default function QueryConsole() {
                                   </Tag>
                               </Space>}>
                             <Table size="small" rowKey={(r, i) => `${r.operation}-${i}`}
-                                   dataSource={plan.plan?.steps ?? []} pagination={false}
+                                   dataSource={plan.plan?.steps ?? []}
+                                   /* §2 规则 2 豁免：执行计划 steps 是引擎返回的单次计划，行数由语句本身决定且通常 <10，翻页无意义 */
+                                   pagination={false}
                                    columns={[
                                        {title: '算子', dataIndex: 'operation', key: 'operation', width: 140},
                                        {title: '说明', dataIndex: 'description', key: 'description'},

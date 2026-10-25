@@ -3,7 +3,7 @@ import {Alert, Button, Card, Col, Row, Space, Tag, Tooltip} from 'antd'
 import {BranchesOutlined, HistoryOutlined, ReloadOutlined} from '@ant-design/icons'
 import {useNavigate} from 'react-router-dom'
 import {DEFAULT_BRANCH, graphApi, graphErrorText, isNotBoundError} from '../services/api'
-import {EmptyState, ListTable, PageHeader} from '@yuku123/z-frontend-common/ui'
+import {EmptyState, ListTable} from '@yuku123/z-frontend-common/ui'
 
 function fmtTime(ms) {
     if (ms == null) return '-'
@@ -86,7 +86,6 @@ export default function BranchCommitPage() {
     if (error) {
         return (
             <div>
-                <PageHeader title="分支与提交"/>
                 <Alert type={isNotBoundError(error) ? 'error' : 'warning'} showIcon
                        message={`提交历史读取失败：${graphErrorText(error)}`}
                        description={isNotBoundError(error)
@@ -98,7 +97,6 @@ export default function BranchCommitPage() {
 
     return (
         <div>
-            <PageHeader title="分支与提交"/>
             <Card title={<Space><BranchesOutlined/>分支（{branches.length}）</Space>}
                   extra={<Button icon={<ReloadOutlined/>} loading={loading} onClick={fetch}>刷新</Button>}>
                 <Row gutter={[16, 16]}>
