@@ -23,6 +23,20 @@ import {createRequest} from '@yuku123/z-frontend-common'
 const request = createRequest({baseURL: '/api'})
 
 /**
+ * ⚠ 2026-10-25 修（生产实测：图 4 个面板全部「没读通」/「读不到数据」）。
+ *   这里的每个方法原来都写着 `.then((r) => r.data)` ——
+ *   而 @yuku123/z-frontend-common 的响应拦截器**已经把响应体解包过一次**
+ *   （`unwrapResponse`：body 同时带 `code` 与 `data` 时返回 `body.data`，否则返回 body 本身）。
+ *   ⇒ 再取一次 `.data` 就是**解包两次** ⇒
+ *     · body 是 {branch,tags,edges,indexes} 这类裸对象 ⇒ `r.data` = undefined
+ *       ⇒ SchemaPage 判 `!schema` ⇒ 报「没有拿到 schema 数据 … 这里不是「空」，是「没读通」」；
+ *     · body 是裸数组（/meta/branches）⇒ `r.data` = undefined ⇒ 分支列表也空。
+ *   ⇒ 本组件的 api 层**直接返回解包后的 body**（与 z-msg / z-cache / z-gw 同一写法），
+ *     页面侧 `await graphApi.schema(...)` 拿到的就是 body 本身。
+ */
+
+
+/**
  * z-graph 管理面数据源。
  *
  * 上游不是 Spring MVC：`com.zifang.z.graph.bolt.GraphControlServer` 是 JDK
@@ -61,14 +75,14 @@ const request = createRequest({baseURL: '/api'})
  *   - `GET /meta/export`：响应带 `Content-Disposition: attachment`，是个下载件而不是表格数据。
  */
 export const graphApi = {
-    instance: () => request.get('/__instance').then((r) => r.data),
-    health: () => request.get('/health').then((r) => r.data),
-    branches: () => request.get('/meta/branches').then((r) => r.data),
-    commits: () => request.get('/meta/commits').then((r) => r.data),
-    schema: (branch) => request.get('/meta/schema', {params: branch ? {branch} : {}}).then((r) => r.data),
-    stats: (branch) => request.get('/meta/stats', {params: branch ? {branch} : {}}).then((r) => r.data),
-    metrics: () => request.get('/meta/metrics').then((r) => r.data),
-    logs: (params) => request.get('/meta/logs', {params}).then((r) => r.data),
+    instance: () => request.get('/__instance'),
+    health: () => request.get('/health'),
+    branches: () => request.get('/meta/branches'),
+    commits: () => request.get('/meta/commits'),
+    schema: (branch) => request.get('/meta/schema', {params: branch ? {branch} : {}}),
+    stats: (branch) => request.get('/meta/stats', {params: branch ? {branch} : {}}),
+    metrics: () => request.get('/meta/metrics'),
+    logs: (params) => request.get('/meta/logs', {params}),
     /**
      * 查询走 GET 而不是 POST：`handleQuery` 的 POST 分支用的是手搓的
      * `parseJsonStringMap`（按引号外逗号切 token、再按第一个冒号切 kv），
@@ -76,8 +90,8 @@ export const graphApi = {
      * 只有前者会被解析器啃掉。所以这里统一走 GET。
      */
     query: (cypher, branch, commit) =>
-        request.get('/query', {params: commit ? {cypher, branch, commit} : {cypher, branch}}).then((r) => r.data),
-    explain: (cypher, branch) => request.post('/query/explain', {cypher, branch}).then((r) => r.data),
+        request.get('/query', {params: commit ? {cypher, branch, commit} : {cypher, branch}}),
+    explain: (cypher, branch) => request.post('/query/explain', {cypher, branch}),
 }
 
 /**
