@@ -3,6 +3,8 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AppLayout } from '@yuku123/z-frontend-common'
 import { menuItems, routes, HomePage, LoginPage } from '@yuku123/z-graph-component/pages'
 import { Result, Button } from 'antd'
+// 版本号只认 package.json，避免顶栏版本与发版号两处各写一遍慢慢漂移。
+import { version as appVersion } from '../package.json'
 
 class ErrorBoundary extends Component {
     constructor(props) { super(props); this.state = { err: null } }
@@ -25,11 +27,14 @@ function NotFound() {
     )
 }
 
-// lead 008 §16：短期 hard-coded 登录（admin / 123456），CTC/SSO 接入后换共享 LoginPage loginApi。
-// 当前 LoginPage 来自 @yuku123/z-frontend-common 0.1.1 —— 它只走 loginApi 调真接口，没有
-// mockAuth 钩子；后端又没 /auth/login。所以 suit 侧先把用户名/密码校验在本地做掉，
-// 通过校验就直接 setItem 跳走，等 CTC 接 SSO 时把这层换回 LoginPage 原生路径。
-const MOCK_AUTH = { username: 'admin', password: '123456', user: { name: 'admin', role: '管理员' } }
+// lead 008 §16：CTC/SSO 接入前的 mock 登录。
+// mock 账号不写死在仓里（001 凭证规范）：构建期注入 VITE_MOCK_USER / VITE_MOCK_PASSWORD，
+// 未注入时登录页直接提示「未配置 mock 账号」。
+const MOCK_AUTH = {
+    username: import.meta.env.VITE_MOCK_USER || '',
+    password: import.meta.env.VITE_MOCK_PASSWORD || '',
+    user: { name: import.meta.env.VITE_MOCK_USER || '', role: '管理员' },
+}
 
 // LoginPage 把登录响应 res 透给 onSuccess，但 res 是后端返回的（这里没真后端所以是 undefined）。
 // 校验逻辑需要从 form 当前输入里读，强制每次从 DOM 取最新值。
@@ -43,9 +48,13 @@ function readLoginForm() {
 
 function LoginRoute() {
     const onMockLogin = () => {
+        if (!MOCK_AUTH.username || !MOCK_AUTH.password) {
+            alert('未配置 mock 账号（VITE_MOCK_USER / VITE_MOCK_PASSWORD）')
+            return
+        }
         const {username, password} = readLoginForm()
         if (username !== MOCK_AUTH.username || password !== MOCK_AUTH.password) {
-            alert('用户名或密码错误（Mock：admin / 123456）')
+            alert('用户名或密码错误')
             return
         }
         localStorage.setItem('token', 'mock-' + Date.now())
@@ -75,7 +84,7 @@ function ProtectedShell() {
         <AppLayout
             menuItems={menuItems}
             appTitle="z-graph 图存储控制台"
-            appVersion="0.1.0"
+            appVersion={appVersion}
             appUser={user}
             appIcon={{ icon: <img src="/icon.png" alt="z-graph 图存储控制台" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8 }} />, color: '#f97316', label: 'z-graph 图存储控制台' }}
         />
