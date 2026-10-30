@@ -15,7 +15,7 @@
     <version>1.0.8</version>
 
     <artifactId>z-graph-core</artifactId>
-    <name>z-graph-core</name>
+    <name>z-graph :: core</name>
     <description>z-graph Query/Storage/Meta 核心：OpenCypher 子集、快照版本、分支合并和可选文件持久化</description>
 
     <url>https://github.com/yuku123/z-graph</url>

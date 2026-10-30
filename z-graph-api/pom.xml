@@ -15,6 +15,6 @@
     <version>1.0.8</version>
 
     <artifactId>z-graph-api</artifactId>
-    <name>z-graph-api</name>
+    <name>z-graph :: api</name>
     <description>z-graph API 契约层(Cypher 请求 / Bolt 响应 DTO)</description>
 </project>

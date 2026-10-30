@@ -15,7 +15,7 @@
     <version>1.0.8</version>
 
     <artifactId>z-graph-bolt-server</artifactId>
-    <name>z-graph-bolt-server</name>
+    <name>z-graph :: bolt-server</name>
     <description>z-graph Bolt 4.4 协议服务端(Netty)：共享版本仓库、参数查询和连接级事务</description>
 
     <url>https://github.com/yuku123/z-graph</url>

@@ -32,7 +32,7 @@
          所以 Java 8 版只能走 1.0.7，1.0.6 这个号作废、不要用。 -->
     <version>1.0.8</version>
     <packaging>pom</packaging>
-    <name>z-graph</name>
+    <name>z-graph :: root</name>
     <description>独立图数据库工程：参考 NebulaGraph 的 Query、Storage、Meta 分层与 Bolt/OpenCypher 兼容能力    </description>
     <url>https://github.com/yuku123/z-graph</url>
     <licenses>
