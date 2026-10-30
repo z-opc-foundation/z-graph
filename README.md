@@ -588,8 +588,8 @@ _Maintained by the z-opc-foundation organization._
   - [`00-overview.md`](_doc/001_arch/00-overview.md) — 项目总览：v5 存储引擎的版本链与文件布局、MVCC 读/写路径与三方合并、
     OpenCypher 子集的支持矩阵与缺口、Bolt 消息矩阵、15 个 HTTP context、控制台 8 个 tab、部署端口与源码包树
 
-- [`_doc/002_ops/`](_doc/002_ops/) — 运维口径：
-  - [`01_GC可达性与回收规则.md`](_doc/002_ops/01_GC可达性与回收规则.md) — **GC 回收什么、不回收什么**：
+- [`_doc/002_deploy/`](_doc/002_deploy/) — 运维口径：
+  - [`01_GC可达性与回收规则.md`](_doc/002_deploy/01-gc-reachability.md) — **GC 回收什么、不回收什么**：
     keep 集合怎么定、可达集（第一父链 ∪ 全父祖先闭包）怎么算、哪些 commit 不可回收、
     压实做了什么、失败怎么可见。**逐条对得上 `GraphVersionStore.garbageCollect` 的实现**，
     配套演练测试 `GraphMaintenanceRehearsalTest`（TASK-20261012-027）。

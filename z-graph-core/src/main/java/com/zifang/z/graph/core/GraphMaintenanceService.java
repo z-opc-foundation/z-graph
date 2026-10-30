@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 静默吞掉的 GC/快照失败在生产里表现为"磁盘一直涨、备份一直没生成"，最难查。</p>
  *
  * <p><b>可达性口径以 {@link GraphVersionStore#garbageCollect(String...)} 的实现为准</b>，
- * 配套文档见 {@code _doc/002_ops/01_GC可达性与回收规则.md}。本类**不重算**可达集，
+ * 配套文档见 {@code _doc/002_deploy/01-gc-reachability.md}。本类**不重算**可达集，
  * 只如实报告引擎给出的回收数与前后计数。</p>
  */
 public final class GraphMaintenanceService {

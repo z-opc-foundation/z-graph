@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>断言全部按 {@link GraphVersionStore#garbageCollect(String...)} 的**真实行为**写，
  * 不是按想象写：可达集 = keep 分支 head 的「第一父链 ∪ 全父祖先闭包」，
  * 不在可达集里的 commit 被回收，指向不可达 commit 的分支 ref 被剪掉。
- * 口径文档：{@code _doc/002_ops/01_GC可达性与回收规则.md}。</p>
+ * 口径文档：{@code _doc/002_deploy/01-gc-reachability.md}。</p>
  */
 class GraphMaintenanceRehearsalTest {
 

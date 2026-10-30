@@ -840,7 +840,7 @@ public final class GraphControlServer {
      *
      * <p>keep 的语义以 {@code GraphVersionStore.garbageCollect(String...)} 为准：
      * 非空时<b>只有</b>列出的分支受保护，未列出的分支会被剪掉、其历史 commit 会被回收。
-     * 口径文档见 {@code _doc/002_ops/01_GC可达性与回收规则.md}。</p>
+     * 口径文档见 {@code _doc/002_deploy/01-gc-reachability.md}。</p>
      */
     private void handleMaintenanceGc(HttpExchange exchange) throws IOException {
         applyCorsHeaders(exchange);

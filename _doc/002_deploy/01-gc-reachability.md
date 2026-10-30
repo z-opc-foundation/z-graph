@@ -111,4 +111,4 @@ GC 失败时：异常**照抛**（不吞）+ ERROR 日志 + `maintenance.gcFailu
 元数据在 `X-Commit-Id` / `X-Snapshot-Sha256` 响应头）——
 导出的是**该分支 head 的完整视图**（`exportSnapshot` = `GraphDelta.between(空视图, head 视图)`，
 节点/边 id 原样保留），因此回读时 `importSnapshot` 能还原出**同样的 id 与属性**。
-备份链（滚动保留 N 份 + 归档 z-oss）见 z-oss 仓 `_doc/002_ops/01_备份链与滚动保留.md`。
+备份链（滚动保留 N 份 + 归档 z-oss）见 z-oss 仓 `_doc/002_deploy/01_备份链与滚动保留.md`。
