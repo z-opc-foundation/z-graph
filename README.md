@@ -25,7 +25,7 @@ Bolt 4.4 规范；**只采用公开架构与协议资料，不复制上游代码
 | **仓库** | `z-graph`（remote: `github.com/z-opc-foundation/z-graph`，分支 `main`） |
 | **Maven 坐标** | `io.github.yuku123:z-graph`（聚合 POM）+ 5 个 reactor 子坐标 |
 | **当前版本** | `1.0.8`（根 POM 与 5 个子 POM **逐字面写 1.0.8**，本仓没用 `${revision}`；发布形状由 flatten-maven-plugin 1.5.0 `oss` 模式自包含）——v5 引擎这批改动**尚未发版**，计划中的下一版是 `1.1.0`（见「Maven Central」行） |
-| **父项目** | `io.github.yuku123:z-boot-parent:1.1.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘；旧 README 写的 1.0.21 是过期记录） |
+| **父项目** | `io.github.yuku123:z-boot-parent:1.2.0`（`<relativePath/>` 留空，parent 在 repo1 不在磁盘；旧 README 写的 1.0.21 是过期记录） |
 | **Maven Central** | 实测 2026-10-09：`1.0.8` 及更早在 repo1 可读（ranged GET 200）；**`1.1.0` 尚未发布**（repo1 直连 404），发布走 `deploy_maven_center.sh` 并以 `/deployments` 状态为准 |
 | **默认端口** | Bolt `7687` · HTTP 控制面 `8090`（`ZGraphServer` 两个都起）；控制台 dev `5173` / 容器 `3333` / all-in-one `3000` |
 | **运行口径** | Java 8（class-file 52）· Spring Boot 2.7.18（只在 `z-graph-spring-boot-starter`）· Netty 4.1.138.Final |
@@ -134,7 +134,7 @@ legacyId**）；`checkout(<v4旧id>)` / HTTP `?commit=<旧id>` 按 legacyId 反�
 
 ```
 z-graph/
-├── pom.xml                        # 聚合 POM：parent z-boot-parent:1.1.0，6 条自家坐标 DM，flatten 常开
+├── pom.xml                        # 聚合 POM：parent z-boot-parent:1.2.0，6 条自家坐标 DM，flatten 常开
 ├── z-graph-api/                   # 抽象与值类型：GraphStore / Node / Edge / GraphCommit / GraphMergeResult
 │                                  #   / TagSchema / EdgeTypeSchema / Colls（Java 8 没有 Map.of 的替代品）
 ├── z-graph-protocol/              # Bolt 风格帧与值编解码：BoltConstants / BoltFrames / BoltMessageDecoder
@@ -193,8 +193,8 @@ cd z-graph
 mvn clean install -DskipTests
 ```
 
-第三方版本一律由 `z-boot-parent:1.1.0` 供给（第三方地板与兄弟仓权威表均已并入 parent 自身），
-模块 POM 里不该再出现字面版本钉。构建解析不到 `io.github.yuku123:z-boot-parent:1.1.0` 时先确认能连 repo1。
+第三方版本一律由 `z-boot-parent:1.2.0` 供给（第三方地板与兄弟仓权威表均已并入 parent 自身），
+模块 POM 里不该再出现字面版本钉。构建解析不到 `io.github.yuku123:z-boot-parent:1.2.0` 时先确认能连 repo1。
 注意 flatten 绑在 `process-resources`、`flatten.clean` 绑在 `clean`，所以判定"跑过"要以带 `clean` 的构建为准。
 
 ### 起一个进程（Bolt + HTTP 控制面同时起）

@@ -1,6 +1,7 @@
 import {defineConfig} from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
+import {safeEmptyOutDir} from '../../build-tools/safe-vite-plugin.mjs'
 
 // LOCAL_SIBLINGS=1 时把 @yuku123/z-graph-component 别名到 ../z-graph-component/src，
 // 避免 npm install + file: 协议（lead §8.5 不进 git）。本机 dev 必备。
@@ -9,7 +10,7 @@ const LOCAL_SIBLINGS = process.env.LOCAL_SIBLINGS === '1'
 const componentSrc = path.resolve(__dirname, '../z-graph-component/src')
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [safeEmptyOutDir(), react()],
   resolve: {
     dedupe: ['react', 'react-dom', 'react-router-dom', 'antd', '@ant-design/icons', 'axios'],
     alias: LOCAL_SIBLINGS
