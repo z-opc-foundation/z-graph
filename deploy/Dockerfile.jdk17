@@ -1,0 +1,8 @@
+# z-lc-admin jdk17 基座镜像（Java17/SB3 火车：老 zopc/z-lc:local 基底是 jdk8 跑不了 class 61）
+# 构建口径同 z-agent/deploy/Dockerfile.jdk17：temurin 17-jre + locale UTF-8
+FROM eclipse-temurin:17-jre-jammy
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+ENV JAVA_OPTS="-Xms512m -Xmx1g"
+COPY z-lc-admin/target/z-lc-admin-*.jar /app/app.jar
+EXPOSE 8080
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
