@@ -95,7 +95,7 @@ spec:
     spec:
       containers:
         - name: z-graph-server
-          image: ghcr.io/z-opc-foundation/z-graph-server:latest
+          image: z-graph-server:20261111-c3b2725
           imagePullPolicy: IfNotPresent
           ports:
             - name: bolt
