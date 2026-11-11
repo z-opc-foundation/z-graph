@@ -59,19 +59,8 @@ data:
 
 ---
 # ===== 后端无状态服务 + 反向 Deployment =====
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: z-graph-data
-  namespace: z-graph
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-
----
+# 数据不再走 PVC（2026-11-11 持久化规范）：真源目录 = 节点 zifang002 的
+# /home/zifang/data/z-graph，由下方 Deployment 的 hostPath + nodeSelector 成对钉住。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -93,6 +82,9 @@ spec:
         app.kubernetes.io/name: z-graph-server
         app.kubernetes.io/part-of: z-graph
     spec:
+      # ⚠ 与 hostPath 成对钉节点（「注意分布式」）：数据在节点本地盘 ⇒ pod 漂到别的节点即丢数据。
+      nodeSelector:
+        kubernetes.io/hostname: zifang002
       containers:
         - name: z-graph-server
           image: z-graph-server:20261111-c3b2725
@@ -139,9 +131,12 @@ spec:
             - name: data
               mountPath: /var/lib/z-graph
       volumes:
+        # 图仓库真源 = zifang002:/home/zifang/data/z-graph（2026-11-11 自 PVC 迁入）。
+        # ⚠ 节点侧目录属主须为容器运行 uid（10001），否则 WAL/refs 写入 Permission denied。
         - name: data
-          persistentVolumeClaim:
-            claimName: z-graph-data
+          hostPath:
+            path: /home/zifang/data/z-graph
+            type: Directory
 
 ---
 apiVersion: v1
