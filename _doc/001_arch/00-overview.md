@@ -16,7 +16,7 @@ commit id 是整个 commit object 规范化字节的 **SHA-256 截 40 hex**（�
 
 ```
 z-graph/
-├── pom.xml                        # 聚合 POM：parent z-boot-parent:1.1.0，6 条自家坐标 DM，flatten 常开
+├── pom.xml                        # 聚合 POM：parent z-boot-parent:1.2.4，6 条自家坐标 DM，flatten 常开
 ├── z-graph-api/                   # 抽象与值类型（8 个类）
 │                                  #   GraphStore / Node / Edge / GraphCommit / GraphMergeResult
 │                                  #   / TagSchema / EdgeTypeSchema / Colls（Java 8 没有 Map.of 的替代品）
@@ -156,7 +156,7 @@ Maven reactor 只有 **5 个模块**；`z-graph-console` 是独立 npm 工程（
 
 ## 4. 对外集成 / 上下游
 
-**上游依赖：** `z-boot-parent:1.1.0`（`relativePath` 留空）→ 第三方地板（Netty 4.1.138.Final、log4j-api 2.25.4、slf4j-simple 2.0.13、junit 5.10.2）。根 POM 按坐标写**直接**条目顶住地板下压的有意版本分歧：`slf4j-api` 2.0.13、`junit` 5.10.2 / `junit-platform` 1.10.2、`objenesis` 3.2，根 POM 注释里逐条写了原因。
+**上游依赖：** `z-boot-parent:1.2.4`（`relativePath` 留空）→ 第三方地板（Netty 4.1.138.Final、log4j-api 2.25.4、slf4j-simple 2.0.13、junit 5.10.2）。根 POM 按坐标写**直接**条目顶住地板下压的有意版本分歧：`slf4j-api` 2.0.13、`junit` 5.10.2 / `junit-platform` 1.10.2、`objenesis` 3.2，根 POM 注释里逐条写了原因。
 
 **对外边界：**
 
