@@ -1,6 +1,9 @@
 package com.zifang.z.graph.starter.host;
 
 import com.zifang.util.json.JsonUtil;
+import com.zifang.z.meta.api.annotation.BizApi;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -8,14 +11,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
 
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-import java.nio.charset.StandardCharsets;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -90,6 +91,7 @@ public class GraphProxyController {
      * 后面 {@code /api/graph/meta/schema} 的空数组才是"真·空"而不是"连错了进程"。
      */
     @GetMapping(PREFIX + "/__instance")
+    @BizApi(summary = "自省接口: 这一路到底连的是谁。孵化期排障必需 —— 只有先确认\"应答来自本 JVM 的哪个端口\"", description = "自省接口: 这一路到底连的是谁。孵化期排障必需 —— 只有先确认\"应答来自本 JVM 的哪个端口\", 后面 /api/graph/meta/schema 的空数组才是\"真·空\"而不是\"连错了进程\"。", tags = { "z-graph" })
     public void instance(HttpServletResponse resp) throws Exception {
         GraphEmbeddedServerConfig cfg = embeddedProvider.getIfAvailable();
         int bound = cfg == null ? 0 : cfg.getBoundPort();
@@ -118,6 +120,7 @@ public class GraphProxyController {
 
     @RequestMapping(path = PREFIX + "/**",
             method = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE})
+    @BizApi(summary = "proxy", description = "", tags = { "z-graph" })
     public void proxy(HttpServletRequest req, HttpServletResponse resp) throws Exception {
         String sub = subPath(req.getRequestURI());
         if (sub == null) {
@@ -257,3 +260,6 @@ public class GraphProxyController {
         resp.getOutputStream().flush();
     }
 }
+
+
+

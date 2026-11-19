@@ -72,6 +72,7 @@
     </modules>
 
     <properties>
+        <z-meta.version>1.0.2</z-meta.version>
         <!-- 只留**父链没有、或本仓面值与父链刻意不同**的格。删掉的每一格都连带删掉了它在 6 个 pom 里
              的全部引用（子模块的 <version> 一并删）—— 引用没删干净会在子模块 pom 上炸成
              "'dependencies.dependency.version' … must be a valid version"。
@@ -211,6 +212,11 @@
                 <groupId>org.objenesis</groupId>
                 <artifactId>objenesis</artifactId>
                 <version>3.2</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-meta-api</artifactId>
+                <version>${z-meta.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
