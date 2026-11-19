@@ -52,7 +52,7 @@
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-ext-spring-boot-starter</artifactId>
-            <version>1.2.1</version>
+            <version>1.2.2</version>
         </dependency>
         <!-- 四件的 version 都不写：z-graph-bolt-server 由仓根 DM 钉 ${project.version}；
              slf4j-api 由仓根 DM 的**直接**条目压住本仓的 2.0.13（地板那侧是 spring-boot 的 1.7.36，
