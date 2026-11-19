@@ -52,7 +52,7 @@
         <dependency>
             <groupId>io.github.yuku123</groupId>
             <artifactId>z-ext-core</artifactId>
-            <version>1.2.2</version>
+            <version>1.2.3</version>
         </dependency>
         <!-- 自家坐标与下面三件一律不写 version：仓根 DM 把 z-graph* 钉在 ${project.version}
              （继承来的 DM 会改写传递版本，fleet 那一格是 repo1 的发布件，所以自家这一格必须由
