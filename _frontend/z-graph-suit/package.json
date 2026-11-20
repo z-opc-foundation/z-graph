@@ -26,5 +26,9 @@
   },
   "overrides": {
     "follow-redirects": "^1.16.2"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "fsevents@2.3.3": true
   }
 }
